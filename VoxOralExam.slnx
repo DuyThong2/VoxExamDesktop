@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="VoxOralExam.Core/VoxOralExam.Core.csproj" />
+  <Project Path="VoxOralExam.DesktopApp/VoxOralExam.DesktopApp.csproj" />
+</Solution>

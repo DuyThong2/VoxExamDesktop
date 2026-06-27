@@ -1,0 +1,67 @@
+<UserControl x:Class="VoxOralExam.DesktopApp.Controls.AvatarVideoHost"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Name="Root">
+    <UserControl.Resources>
+        <Storyboard x:Key="RippleStoryboard" RepeatBehavior="Forever">
+            <DoubleAnimation Storyboard.TargetName="Ripple1Scale" Storyboard.TargetProperty="ScaleX"
+                              From="0.6" To="1.9" Duration="0:0:1.8" BeginTime="0:0:0" />
+            <DoubleAnimation Storyboard.TargetName="Ripple1Scale" Storyboard.TargetProperty="ScaleY"
+                              From="0.6" To="1.9" Duration="0:0:1.8" BeginTime="0:0:0" />
+            <DoubleAnimation Storyboard.TargetName="Ripple1" Storyboard.TargetProperty="Opacity"
+                              From="0.7" To="0" Duration="0:0:1.8" BeginTime="0:0:0" />
+
+            <DoubleAnimation Storyboard.TargetName="Ripple2Scale" Storyboard.TargetProperty="ScaleX"
+                              From="0.6" To="1.9" Duration="0:0:1.8" BeginTime="0:0:0.6" />
+            <DoubleAnimation Storyboard.TargetName="Ripple2Scale" Storyboard.TargetProperty="ScaleY"
+                              From="0.6" To="1.9" Duration="0:0:1.8" BeginTime="0:0:0.6" />
+            <DoubleAnimation Storyboard.TargetName="Ripple2" Storyboard.TargetProperty="Opacity"
+                              From="0.7" To="0" Duration="0:0:1.8" BeginTime="0:0:0.6" />
+
+            <DoubleAnimation Storyboard.TargetName="Ripple3Scale" Storyboard.TargetProperty="ScaleX"
+                              From="0.6" To="1.9" Duration="0:0:1.8" BeginTime="0:0:1.2" />
+            <DoubleAnimation Storyboard.TargetName="Ripple3Scale" Storyboard.TargetProperty="ScaleY"
+                              From="0.6" To="1.9" Duration="0:0:1.8" BeginTime="0:0:1.2" />
+            <DoubleAnimation Storyboard.TargetName="Ripple3" Storyboard.TargetProperty="Opacity"
+                              From="0.7" To="0" Duration="0:0:1.8" BeginTime="0:0:1.2" />
+        </Storyboard>
+    </UserControl.Resources>
+
+    <Grid Background="#0F172A">
+        <Image Source="{Binding VideoFrame, ElementName=Root}"
+               Stretch="Uniform"
+               RenderOptions.BitmapScalingMode="LowQuality" />
+
+        <!-- Audio-only avatar placeholder: covers the (currently always-blank) video feed with an
+             icon + speaking-ripple indicator. Sits on top of the Image above on purpose, so a real
+             hosted-avatar video stream can be wired back in later without touching this layer. -->
+        <Grid Background="#0F172A">
+            <Ellipse x:Name="Ripple1" Width="120" Height="120" Stroke="#38BDF8" StrokeThickness="2"
+                     Opacity="0" RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform>
+                    <ScaleTransform x:Name="Ripple1Scale" ScaleX="1" ScaleY="1" />
+                </Ellipse.RenderTransform>
+            </Ellipse>
+            <Ellipse x:Name="Ripple2" Width="120" Height="120" Stroke="#38BDF8" StrokeThickness="2"
+                     Opacity="0" RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform>
+                    <ScaleTransform x:Name="Ripple2Scale" ScaleX="1" ScaleY="1" />
+                </Ellipse.RenderTransform>
+            </Ellipse>
+            <Ellipse x:Name="Ripple3" Width="120" Height="120" Stroke="#38BDF8" StrokeThickness="2"
+                     Opacity="0" RenderTransformOrigin="0.5,0.5">
+                <Ellipse.RenderTransform>
+                    <ScaleTransform x:Name="Ripple3Scale" ScaleX="1" ScaleY="1" />
+                </Ellipse.RenderTransform>
+            </Ellipse>
+
+            <Ellipse Width="96" Height="96" Fill="#1E293B" Stroke="#38BDF8" StrokeThickness="2" />
+            <TextBlock Text="&#xE77B;" FontFamily="Segoe MDL2 Assets" FontSize="40"
+                       Foreground="#38BDF8" HorizontalAlignment="Center" VerticalAlignment="Center"
+                       Margin="0,-4,0,0" />
+
+            <TextBlock Text="Giam khao AI" Foreground="#64748B" FontSize="12"
+                       HorizontalAlignment="Center" VerticalAlignment="Bottom" Margin="0,0,0,16" />
+        </Grid>
+    </Grid>
+</UserControl>
