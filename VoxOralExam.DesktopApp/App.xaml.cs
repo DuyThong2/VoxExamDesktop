@@ -41,17 +41,38 @@ public partial class App : Application
 
         try
         {
-            var loginView = _services.GetRequiredService<Views.LoginView>();
-            LocalFileLogger.Info("app", "login_view_resolved");
-            loginView.Show();
-            LocalFileLogger.Info("app", "login_view_shown");
+            var navigator = _services.GetRequiredService<IExamEntryNavigator>();
+            navigator.ExamStartRequested += OnExamStartRequested;
+            navigator.Reset(ExamEntryStage.Login);
+
+            var shell = _services.GetRequiredService<Views.ShellWindow>();
+            LocalFileLogger.Info("app", "shell_resolved");
+            shell.Show();
+            LocalFileLogger.Info("app", "shell_shown");
             LocalFileLogger.Info("app", "startup_complete");
         }
         catch (Exception ex)
         {
-            LocalFileLogger.Error("app", "startup_show_login_failed", ex);
+            LocalFileLogger.Error("app", "startup_show_shell_failed", ex);
             throw;
         }
+    }
+
+    private void OnExamStartRequested(object? sender, EventArgs e)
+    {
+        // The entry flow finished (device pre-flight passed) and asked to start the exam. Hand off to
+        // the exam surface, then close the shell so ShutdownMode=OnLastWindowClose still exits the app
+        // when the exam window closes.
+        // TODO(§A): fold InExam into the shell (single lockdown-controlled window) instead of opening
+        // a separate ExamWindow here.
+        LocalFileLogger.Info("app", "launch_exam_window");
+        var examWindow = _services.GetRequiredService<Views.ExamWindow>();
+        examWindow.Show();
+
+        Application.Current.Windows
+            .OfType<Views.ShellWindow>()
+            .FirstOrDefault()
+            ?.Close();
     }
 
     protected override void OnExit(ExitEventArgs e)
@@ -127,10 +148,16 @@ public partial class App : Application
         if (settings.UseMockData)
         {
             services.AddSingleton<IExamApiService, MockExamApiService>();
+            services.AddSingleton<IExamEntryApiService, MockExamEntryApiService>();
         }
         else
         {
             services.AddSingleton<IExamApiService, ExamApiService>();
+            services.AddHttpClient<IExamEntryApiService, ExamEntryApiService>(client =>
+            {
+                client.BaseAddress = new Uri(settings.JavaBaseUrl);
+                client.Timeout = TimeSpan.FromSeconds(30);
+            });
         }
 
         services.AddHttpClient<IAuthApiService, AuthApiService>(client =>
@@ -149,12 +176,17 @@ public partial class App : Application
         services.AddSingleton<RealtimeExamFlowService>();
         services.AddSingleton<IExamFlowService>(sp => sp.GetRequiredService<RealtimeExamFlowService>());
 
+        // Single owner of entry-stage transitions; the shell binds to it and view models drive it.
+        services.AddSingleton<IExamEntryNavigator, ExamEntryNavigator>();
+
         services.AddTransient<LoginViewModel>();
         services.AddTransient<MainViewModel>();
+        services.AddTransient<OtpEntryViewModel>();
+        services.AddTransient<SystemCheckViewModel>();
+        services.AddTransient<DevicePreflightViewModel>();
         services.AddTransient<ExamViewModel>();
 
-        services.AddTransient<MainWindow>();
-        services.AddTransient<Views.LoginView>();
+        services.AddTransient<Views.ShellWindow>();
         services.AddTransient<Views.ExamWindow>();
     }
 

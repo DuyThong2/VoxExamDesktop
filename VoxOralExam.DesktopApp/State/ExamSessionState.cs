@@ -7,6 +7,17 @@ public class ExamSessionState
     public string SessionId { get; set; } = string.Empty;
     public int SelectedAudioInputDeviceIndex { get; set; }
     public string SelectedAudioInputDeviceName { get; set; } = string.Empty;
+
+    // The exam the student picked in ExamList, carried across the entry stages
+    // (OtpEntry -> SystemCheck -> DevicePreflight -> InExam) since the navigator resolves a fresh
+    // view model per stage and cannot pass constructor args. Set by MainViewModel.StartExamAsync.
+    public Exam? SelectedExam { get; set; }
+
+    // Set by OtpEntryViewModel after a successful OTP verification. Holds the server attemptId, stream
+    // JWT, etc. TODO(§C): drive the flow off this (esp. EntryTicket.AttemptId) instead of the
+    // client-minted ExamAttemptId below.
+    public ExamEntryTicket? EntryTicket { get; set; }
+
     public Guid ExamId { get; set; }
     public Guid ExamPaperId { get; set; }
     public Guid ExamAttemptId { get; set; }

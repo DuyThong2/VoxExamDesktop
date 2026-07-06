@@ -21,6 +21,13 @@ public class AppSettings
     public int CameraFps { get; set; } = 30;
     public string LoginPlatform { get; set; } = "DESKTOP";
 
+    // Length of the OTP the proctor's screen shows and the student types. TODO(§C): the real value may
+    // come from the server (per-exam) once the OTP endpoint exists; 6 is the common default.
+    public int OtpLength { get; set; } = 6;
+
+    // How often the proctor's OTP rotates, in seconds -- drives the countdown on the OTP screen.
+    public int OtpRefreshSeconds { get; set; } = 60;
+
     // Dev-only: true serves exam data from MockExamDataFactory; false uses ExamApiService (real
     // Java backend). Defaults true so the app runs before Java's exam endpoints exist.
     public bool UseMockData { get; set; } = true;

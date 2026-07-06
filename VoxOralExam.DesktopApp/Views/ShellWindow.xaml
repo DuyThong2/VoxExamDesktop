@@ -1,0 +1,15 @@
+<Window x:Class="VoxOralExam.DesktopApp.Views.ShellWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Vox Oral Exam"
+        Height="760" Width="1040"
+        MinHeight="560" MinWidth="820"
+        WindowStartupLocation="CenterScreen">
+
+    <!-- Single host window for the whole entry flow. The ContentControl shows the current stage's
+         view model; App-level DataTemplates (App.xaml) map each stage VM to its View, so changing
+         stage swaps content here instead of opening a new window.
+         TODO(§A): fold InExam + Submitted into this shell too, so the exam runs in one
+         lockdown-controlled window. -->
+    <ContentControl Content="{Binding CurrentViewModel}" />
+</Window>

@@ -1,25 +1,15 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Data;
-using System.Windows.Documents;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Shapes;
 
-namespace VoxOralExam.DesktopApp.Views
+namespace VoxOralExam.DesktopApp.Views;
+
+/// <summary>
+/// Interaction logic for SystemCheckView.xaml. Hosted inside ShellWindow via a DataTemplate; its
+/// DataContext (SystemCheckViewModel) is supplied by the navigator, so the constructor is parameterless.
+/// </summary>
+public partial class SystemCheckView : UserControl
 {
-    /// <summary>
-    /// Interaction logic for SystemCheckView.xaml
-    /// </summary>
-    public partial class SystemCheckView : Window
+    public SystemCheckView()
     {
-        public SystemCheckView()
-        {
-            InitializeComponent();
-        }
+        InitializeComponent();
     }
 }
