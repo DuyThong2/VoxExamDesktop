@@ -124,6 +124,15 @@ public partial class App : Application
         services.AddSingleton<IDeviceContextProvider, DeviceContextProvider>();
         services.AddSingleton<MockExamDataFactory>();
 
+        if (settings.UseMockData)
+        {
+            services.AddSingleton<IExamApiService, MockExamApiService>();
+        }
+        else
+        {
+            services.AddSingleton<IExamApiService, ExamApiService>();
+        }
+
         services.AddHttpClient<IAuthApiService, AuthApiService>(client =>
         {
             client.BaseAddress = new Uri(settings.JavaBaseUrl);
@@ -131,6 +140,7 @@ public partial class App : Application
         });
 
         services.AddSingleton<IProctoringService>(sp => sp.GetRequiredService<ScreenProctoringService>());
+        services.AddSingleton<ITurnUploadUrlProvider, TurnUploadUrlProvider>();
         services.AddSingleton<TurnAudioUploader>();
         services.AddSingleton<TurnArchiveClient>();
         services.AddSingleton<RealtimeSessionClient>();

@@ -1,29 +1,26 @@
-using Amazon;
-using Amazon.Runtime;
-using Amazon.S3;
-using Amazon.S3.Model;
 using System.IO;
+using System.Net.Http;
+using System.Net.Http.Headers;
 using NAudio.Wave;
-using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.Services;
 
 /// <summary>
-/// Extracted from the former TavusFullPipelineExamFlowService: WAV-encodes a turn's raw PCM
-/// buffer and uploads it to S3 using the same static-credential IAmazonS3 client and the same
-/// object key shape as before ({attemptAnswerId:D}/turn-{turnOrder}.wav). Kept byte-identical
-/// on the wire so later phases (and the existing /turns/archive contract) don't notice the
-/// refactor.
+/// WAV-encodes a turn's raw PCM buffer and uploads it via a server-issued presigned PUT URL.
+/// The client no longer holds AWS credentials or talks to S3 directly (that static-credential model
+/// was a security hole -- see docs/wpf-redesign-plan.md §D): it asks ITurnUploadUrlProvider (server)
+/// for a short-lived upload target scoped to (attemptAnswerId, turnOrder), PUTs the WAV there, and
+/// returns the server-provided audioRef for the downstream /turns/archive call.
 /// </summary>
 public class TurnAudioUploader
 {
-    private readonly AppSettings _settings;
-    private readonly IAmazonS3 _s3Client;
+    private readonly ITurnUploadUrlProvider _uploadUrlProvider;
+    private readonly IHttpClientFactory _httpClientFactory;
 
-    public TurnAudioUploader(AppSettings settings)
+    public TurnAudioUploader(ITurnUploadUrlProvider uploadUrlProvider, IHttpClientFactory httpClientFactory)
     {
-        _settings = settings;
-        _s3Client = CreateS3Client(settings);
+        _uploadUrlProvider = uploadUrlProvider;
+        _httpClientFactory = httpClientFactory;
     }
 
     public byte[] EncodeWav(byte[] pcm)
@@ -40,57 +37,29 @@ public class TurnAudioUploader
 
     public async Task<string> UploadTurnAudioAsync(byte[] wav, Guid attemptAnswerId, int turnOrder, CancellationToken ct)
     {
-        var objectKey = $"{attemptAnswerId:D}/turn-{turnOrder}.wav";
         LocalFileLogger.Info("s3", "upload_turn_begin", new
         {
             attemptAnswerId,
             turnOrder,
-            objectKey,
-            wavBytes = wav.Length,
-            bucket = _settings.S3BucketName,
-            region = _settings.S3Region
+            wavBytes = wav.Length
         });
 
-        using var stream = new MemoryStream(wav, writable: false);
-        var request = new PutObjectRequest
-        {
-            BucketName = _settings.S3BucketName,
-            Key = objectKey,
-            InputStream = stream,
-            ContentType = "audio/wav",
-            AutoCloseStream = false
-        };
+        var target = await _uploadUrlProvider.GetUploadTargetAsync(attemptAnswerId, turnOrder, ct);
 
-        await _s3Client.PutObjectAsync(request, ct);
-        var url = BuildS3ObjectUrl(_settings.S3BucketName, _settings.S3Region, objectKey);
+        using var content = new ByteArrayContent(wav);
+        content.Headers.ContentType = new MediaTypeHeaderValue("audio/wav");
+
+        var client = _httpClientFactory.CreateClient();
+        using var request = new HttpRequestMessage(HttpMethod.Put, target.UploadUrl) { Content = content };
+        using var response = await client.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+
         LocalFileLogger.Info("s3", "upload_turn_complete", new
         {
             attemptAnswerId,
             turnOrder,
-            objectKey,
-            audioUrl = url
+            audioUrl = target.AudioRef
         });
-        return url;
-    }
-
-    private static IAmazonS3 CreateS3Client(AppSettings settings)
-    {
-        if (string.IsNullOrWhiteSpace(settings.AwsAccessKeyId) || string.IsNullOrWhiteSpace(settings.AwsSecretAccessKey))
-        {
-            throw new InvalidOperationException("AWS credentials are missing. Set AwsAccessKeyId and AwsSecretAccessKey in appsettings.json.");
-        }
-
-        AWSCredentials credentials = string.IsNullOrWhiteSpace(settings.AwsSessionToken)
-            ? new BasicAWSCredentials(settings.AwsAccessKeyId, settings.AwsSecretAccessKey)
-            : new SessionAWSCredentials(settings.AwsAccessKeyId, settings.AwsSecretAccessKey, settings.AwsSessionToken);
-
-        var region = RegionEndpoint.GetBySystemName(settings.S3Region);
-        return new AmazonS3Client(credentials, region);
-    }
-
-    private static string BuildS3ObjectUrl(string bucketName, string region, string objectKey)
-    {
-        var escapedKey = string.Join("/", objectKey.Split('/').Select(Uri.EscapeDataString));
-        return $"https://{bucketName}.s3.{region}.amazonaws.com/{escapedKey}";
+        return target.AudioRef;
     }
 }

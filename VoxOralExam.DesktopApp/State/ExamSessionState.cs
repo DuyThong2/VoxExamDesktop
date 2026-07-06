@@ -37,22 +37,25 @@ public class ExamSessionState
         CurrentUser = null;
     }
 
-    public void LoadMockExam(MockExamPaper mockExamPaper)
+    // NOTE: ExamAttemptId is still minted client-side here. That is a known gap fixed in §C of
+    // docs/wpf-redesign-plan.md (server-issued attempt id via the OTP entry ticket); left as-is for
+    // this security/de-mock pass so behavior does not change.
+    public void LoadExamPaper(ExamPaper examPaper)
     {
-        ExamId = mockExamPaper.ExamId;
-        ExamPaperId = mockExamPaper.ExamPaperId;
+        ExamId = examPaper.ExamId;
+        ExamPaperId = examPaper.ExamPaperId;
         ExamAttemptId = Guid.NewGuid();
         SessionId = ExamAttemptId.ToString();
-        ExamTitle = mockExamPaper.Title;
-        DurationMinutes = mockExamPaper.DurationMinutes;
+        ExamTitle = examPaper.Title;
+        DurationMinutes = examPaper.DurationMinutes;
         QuestionIndex = 0;
-        Questions = mockExamPaper.PaperQuestions
+        Questions = examPaper.PaperQuestions
             .OrderBy(item => item.OrderIndex)
             .Select(item => item.Question)
             .ToList();
-        AttemptAnswerIdsByQuestionId = mockExamPaper.PaperQuestions
+        AttemptAnswerIdsByQuestionId = examPaper.PaperQuestions
             .ToDictionary(item => item.Question.Id, _ => Guid.NewGuid());
-        EvaluationGuidesByQuestionId = mockExamPaper.PaperQuestions
+        EvaluationGuidesByQuestionId = examPaper.PaperQuestions
             .Where(item => item.EvaluationGuide is not null)
             .ToDictionary(item => item.Question.Id, item => item.EvaluationGuide!);
     }

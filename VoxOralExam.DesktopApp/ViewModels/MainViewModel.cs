@@ -12,7 +12,7 @@ public class MainViewModel : BaseViewModel
 {
     private readonly IServiceProvider _serviceProvider;
     private readonly ExamSessionState _sessionState;
-    private readonly MockExamDataFactory _mockExamDataFactory;
+    private readonly IExamApiService _examApi;
 
     private ObservableCollection<Exam> _exams = new();
     private bool _isLoading;
@@ -39,12 +39,12 @@ public class MainViewModel : BaseViewModel
     public ICommand StartExamCommand { get; }
     public ICommand RefreshCommand { get; }
 
-    public MainViewModel(IServiceProvider serviceProvider, ExamSessionState sessionState, MockExamDataFactory mockExamDataFactory)
+    public MainViewModel(IServiceProvider serviceProvider, ExamSessionState sessionState, IExamApiService examApi)
     {
         _serviceProvider = serviceProvider;
         _sessionState = sessionState;
-        _mockExamDataFactory = mockExamDataFactory;
-        StartExamCommand = new RelayCommand<Exam>(StartExam);
+        _examApi = examApi;
+        StartExamCommand = new RelayCommand<Exam>(exam => _ = StartExamAsync(exam));
         RefreshCommand = new RelayCommand(async () => await LoadExamsAsync());
         _ = LoadExamsAsync();
     }
@@ -56,8 +56,8 @@ public class MainViewModel : BaseViewModel
 
         try
         {
-            await Task.Delay(200);
-            Exams = new ObservableCollection<Exam>(_mockExamDataFactory.GetAvailableExams());
+            var exams = await _examApi.GetAvailableExamsAsync();
+            Exams = new ObservableCollection<Exam>(exams);
         }
         catch (Exception ex)
         {
@@ -69,14 +69,23 @@ public class MainViewModel : BaseViewModel
         }
     }
 
-    private void StartExam(Exam? exam)
+    private async Task StartExamAsync(Exam? exam)
     {
         if (exam == null || !_sessionState.IsAuthenticated)
         {
             return;
         }
 
-        _sessionState.LoadMockExam(_mockExamDataFactory.CreateMockPaperForExam(exam.Id));
+        try
+        {
+            var paper = await _examApi.GetExamPaperAsync(exam.Id);
+            _sessionState.LoadExamPaper(paper);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Khong the tai de thi: {ex.Message}";
+            return;
+        }
 
         var examWindow = _serviceProvider.GetRequiredService<Views.ExamWindow>();
         examWindow.Show();
