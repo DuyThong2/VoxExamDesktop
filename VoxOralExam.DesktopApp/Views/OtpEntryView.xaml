@@ -1,0 +1,78 @@
+<UserControl x:Class="VoxOralExam.DesktopApp.Views.OtpEntryView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+             xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             mc:Ignorable="d"
+             d:DesignHeight="620" d:DesignWidth="900">
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+    </UserControl.Resources>
+
+    <Grid Background="#F5F5F5">
+        <Border Background="White" CornerRadius="12" Padding="32"
+                HorizontalAlignment="Center" VerticalAlignment="Center" MinWidth="440">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="20" ShadowDepth="2" Opacity="0.1" />
+            </Border.Effect>
+            <StackPanel>
+                <TextBlock Text="Nhập mã OTP" FontSize="22" FontWeight="Bold" />
+                <TextBlock Text="{Binding ExamTitle}" Foreground="Gray" Margin="0,4,0,4" />
+                <TextBlock Text="Nhập mã hiển thị trên màn hình của giám thị coi thi."
+                           Foreground="#475569" FontSize="13" TextWrapping="Wrap" Margin="0,0,0,20" />
+
+                <TextBox x:Name="OtpBox"
+                         Text="{Binding Otp, UpdateSourceTrigger=PropertyChanged}"
+                         MaxLength="{Binding OtpLength}"
+                         FontSize="30" FontWeight="Bold"
+                         Padding="10,10" HorizontalContentAlignment="Center"
+                         BorderBrush="#CBD5E1" BorderThickness="1">
+                    <TextBox.Style>
+                        <Style TargetType="TextBox">
+                            <Setter Property="IsEnabled" Value="True" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsVerifying}" Value="True">
+                                    <Setter Property="IsEnabled" Value="False" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBox.Style>
+                </TextBox>
+
+                <!-- Rotation countdown -->
+                <Grid Margin="0,14,0,0">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <ProgressBar Grid.Column="0" Height="6" VerticalAlignment="Center"
+                                 Minimum="0" Maximum="{Binding RefreshSeconds}"
+                                 Value="{Binding SecondsUntilRefresh, Mode=OneWay}"
+                                 Foreground="#2563EB" />
+                    <TextBlock Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center"
+                               FontSize="12" Foreground="#475569"
+                               Text="{Binding SecondsUntilRefresh, StringFormat='Mã đổi sau {0}s'}" />
+                </Grid>
+
+                <!-- Verifying state -->
+                <StackPanel Orientation="Horizontal" Margin="0,14,0,0"
+                            Visibility="{Binding IsVerifying, Converter={StaticResource BoolToVisibility}}">
+                    <ProgressBar IsIndeterminate="True" Width="120" Height="4" />
+                    <TextBlock Text="Đang xác thực..." Foreground="Gray" FontSize="12" Margin="10,0,0,0" />
+                </StackPanel>
+
+                <!-- Error -->
+                <TextBlock Text="{Binding ErrorMessage}" Foreground="#DC2626" FontSize="13"
+                           TextWrapping="Wrap" Margin="0,12,0,0"
+                           Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}" />
+
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,24,0,0">
+                    <Button Content="Quay lại" Command="{Binding BackCommand}"
+                            Padding="16,8" Margin="0,0,10,0" />
+                    <Button Content="Xác nhận" Command="{Binding VerifyCommand}"
+                            Padding="20,8" Background="#2563EB" Foreground="White" BorderThickness="0" />
+                </StackPanel>
+            </StackPanel>
+        </Border>
+    </Grid>
+</UserControl>

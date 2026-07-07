@@ -7,6 +7,17 @@ public class ExamSessionState
     public string SessionId { get; set; } = string.Empty;
     public int SelectedAudioInputDeviceIndex { get; set; }
     public string SelectedAudioInputDeviceName { get; set; } = string.Empty;
+
+    // The exam the student picked in ExamList, carried across the entry stages
+    // (OtpEntry -> SystemCheck -> DevicePreflight -> InExam) since the navigator resolves a fresh
+    // view model per stage and cannot pass constructor args. Set by MainViewModel.StartExamAsync.
+    public Exam? SelectedExam { get; set; }
+
+    // Set by OtpEntryViewModel after a successful OTP verification. Holds the server attemptId, stream
+    // JWT, etc. TODO(§C): drive the flow off this (esp. EntryTicket.AttemptId) instead of the
+    // client-minted ExamAttemptId below.
+    public ExamEntryTicket? EntryTicket { get; set; }
+
     public Guid ExamId { get; set; }
     public Guid ExamPaperId { get; set; }
     public Guid ExamAttemptId { get; set; }
@@ -37,22 +48,25 @@ public class ExamSessionState
         CurrentUser = null;
     }
 
-    public void LoadMockExam(MockExamPaper mockExamPaper)
+    // NOTE: ExamAttemptId is still minted client-side here. That is a known gap fixed in §C of
+    // docs/wpf-redesign-plan.md (server-issued attempt id via the OTP entry ticket); left as-is for
+    // this security/de-mock pass so behavior does not change.
+    public void LoadExamPaper(ExamPaper examPaper)
     {
-        ExamId = mockExamPaper.ExamId;
-        ExamPaperId = mockExamPaper.ExamPaperId;
+        ExamId = examPaper.ExamId;
+        ExamPaperId = examPaper.ExamPaperId;
         ExamAttemptId = Guid.NewGuid();
         SessionId = ExamAttemptId.ToString();
-        ExamTitle = mockExamPaper.Title;
-        DurationMinutes = mockExamPaper.DurationMinutes;
+        ExamTitle = examPaper.Title;
+        DurationMinutes = examPaper.DurationMinutes;
         QuestionIndex = 0;
-        Questions = mockExamPaper.PaperQuestions
+        Questions = examPaper.PaperQuestions
             .OrderBy(item => item.OrderIndex)
             .Select(item => item.Question)
             .ToList();
-        AttemptAnswerIdsByQuestionId = mockExamPaper.PaperQuestions
+        AttemptAnswerIdsByQuestionId = examPaper.PaperQuestions
             .ToDictionary(item => item.Question.Id, _ => Guid.NewGuid());
-        EvaluationGuidesByQuestionId = mockExamPaper.PaperQuestions
+        EvaluationGuidesByQuestionId = examPaper.PaperQuestions
             .Where(item => item.EvaluationGuide is not null)
             .ToDictionary(item => item.Question.Id, item => item.EvaluationGuide!);
     }

@@ -1,7 +1,5 @@
 using System.Collections.ObjectModel;
-using System.Windows;
 using System.Windows.Input;
-using Microsoft.Extensions.DependencyInjection;
 using VoxOralExam.DesktopApp.Models;
 using VoxOralExam.DesktopApp.Services;
 using VoxOralExam.DesktopApp.State;
@@ -10,9 +8,9 @@ namespace VoxOralExam.DesktopApp.ViewModels;
 
 public class MainViewModel : BaseViewModel
 {
-    private readonly IServiceProvider _serviceProvider;
+    private readonly IExamEntryNavigator _navigator;
     private readonly ExamSessionState _sessionState;
-    private readonly MockExamDataFactory _mockExamDataFactory;
+    private readonly IExamApiService _examApi;
 
     private ObservableCollection<Exam> _exams = new();
     private bool _isLoading;
@@ -39,12 +37,12 @@ public class MainViewModel : BaseViewModel
     public ICommand StartExamCommand { get; }
     public ICommand RefreshCommand { get; }
 
-    public MainViewModel(IServiceProvider serviceProvider, ExamSessionState sessionState, MockExamDataFactory mockExamDataFactory)
+    public MainViewModel(IExamEntryNavigator navigator, ExamSessionState sessionState, IExamApiService examApi)
     {
-        _serviceProvider = serviceProvider;
+        _navigator = navigator;
         _sessionState = sessionState;
-        _mockExamDataFactory = mockExamDataFactory;
-        StartExamCommand = new RelayCommand<Exam>(StartExam);
+        _examApi = examApi;
+        StartExamCommand = new RelayCommand<Exam>(exam => _ = StartExamAsync(exam));
         RefreshCommand = new RelayCommand(async () => await LoadExamsAsync());
         _ = LoadExamsAsync();
     }
@@ -56,8 +54,11 @@ public class MainViewModel : BaseViewModel
 
         try
         {
-            await Task.Delay(200);
-            Exams = new ObservableCollection<Exam>(_mockExamDataFactory.GetAvailableExams());
+            var exams = await _examApi.GetAvailableExamsAsync();
+            // Students only act on exams that are upcoming or currently in progress; completed ones
+            // are hidden here. TODO(§F): let the server pre-filter this list per student.
+            var visible = exams.Where(IsUpcomingOrInProgress);
+            Exams = new ObservableCollection<Exam>(visible);
         }
         catch (Exception ex)
         {
@@ -69,21 +70,36 @@ public class MainViewModel : BaseViewModel
         }
     }
 
-    private void StartExam(Exam? exam)
+    private async Task StartExamAsync(Exam? exam)
     {
         if (exam == null || !_sessionState.IsAuthenticated)
         {
             return;
         }
 
-        _sessionState.LoadMockExam(_mockExamDataFactory.CreateMockPaperForExam(exam.Id));
+        // Carry the pick across the entry stages (the navigator resolves a fresh VM per stage).
+        _sessionState.SelectedExam = exam;
 
-        var examWindow = _serviceProvider.GetRequiredService<Views.ExamWindow>();
-        examWindow.Show();
+        try
+        {
+            // TODO(§C): move exam-paper loading to AFTER OTP verification and take the attemptId from
+            // the entry ticket instead of the client-minted Guid in ExamSessionState.LoadExamPaper.
+            // Loading here (before OTP) keeps current behavior for slice 1-2.
+            var paper = await _examApi.GetExamPaperAsync(exam.Id);
+            _sessionState.LoadExamPaper(paper);
+        }
+        catch (Exception ex)
+        {
+            ErrorMessage = $"Khong the tai de thi: {ex.Message}";
+            return;
+        }
 
-        Application.Current.Windows
-            .OfType<MainWindow>()
-            .FirstOrDefault()
-            ?.Close();
+        // Enter the OTP stage; the navigator drives OtpEntry -> SystemCheck -> DevicePreflight ->
+        // (RequestStartExam) inside the shell, then App opens the exam surface.
+        _navigator.GoTo(ExamEntryStage.OtpEntry);
     }
+
+    private static bool IsUpcomingOrInProgress(Exam exam) =>
+        exam.Status.Equals("upcoming", StringComparison.OrdinalIgnoreCase)
+        || exam.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase);
 }

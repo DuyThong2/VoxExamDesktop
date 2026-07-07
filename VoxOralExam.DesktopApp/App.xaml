@@ -1,8 +1,28 @@
-﻿<Application x:Class="VoxOralExam.DesktopApp.App"
+<Application x:Class="VoxOralExam.DesktopApp.App"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             xmlns:local="clr-namespace:VoxOralExam.DesktopApp">
+             xmlns:local="clr-namespace:VoxOralExam.DesktopApp"
+             xmlns:vm="clr-namespace:VoxOralExam.DesktopApp.ViewModels"
+             xmlns:views="clr-namespace:VoxOralExam.DesktopApp.Views">
     <Application.Resources>
+
+        <!-- Stage view model -> View. The shell's ContentControl binds to the navigator's
+             CurrentViewModel; WPF picks the matching template and sets its DataContext to that VM. -->
+        <DataTemplate DataType="{x:Type vm:LoginViewModel}">
+            <views:LoginView />
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:MainViewModel}">
+            <views:ExamListView />
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:OtpEntryViewModel}">
+            <views:OtpEntryView />
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:SystemCheckViewModel}">
+            <views:SystemCheckView />
+        </DataTemplate>
+        <DataTemplate DataType="{x:Type vm:DevicePreflightViewModel}">
+            <views:DevicePreflightView />
+        </DataTemplate>
 
     </Application.Resources>
 </Application>

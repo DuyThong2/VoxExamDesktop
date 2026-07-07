@@ -7,11 +7,6 @@ public class AppSettings
     public string WebRtcSignalingUrl { get; set; } = "ws://localhost:8081/signaling";
     public string RealtimeWebSocketPath { get; set; } = "/realtime/attempts";
     public string AvatarWebRtcOfferPath { get; set; } = "/avatar/webrtc/offer";
-    public string S3BucketName { get; set; } = "vox-oral-exam";
-    public string S3Region { get; set; } = "ap-southeast-1";
-    public string AwsAccessKeyId { get; set; } = string.Empty;
-    public string AwsSecretAccessKey { get; set; } = string.Empty;
-    public string AwsSessionToken { get; set; } = string.Empty;
     public int MaxTurnsPerQuestion { get; set; } = 3;
     public int QuestionTurnTimeoutSeconds { get; set; } = 180;
     public int InitialSilenceTimeoutSeconds { get; set; } = 8;
@@ -25,4 +20,15 @@ public class AppSettings
     public int CameraHeight { get; set; } = 480;
     public int CameraFps { get; set; } = 30;
     public string LoginPlatform { get; set; } = "DESKTOP";
+
+    // Length of the OTP the proctor's screen shows and the student types. TODO(§C): the real value may
+    // come from the server (per-exam) once the OTP endpoint exists; 6 is the common default.
+    public int OtpLength { get; set; } = 6;
+
+    // How often the proctor's OTP rotates, in seconds -- drives the countdown on the OTP screen.
+    public int OtpRefreshSeconds { get; set; } = 60;
+
+    // Dev-only: true serves exam data from MockExamDataFactory; false uses ExamApiService (real
+    // Java backend). Defaults true so the app runs before Java's exam endpoints exist.
+    public bool UseMockData { get; set; } = true;
 }

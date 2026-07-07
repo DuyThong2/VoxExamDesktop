@@ -18,7 +18,7 @@ public class ExamViewModel : BaseViewModel
     private readonly ExamSessionState _sessionState;
     private readonly IExamFlowService _examFlow;
     private readonly AvatarWebRtcClient _avatarClient;
-    private readonly MockExamDataFactory _mockExamDataFactory;
+    private readonly IExamApiService _examApi;
 
     private string _studentName = string.Empty;
     private string _studentId = string.Empty;
@@ -47,16 +47,15 @@ public class ExamViewModel : BaseViewModel
         ExamSessionState sessionState,
         IExamFlowService examFlow,
         AvatarWebRtcClient avatarClient,
-        MockExamDataFactory mockExamDataFactory)
+        IExamApiService examApi)
     {
         _camera = camera;
         _proctoring = proctoring;
         _sessionState = sessionState;
         _examFlow = examFlow;
         _avatarClient = avatarClient;
-        _mockExamDataFactory = mockExamDataFactory;
+        _examApi = examApi;
 
-        EnsureMockExamLoaded();
         LoadSessionData();
 
         _examFlow.OnQuestionPresented += HandleQuestionPresented;
@@ -164,6 +163,7 @@ public class ExamViewModel : BaseViewModel
         }
 
         _initialized = true;
+        await EnsureExamLoadedAsync();
         await StartCameraAsync();
         await _examFlow.StartAsync(CancellationToken.None);
     }
@@ -236,14 +236,19 @@ public class ExamViewModel : BaseViewModel
         LogEntries.Add(new LogEntry { Time = DateTime.Now.AddMinutes(-1), Message = $"Thiet bi: {_sessionState.CurrentUser?.Device.DeviceName ?? "unknown"}", Type = LogType.Info });
     }
 
-    private void EnsureMockExamLoaded()
+    private async Task EnsureExamLoadedAsync()
     {
         if (_sessionState.Questions.Count > 0)
         {
             return;
         }
 
-        _sessionState.LoadMockExam(_mockExamDataFactory.CreateMockPaperForExam());
+        // Safety net only: the normal path loads the paper in MainViewModel before this window
+        // opens. If nothing is loaded, fall back to whatever exam id the session already knows
+        // (the mock service returns its first paper for a null id).
+        var examId = _sessionState.ExamId == Guid.Empty ? null : _sessionState.ExamId.ToString();
+        var paper = await _examApi.GetExamPaperAsync(examId);
+        _sessionState.LoadExamPaper(paper);
     }
 
     private async Task StartCameraAsync()

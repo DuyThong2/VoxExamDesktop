@@ -6,7 +6,7 @@ public class MockExamDataFactory
 {
     public IReadOnlyList<Exam> GetAvailableExams()
     {
-        return GetMockExamPapers()
+        return GetExamPapers()
             .Select(paper => new Exam
             {
                 Id = paper.ExamId.ToString(),
@@ -20,9 +20,9 @@ public class MockExamDataFactory
             .ToList();
     }
 
-    public MockExamPaper CreateMockPaperForExam(string? examId = null)
+    public ExamPaper CreateMockPaperForExam(string? examId = null)
     {
-        var papers = GetMockExamPapers();
+        var papers = GetExamPapers();
 
         if (Guid.TryParse(examId, out var parsedExamId))
         {
@@ -36,7 +36,7 @@ public class MockExamDataFactory
         return papers[0];
     }
 
-    private static List<MockExamPaper> GetMockExamPapers()
+    private static List<ExamPaper> GetExamPapers()
     {
         var today = DateTime.Today;
 
@@ -45,7 +45,7 @@ public class MockExamDataFactory
 
         return
         [
-            new MockExamPaper
+            new ExamPaper
             {
                 ExamId = englishExamId,
                 ExamPaperId = Guid.Parse("11111111-aaaa-1111-aaaa-111111111111"),
@@ -190,7 +190,7 @@ public class MockExamDataFactory
                         })
                 ]
             },
-            new MockExamPaper
+            new ExamPaper
             {
                 ExamId = mathExamId,
                 ExamPaperId = Guid.Parse("22222222-aaaa-2222-aaaa-222222222222"),

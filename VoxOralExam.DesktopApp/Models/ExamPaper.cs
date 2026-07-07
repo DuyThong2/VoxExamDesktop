@@ -1,6 +1,11 @@
 namespace VoxOralExam.DesktopApp.Models;
 
-public class MockExamPaper
+/// <summary>
+/// One exam paper (the full question set for an attempt). Formerly named MockExamPaper -- it is the
+/// shared shape returned by IExamApiService, whether the data comes from the real Java backend or
+/// the dev-only mock factory, so it no longer carries "Mock" in its name.
+/// </summary>
+public class ExamPaper
 {
     public Guid ExamId { get; set; }
     public Guid ExamPaperId { get; set; }
