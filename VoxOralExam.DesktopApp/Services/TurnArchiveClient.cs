@@ -42,6 +42,10 @@ public class TurnArchiveClient
         using var content = new MultipartFormDataContent();
         content.Add(new StringContent(request.AudioRef), "audio_ref");
         content.Add(new StringContent(request.AnswerId.ToString()), "answer_id");
+        if (request.PaperItemId.HasValue)
+        {
+            content.Add(new StringContent(request.PaperItemId.Value.ToString()), "paper_item_id");
+        }
         content.Add(new StringContent(request.TurnOrder.ToString()), "turn_order");
         content.Add(new StringContent(request.PromptText), "prompt_text");
         content.Add(new StringContent(request.Language), "language");

@@ -6,6 +6,7 @@ public class EvaluateTurnRequest
 {
     public string AudioRef { get; set; } = string.Empty;
     public Guid AnswerId { get; set; }
+    public Guid? PaperItemId { get; set; }
     public int TurnOrder { get; set; }
     public string PromptText { get; set; } = string.Empty;
     public string Language { get; set; } = "en";

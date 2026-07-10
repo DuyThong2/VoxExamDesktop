@@ -31,8 +31,8 @@ public class LoginViewModel : BaseViewModel
         _deviceContextProvider = deviceContextProvider;
         _sessionState = sessionState;
         _navigator = navigator;
-        Email = "admin@vox.local";
-        Password = "Admin123456";
+        Email = "student1a.demosch01@vox.demo";
+        Password = "Password@123";
         LoginCommand = new RelayCommand(ExecuteLogin, CanLogin);
     }
 

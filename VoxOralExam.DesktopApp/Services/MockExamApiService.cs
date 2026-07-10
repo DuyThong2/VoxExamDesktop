@@ -21,4 +21,7 @@ public class MockExamApiService : IExamApiService
 
     public Task<ExamPaper> GetExamPaperAsync(string? examId, CancellationToken ct = default)
         => Task.FromResult(_factory.CreateMockPaperForExam(examId));
+
+    public Task UpdateSessionStatusAsync(Guid sessionId, string status, CancellationToken ct = default)
+        => Task.CompletedTask;
 }

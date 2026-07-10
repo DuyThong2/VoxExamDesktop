@@ -243,12 +243,11 @@ public class ExamViewModel : BaseViewModel
             return;
         }
 
-        // Safety net only: the normal path loads the paper in MainViewModel before this window
-        // opens. If nothing is loaded, fall back to whatever exam id the session already knows
-        // (the mock service returns its first paper for a null id).
-        var examId = _sessionState.ExamId == Guid.Empty ? null : _sessionState.ExamId.ToString();
-        var paper = await _examApi.GetExamPaperAsync(examId);
-        _sessionState.LoadExamPaper(paper);
+        var sessionId = _sessionState.EntryTicket?.AttemptId != Guid.Empty
+            ? _sessionState.EntryTicket?.AttemptId.ToString()
+            : (_sessionState.ExamAttemptId == Guid.Empty ? null : _sessionState.ExamAttemptId.ToString());
+        var paper = await _examApi.GetExamPaperAsync(sessionId);
+        _sessionState.LoadExamPaper(paper, _sessionState.EntryTicket?.AttemptId);
     }
 
     private async Task StartCameraAsync()

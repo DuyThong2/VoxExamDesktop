@@ -7,15 +7,7 @@ public class ExamSessionState
     public string SessionId { get; set; } = string.Empty;
     public int SelectedAudioInputDeviceIndex { get; set; }
     public string SelectedAudioInputDeviceName { get; set; } = string.Empty;
-
-    // The exam the student picked in ExamList, carried across the entry stages
-    // (OtpEntry -> SystemCheck -> DevicePreflight -> InExam) since the navigator resolves a fresh
-    // view model per stage and cannot pass constructor args. Set by MainViewModel.StartExamAsync.
     public Exam? SelectedExam { get; set; }
-
-    // Set by OtpEntryViewModel after a successful OTP verification. Holds the server attemptId, stream
-    // JWT, etc. TODO(§C): drive the flow off this (esp. EntryTicket.AttemptId) instead of the
-    // client-minted ExamAttemptId below.
     public ExamEntryTicket? EntryTicket { get; set; }
 
     public Guid ExamId { get; set; }
@@ -26,6 +18,7 @@ public class ExamSessionState
     public int QuestionIndex { get; set; }
     public List<Question> Questions { get; set; } = [];
     public Dictionary<Guid, Guid> AttemptAnswerIdsByQuestionId { get; set; } = [];
+    public Dictionary<Guid, Guid> PaperItemIdsByQuestionId { get; set; } = [];
     public Dictionary<Guid, QuestionEvaluationGuide> EvaluationGuidesByQuestionId { get; set; } = [];
 
     public AuthenticatedUserContext? CurrentUser { get; private set; }
@@ -48,14 +41,13 @@ public class ExamSessionState
         CurrentUser = null;
     }
 
-    // NOTE: ExamAttemptId is still minted client-side here. That is a known gap fixed in §C of
-    // docs/wpf-redesign-plan.md (server-issued attempt id via the OTP entry ticket); left as-is for
-    // this security/de-mock pass so behavior does not change.
-    public void LoadExamPaper(ExamPaper examPaper)
+    public void LoadExamPaper(ExamPaper examPaper, Guid? attemptId = null)
     {
         ExamId = examPaper.ExamId;
         ExamPaperId = examPaper.ExamPaperId;
-        ExamAttemptId = Guid.NewGuid();
+        ExamAttemptId = attemptId
+            ?? EntryTicket?.AttemptId
+            ?? (examPaper.ExamAttemptId != Guid.Empty ? examPaper.ExamAttemptId : Guid.NewGuid());
         SessionId = ExamAttemptId.ToString();
         ExamTitle = examPaper.Title;
         DurationMinutes = examPaper.DurationMinutes;
@@ -65,7 +57,11 @@ public class ExamSessionState
             .Select(item => item.Question)
             .ToList();
         AttemptAnswerIdsByQuestionId = examPaper.PaperQuestions
-            .ToDictionary(item => item.Question.Id, _ => Guid.NewGuid());
+            .ToDictionary(
+                item => item.Question.Id,
+                item => item.AttemptAnswerId != Guid.Empty ? item.AttemptAnswerId : Guid.NewGuid());
+        PaperItemIdsByQuestionId = examPaper.PaperQuestions
+            .ToDictionary(item => item.Question.Id, item => item.Id);
         EvaluationGuidesByQuestionId = examPaper.PaperQuestions
             .Where(item => item.EvaluationGuide is not null)
             .ToDictionary(item => item.Question.Id, item => item.EvaluationGuide!);

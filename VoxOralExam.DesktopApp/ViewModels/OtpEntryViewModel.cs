@@ -5,18 +5,12 @@ using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
 
-/// <summary>
-/// Stage: OtpEntry. The student types the OTP shown on the proctor's web screen (it rotates every
-/// <see cref="AppSettings.OtpRefreshSeconds"/> seconds); this screen submits it for verification and,
-/// on success, stores the entry ticket and advances. The app never generates or fetches the code --
-/// it only submits what the student typed. The real HTTP call lives behind
-/// <see cref="IExamEntryApiService"/> (mock in dev, TODO Java impl for production).
-/// </summary>
 public class OtpEntryViewModel : BaseViewModel
 {
     private readonly IExamEntryNavigator _navigator;
     private readonly ExamSessionState _sessionState;
     private readonly IExamEntryApiService _entryApi;
+    private readonly IExamApiService _examApi;
     private readonly AppSettings _settings;
 
     private readonly DispatcherTimer _refreshTimer;
@@ -31,11 +25,13 @@ public class OtpEntryViewModel : BaseViewModel
         IExamEntryNavigator navigator,
         ExamSessionState sessionState,
         IExamEntryApiService entryApi,
+        IExamApiService examApi,
         AppSettings settings)
     {
         _navigator = navigator;
         _sessionState = sessionState;
         _entryApi = entryApi;
+        _examApi = examApi;
         _settings = settings;
 
         _secondsUntilRefresh = RefreshSeconds;
@@ -43,16 +39,12 @@ public class OtpEntryViewModel : BaseViewModel
         VerifyCommand = new RelayCommand(() => _ = VerifyAsync(), CanVerify);
         BackCommand = new RelayCommand(() => _navigator.Back());
 
-        // Visualise the 60s rotation so the student knows the code they see will change. This is a
-        // local countdown, not synced to the server's rotation boundary.
-        // TODO(§C): sync the countdown to the server (e.g. a nextRotationAt timestamp) so it matches
-        // the proctor screen exactly instead of starting fresh when this view opens.
         _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _refreshTimer.Tick += OnRefreshTick;
         _refreshTimer.Start();
     }
 
-    public string ExamTitle => _sessionState.SelectedExam?.Title ?? "(chưa chọn bài thi)";
+    public string ExamTitle => _sessionState.SelectedExam?.Title ?? "(chua chon bai thi)";
 
     public int OtpLength => _settings.OtpLength;
 
@@ -98,7 +90,6 @@ public class OtpEntryViewModel : BaseViewModel
     public ICommand VerifyCommand { get; }
     public ICommand BackCommand { get; }
 
-    /// <summary>Stop the countdown when the view leaves the screen (navigated away or verified).</summary>
     public void Cleanup()
     {
         _refreshTimer.Stop();
@@ -132,6 +123,8 @@ public class OtpEntryViewModel : BaseViewModel
         {
             var ticket = await _entryApi.VerifyOtpAsync(examId, _otp);
             _sessionState.EntryTicket = ticket;
+            var paper = await _examApi.GetExamPaperAsync(ticket.AttemptId.ToString());
+            _sessionState.LoadExamPaper(paper, ticket.AttemptId);
             LocalFileLogger.Info("otp", "verify_success", new { examId, ticket.TicketId });
 
             Cleanup();
@@ -139,16 +132,20 @@ public class OtpEntryViewModel : BaseViewModel
         }
         catch (OtpVerificationException ex)
         {
-            // Wrong or already-rotated code -- let the student read the current one and retry.
+            // Otp's setter resets HasError to false as a side effect (so the error clears once
+            // the user starts retyping) -- clear Otp BEFORE setting HasError/ErrorMessage, or this
+            // assignment order silently undoes HasError=true in the same synchronous call and the
+            // error banner never actually shows.
+            Otp = string.Empty;
             ErrorMessage = ex.Message;
             HasError = true;
-            Otp = string.Empty;
             LocalFileLogger.Info("otp", "verify_rejected", new { examId, reason = ex.Message });
         }
         catch (Exception ex)
         {
-            ErrorMessage = $"Không xác thực được OTP: {ex.Message}";
+            ErrorMessage = $"Khong xac thuc duoc OTP: {ex.Message}";
             HasError = true;
+            _sessionState.EntryTicket = null;
             LocalFileLogger.Error("otp", "verify_failed", ex, new { examId });
         }
         finally

@@ -136,12 +136,18 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
 
     private TaskCompletionSource<int>? _pendingResumeAckTcs;
 
-    public Task SendQuestionStartAsync(Guid answerId, QuestionContextDto question, string language, CancellationToken ct)
+    public Task SendQuestionStartAsync(
+        Guid answerId,
+        Guid? paperItemId,
+        QuestionContextDto question,
+        string language,
+        CancellationToken ct)
     {
         var payload = new
         {
             type = "question_start",
             answer_id = answerId.ToString("D"),
+            paper_item_id = paperItemId?.ToString("D"),
             question,
             language
         };

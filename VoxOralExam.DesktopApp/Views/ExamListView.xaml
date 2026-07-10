@@ -3,11 +3,13 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:converters="clr-namespace:VoxOralExam.DesktopApp.Converters"
              mc:Ignorable="d"
              d:DesignHeight="550" d:DesignWidth="850">
 
     <UserControl.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+        <converters:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibility" />
     </UserControl.Resources>
 
     <Grid Margin="24">
@@ -47,7 +49,7 @@
         <ListView Grid.Row="2"
                   ItemsSource="{Binding Exams}"
                   BorderThickness="0"
-                  Visibility="{Binding IsLoading, Converter={StaticResource BoolToVisibility}, FallbackValue=Visible}">
+                  Visibility="{Binding IsLoading, Converter={StaticResource InverseBoolToVisibility}, FallbackValue=Visible}">
             <ListView.ItemTemplate>
                 <DataTemplate>
                     <Border Background="White" CornerRadius="8"

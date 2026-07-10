@@ -29,6 +29,7 @@ public class RealtimeExamFlowService : IExamFlowService
     private readonly RealtimeSessionClient _sessionClient;
     private readonly AvatarWebRtcClient _avatarClient;
     private readonly MicAudioStreamer _micStreamer;
+    private readonly IExamApiService _examApi;
 
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
@@ -46,7 +47,8 @@ public class RealtimeExamFlowService : IExamFlowService
         AppSettings settings,
         RealtimeSessionClient sessionClient,
         AvatarWebRtcClient avatarClient,
-        MicAudioStreamer micStreamer)
+        MicAudioStreamer micStreamer,
+        IExamApiService examApi)
     {
         _turnAudioUploader = turnAudioUploader;
         _turnArchiveClient = turnArchiveClient;
@@ -55,6 +57,7 @@ public class RealtimeExamFlowService : IExamFlowService
         _sessionClient = sessionClient;
         _avatarClient = avatarClient;
         _micStreamer = micStreamer;
+        _examApi = examApi;
     }
 
     public event Action<ExamQuestionPrompt>? OnQuestionPresented;
@@ -135,14 +138,23 @@ public class RealtimeExamFlowService : IExamFlowService
             LocalFileLogger.Info("exam_flow", "run_completed");
 
             await WaitForPendingArchivesAsync();
+            await SubmitSessionStatusAsync("SUBMITTED");
         }
         catch (OperationCanceledException)
         {
             LocalFileLogger.Info("exam_flow", "run_cancelled");
+            // Student exited / app was closed before finishing every question -- the exam is being
+            // force-cut-off, not naturally submitted. Still send whatever was answered to grading
+            // rather than leaving the session stuck at IN_PROGRESS forever (matches vox's
+            // IN_PROGRESS -> EXPIRED -> GRADING transition, which grades partial answers too).
+            await WaitForPendingArchivesAsync();
+            await SubmitSessionStatusAsync("EXPIRED");
         }
         catch (Exception ex)
         {
             LocalFileLogger.Error("exam_flow", "run_failed", ex);
+            await WaitForPendingArchivesAsync();
+            await SubmitSessionStatusAsync("EXPIRED");
             throw;
         }
         finally
@@ -166,12 +178,18 @@ public class RealtimeExamFlowService : IExamFlowService
     {
         var question = _sessionState.CurrentQuestion ?? throw new InvalidOperationException("Exam session does not contain an active question.");
         var attemptAnswerId = _sessionState.AttemptAnswerIdsByQuestionId[question.Id];
+        var paperItemId = _sessionState.PaperItemIdsByQuestionId[question.Id];
         var maxTurnsPerQuestion = Math.Max(1, _settings.MaxTurnsPerQuestion);
 
         CloseStudentSpeechWindow();
         var questionContext = BuildQuestionContext(question);
         var avatarSpokeForQuestion = await WaitForAvatarUtteranceCompletionAfterAsync(
-            triggerAsync: token => _sessionClient.SendQuestionStartAsync(attemptAnswerId, questionContext, language: "en-US", token),
+            triggerAsync: token => _sessionClient.SendQuestionStartAsync(
+                attemptAnswerId,
+                paperItemId,
+                questionContext,
+                language: "en-US",
+                token),
             ct);
         if (avatarSpokeForQuestion)
         {
@@ -221,7 +239,7 @@ public class RealtimeExamFlowService : IExamFlowService
             var pcmBytes = _recorder!.GetTurnBufferAndReset();
             if (pcmBytes.Length > 0)
             {
-                DispatchArchiveTurn(question, attemptAnswerId, turnOrder, prompt.QuestionText, pcmBytes, ct);
+                DispatchArchiveTurn(question, attemptAnswerId, paperItemId, turnOrder, prompt.QuestionText, pcmBytes, ct);
             }
 
             var (decision, avatarSpokeAfterDecision) = await WaitForAvatarUtteranceCompletionAfterAsync(
@@ -268,9 +286,16 @@ public class RealtimeExamFlowService : IExamFlowService
         CloseStudentSpeechWindow();
     }
 
-    private void DispatchArchiveTurn(Question question, Guid attemptAnswerId, int turnOrder, string promptText, byte[] pcmBytes, CancellationToken ct)
+    private void DispatchArchiveTurn(
+        Question question,
+        Guid attemptAnswerId,
+        Guid paperItemId,
+        int turnOrder,
+        string promptText,
+        byte[] pcmBytes,
+        CancellationToken ct)
     {
-        var task = ArchiveTurnAsync(question, attemptAnswerId, turnOrder, promptText, pcmBytes, ct);
+        var task = ArchiveTurnAsync(question, attemptAnswerId, paperItemId, turnOrder, promptText, pcmBytes, ct);
         _pendingArchiveTasks.Add(task);
         // Path A (the live decision via SendTurnEndAndWaitAsync) never awaits this -- mirrors
         // the Python session's own decoupled Path A/Path B design. Failures are logged inside
@@ -279,18 +304,45 @@ public class RealtimeExamFlowService : IExamFlowService
         _pendingArchiveTasks.RemoveAll(t => t.IsCompleted);
     }
 
-    private async Task ArchiveTurnAsync(Question question, Guid attemptAnswerId, int turnOrder, string promptText, byte[] pcmBytes, CancellationToken ct)
+    private async Task ArchiveTurnAsync(
+        Question question,
+        Guid attemptAnswerId,
+        Guid paperItemId,
+        int turnOrder,
+        string promptText,
+        byte[] pcmBytes,
+        CancellationToken ct)
     {
         try
         {
             var wavBytes = _turnAudioUploader.EncodeWav(pcmBytes);
             var audioUrl = await _turnAudioUploader.UploadTurnAudioAsync(wavBytes, attemptAnswerId, turnOrder, ct);
-            var request = BuildEvaluateTurnRequest(question, attemptAnswerId, turnOrder, promptText, audioUrl);
+            var request = BuildEvaluateTurnRequest(question, attemptAnswerId, paperItemId, turnOrder, promptText, audioUrl);
             await _turnArchiveClient.ArchiveTurnAsync(request, ct);
         }
         catch (Exception ex)
         {
             LocalFileLogger.Error("exam_flow", "archive_turn_failed", ex, new { attemptAnswerId, turnOrder });
+        }
+    }
+
+    private async Task SubmitSessionStatusAsync(string status)
+    {
+        if (_sessionState.ExamAttemptId == Guid.Empty)
+        {
+            return;
+        }
+
+        try
+        {
+            // Use CancellationToken.None: the exam's own ct is already cancelled/faulted by the time
+            // this runs (cancellation or error exit path), and this call must still go through.
+            await _examApi.UpdateSessionStatusAsync(_sessionState.ExamAttemptId, status, CancellationToken.None);
+            LocalFileLogger.Info("exam_flow", "session_status_submitted", new { sessionId = _sessionState.ExamAttemptId, status });
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("exam_flow", "session_status_submit_failed", ex, new { sessionId = _sessionState.ExamAttemptId, status });
         }
     }
 
@@ -534,11 +586,18 @@ public class RealtimeExamFlowService : IExamFlowService
         return prompt;
     }
 
-    private EvaluateTurnRequest BuildEvaluateTurnRequest(Question question, Guid attemptAnswerId, int turnOrder, string promptText, string audioUrl) =>
+    private EvaluateTurnRequest BuildEvaluateTurnRequest(
+        Question question,
+        Guid attemptAnswerId,
+        Guid paperItemId,
+        int turnOrder,
+        string promptText,
+        string audioUrl) =>
         new()
         {
             AudioRef = audioUrl,
             AnswerId = attemptAnswerId,
+            PaperItemId = paperItemId,
             TurnOrder = turnOrder,
             PromptText = promptText,
             Language = "en",

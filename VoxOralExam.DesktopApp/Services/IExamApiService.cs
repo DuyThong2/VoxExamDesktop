@@ -13,4 +13,6 @@ public interface IExamApiService
     Task<IReadOnlyList<Exam>> GetAvailableExamsAsync(CancellationToken ct = default);
 
     Task<ExamPaper> GetExamPaperAsync(string? examId, CancellationToken ct = default);
+
+    Task UpdateSessionStatusAsync(Guid sessionId, string status, CancellationToken ct = default);
 }

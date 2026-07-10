@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace VoxOralExam.DesktopApp.Models;
 
 public class Question
@@ -22,11 +24,24 @@ public class Question
 }
 
 // Mirrors vox's domain.model.question.QuestionType exactly (same 5 members, same order).
+// Java serializes enums as their UPPER_SNAKE_CASE name() (e.g. "SHORT_ANSWER"), not the
+// PascalCase C# member name -- JsonStringEnumMemberName maps the wire string per member
+// without renaming the C# identifiers used elsewhere in this codebase (MockExamDataFactory,
+// RealtimeExamFlowService's separate lowercase snake_case mapping for Python).
 public enum QuestionType
 {
+    [JsonStringEnumMemberName("READ_ALOUD")]
     ReadAloud,
+
+    [JsonStringEnumMemberName("SHORT_ANSWER")]
     ShortAnswer,
+
+    [JsonStringEnumMemberName("LONG_ANSWER")]
     LongAnswer,
+
+    [JsonStringEnumMemberName("OPINION")]
     Opinion,
+
+    [JsonStringEnumMemberName("DESCRIPTION")]
     Description
 }

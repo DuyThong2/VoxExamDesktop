@@ -21,9 +21,9 @@ public class AppSettings
     public int CameraFps { get; set; } = 30;
     public string LoginPlatform { get; set; } = "DESKTOP";
 
-    // Length of the OTP the proctor's screen shows and the student types. TODO(§C): the real value may
-    // come from the server (per-exam) once the OTP endpoint exists; 6 is the common default.
-    public int OtpLength { get; set; } = 6;
+    // Length of the OTP the proctor's screen shows and the student types.
+    // Matches Java's GetExamScheduleOtpUseCase.OTP_LENGTH.
+    public int OtpLength { get; set; } = 8;
 
     // How often the proctor's OTP rotates, in seconds -- drives the countdown on the OTP screen.
     public int OtpRefreshSeconds { get; set; } = 60;

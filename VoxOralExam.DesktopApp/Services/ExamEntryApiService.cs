@@ -1,36 +1,75 @@
+using System.Net;
 using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
 using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.Services;
 
-/// <summary>
-/// Real <see cref="IExamEntryApiService"/> against Java. Skeleton only -- the HTTP call is left for when
-/// the backend OTP endpoint exists (docs/wpf-redesign-plan.md §C, §F). Until then, run with
-/// AppSettings.UseMockData = true so <see cref="MockExamEntryApiService"/> is used instead.
-/// </summary>
 public class ExamEntryApiService : IExamEntryApiService
 {
-    private readonly HttpClient _http;
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true
+    };
 
-    public ExamEntryApiService(HttpClient http)
+    private readonly HttpClient _http;
+    private readonly ExamSessionState _sessionState;
+
+    public ExamEntryApiService(HttpClient http, ExamSessionState sessionState)
     {
         _http = http;
+        _sessionState = sessionState;
     }
 
-    public Task<ExamEntryTicket> VerifyOtpAsync(string examId, string otp, CancellationToken ct = default)
+    public async Task<ExamEntryTicket> VerifyOtpAsync(string examId, string otp, CancellationToken ct = default)
     {
-        // TODO(§C/§F - backend chưa có): gọi Java để xác thực OTP và nhận entry ticket. Dự kiến:
-        //   POST {JavaBaseUrl}/api/v1/exams/{examId}/otp/verify   body: { "otp": "<otp>" }
-        //   200 -> map JSON sang ExamEntryTicket:
-        //          attemptId (server-generated), streamJwt (cho vox-streaming), blocklist,
-        //          minEnforcementTier, presigned-upload source, deliveryMode, expiresAt.
-        //          Lưu vào ExamSessionState.EntryTicket và NGỪNG mint attemptId client-side.
-        //   401/410/422 -> throw new OtpVerificationException("Mã OTP không đúng hoặc đã hết hạn.")
-        //   Lưu ý: OTP xoay 60s và verify MỘT lần ở đây; các bước sau đi bằng ticket (hạn dài hơn).
-        //          Server nên rate-limit số lần verify.
-        _ = _http;
-        throw new NotImplementedException(
-            "ExamEntryApiService.VerifyOtpAsync chưa nối backend. Đặt AppSettings.UseMockData=true để dùng " +
-            "MockExamEntryApiService trong lúc phát triển.");
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/exams/{Uri.EscapeDataString(examId)}/otp/verify")
+        {
+            Content = JsonContent.Create(new { otp })
+        };
+        var accessToken = _sessionState.CurrentUser?.AccessToken;
+        if (!string.IsNullOrWhiteSpace(accessToken))
+        {
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        }
+
+        using var response = await _http.SendAsync(request, ct);
+
+        // Java's VerifyExamScheduleOtpUseCase reports every "can't proceed with this OTP attempt"
+        // case (wrong code, not a candidate, no schedule/paper assigned, expired/mismatched
+        // schedule) using the codebase's ordinary exceptions (Unauthorized/NotFound/BadRequest)
+        // rather than bespoke 410/422 statuses. Surface the server's own message for all of
+        // them instead of a generic string -- it's already specific and student-facing.
+        //
+        // A 401 with no Authorization header at all (e.g. missing/expired access token) comes
+        // back from Spring Security itself with an EMPTY body, not the app's JSON error shape --
+        // ReadFromJsonAsync on an empty body throws JsonException, so guard on content length
+        // before attempting to parse it.
+        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.NotFound or HttpStatusCode.BadRequest)
+        {
+            ErrorPayload? error = null;
+            if (response.Content.Headers.ContentLength is > 0)
+            {
+                error = await response.Content.ReadFromJsonAsync<ErrorPayload>(JsonOptions, ct);
+            }
+            throw new OtpVerificationException(error?.Message ?? "Mã OTP không đúng hoặc đã hết hạn.");
+        }
+
+        response.EnsureSuccessStatusCode();
+        var payload = await response.Content.ReadFromJsonAsync<ApiResponse<ExamEntryTicket>>(JsonOptions, ct);
+        return payload?.Data
+            ?? throw new InvalidOperationException("Phản hồi xác thực OTP không chứa entry ticket.");
+    }
+
+    private sealed class ApiResponse<T>
+    {
+        public T? Data { get; set; }
+    }
+
+    private sealed class ErrorPayload
+    {
+        public string? Message { get; set; }
     }
 }

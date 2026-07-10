@@ -43,14 +43,20 @@ public class TurnUploadUrlProvider : ITurnUploadUrlProvider
         using var response = await client.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
 
-        var target = await response.Content.ReadFromJsonAsync<TurnUploadTargetResponse>(JsonOptions, ct)
+        var envelope = await response.Content.ReadFromJsonAsync<ApiResponse<TurnUploadTargetResponse>>(JsonOptions, ct)
             ?? throw new InvalidOperationException("Upload-url response is empty.");
-        if (string.IsNullOrWhiteSpace(target.UploadUrl) || string.IsNullOrWhiteSpace(target.AudioRef))
+        var target = envelope.Data;
+        if (target is null || string.IsNullOrWhiteSpace(target.UploadUrl) || string.IsNullOrWhiteSpace(target.AudioRef))
         {
             throw new InvalidOperationException("Upload-url response is missing uploadUrl or audioRef.");
         }
 
         return new TurnUploadTarget(target.UploadUrl, target.AudioRef);
+    }
+
+    private sealed class ApiResponse<T>
+    {
+        public T? Data { get; set; }
     }
 
     private sealed class TurnUploadTargetResponse

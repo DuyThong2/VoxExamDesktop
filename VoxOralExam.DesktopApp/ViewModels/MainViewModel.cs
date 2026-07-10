@@ -55,14 +55,13 @@ public class MainViewModel : BaseViewModel
         try
         {
             var exams = await _examApi.GetAvailableExamsAsync();
-            // Students only act on exams that are upcoming or currently in progress; completed ones
-            // are hidden here. TODO(§F): let the server pre-filter this list per student.
-            var visible = exams.Where(IsUpcomingOrInProgress);
-            Exams = new ObservableCollection<Exam>(visible);
+            LocalFileLogger.Info("exam_list", "loaded", new { count = exams.Count });
+            Exams = new ObservableCollection<Exam>(exams.Where(IsUpcomingOrInProgress));
         }
         catch (Exception ex)
         {
             ErrorMessage = $"Khong the tai danh sach bai thi: {ex.Message}";
+            LocalFileLogger.Error("exam_list", "load_failed", ex);
         }
         finally
         {
@@ -70,33 +69,24 @@ public class MainViewModel : BaseViewModel
         }
     }
 
-    private async Task StartExamAsync(Exam? exam)
+    private Task StartExamAsync(Exam? exam)
     {
         if (exam == null || !_sessionState.IsAuthenticated)
         {
-            return;
+            return Task.CompletedTask;
         }
 
-        // Carry the pick across the entry stages (the navigator resolves a fresh VM per stage).
         _sessionState.SelectedExam = exam;
+        _sessionState.EntryTicket = null;
+        _sessionState.ExamAttemptId = Guid.Empty;
+        _sessionState.SessionId = string.Empty;
+        _sessionState.Questions = [];
+        _sessionState.AttemptAnswerIdsByQuestionId = [];
+        _sessionState.PaperItemIdsByQuestionId = [];
+        _sessionState.EvaluationGuidesByQuestionId = [];
 
-        try
-        {
-            // TODO(§C): move exam-paper loading to AFTER OTP verification and take the attemptId from
-            // the entry ticket instead of the client-minted Guid in ExamSessionState.LoadExamPaper.
-            // Loading here (before OTP) keeps current behavior for slice 1-2.
-            var paper = await _examApi.GetExamPaperAsync(exam.Id);
-            _sessionState.LoadExamPaper(paper);
-        }
-        catch (Exception ex)
-        {
-            ErrorMessage = $"Khong the tai de thi: {ex.Message}";
-            return;
-        }
-
-        // Enter the OTP stage; the navigator drives OtpEntry -> SystemCheck -> DevicePreflight ->
-        // (RequestStartExam) inside the shell, then App opens the exam surface.
         _navigator.GoTo(ExamEntryStage.OtpEntry);
+        return Task.CompletedTask;
     }
 
     private static bool IsUpcomingOrInProgress(Exam exam) =>

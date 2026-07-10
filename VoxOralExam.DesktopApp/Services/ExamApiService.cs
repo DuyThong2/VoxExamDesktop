@@ -8,17 +8,6 @@ using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.Services;
 
-/// <summary>
-/// Real <see cref="IExamApiService"/> that fetches exams/papers from the Java backend, authenticated
-/// with the current user's access token. Selected when AppSettings.UseMockData is false.
-///
-/// The exact JSON contract is a flagged cross-repo dependency (docs/wpf-redesign-plan.md §F): Java
-/// has no exam-list/exam-paper endpoints yet, so with UseMockData=false these calls fail loudly
-/// (404) until Java exposes:
-///   GET /api/v1/exams                 -> Exam[]        (camelCase, matches Models.Exam)
-///   GET /api/v1/exams/{examId}/paper  -> ExamPaper     (camelCase, matches Models.ExamPaper graph)
-/// This is intentional: failing loudly beats silently serving mock data in production.
-/// </summary>
 public class ExamApiService : IExamApiService
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -45,16 +34,23 @@ public class ExamApiService : IExamApiService
         return exams ?? [];
     }
 
-    public async Task<ExamPaper> GetExamPaperAsync(string? examId, CancellationToken ct = default)
+    public async Task<ExamPaper> GetExamPaperAsync(string? sessionId, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(examId))
+        if (string.IsNullOrWhiteSpace(sessionId))
         {
-            throw new ArgumentException("examId is required to fetch a real exam paper.", nameof(examId));
+            throw new ArgumentException("sessionId is required to fetch a real exam paper.", nameof(sessionId));
         }
 
-        using var request = BuildRequest(HttpMethod.Get, $"/api/v1/exams/{Uri.EscapeDataString(examId)}/paper");
+        using var request = BuildRequest(HttpMethod.Get, $"/api/v1/exam-sessions/{Uri.EscapeDataString(sessionId)}/paper");
         return await SendAsync<ExamPaper>(request, ct)
-            ?? throw new InvalidOperationException($"Exam paper response for {examId} was empty.");
+            ?? throw new InvalidOperationException($"Exam paper response for session {sessionId} was empty.");
+    }
+
+    public async Task UpdateSessionStatusAsync(Guid sessionId, string status, CancellationToken ct = default)
+    {
+        using var request = BuildRequest(HttpMethod.Patch, $"/api/v1/exam-sessions/{sessionId:D}");
+        request.Content = JsonContent.Create(new { status });
+        await SendAsync<object>(request, ct);
     }
 
     private HttpRequestMessage BuildRequest(HttpMethod method, string path)
@@ -70,10 +66,18 @@ public class ExamApiService : IExamApiService
     }
 
     private async Task<T?> SendAsync<T>(HttpRequestMessage request, CancellationToken ct)
+        where T : class
     {
         var client = _httpClientFactory.CreateClient();
         using var response = await client.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
-        return await response.Content.ReadFromJsonAsync<T>(JsonOptions, ct);
+        var envelope = await response.Content.ReadFromJsonAsync<ApiResponse<T>>(JsonOptions, ct);
+        return envelope?.Data;
+    }
+
+    private sealed class ApiResponse<T>
+        where T : class
+    {
+        public T? Data { get; set; }
     }
 }
