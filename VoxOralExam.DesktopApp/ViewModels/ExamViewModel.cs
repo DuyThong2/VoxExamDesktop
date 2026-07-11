@@ -371,6 +371,27 @@ public class ExamViewModel : BaseViewModel
             AiStatus = "Da hoan thanh bai thi";
             AddLog("Bai thi van dap da hoan thanh", LogType.Success);
         });
+
+        _ = CloseWindowAfterDelayAsync();
+    }
+
+    private async Task CloseWindowAfterDelayAsync()
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(4));
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                var window = Application.Current.Windows
+                    .OfType<Window>()
+                    .FirstOrDefault(current => ReferenceEquals(current.DataContext, this));
+                window?.Close();
+            });
+        }
+        catch
+        {
+            // Best-effort auto close only. Cleanup still runs if the user closes manually.
+        }
     }
 }
 

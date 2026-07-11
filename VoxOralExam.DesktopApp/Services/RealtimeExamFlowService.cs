@@ -203,6 +203,7 @@ public class RealtimeExamFlowService : IExamFlowService
         var turnOrder = 1;
         var assessmentTurnCount = 0;
         var questionDone = false;
+        var currentPromptText = prompt.QuestionText;
 
         while (!questionDone)
         {
@@ -239,7 +240,7 @@ public class RealtimeExamFlowService : IExamFlowService
             var pcmBytes = _recorder!.GetTurnBufferAndReset();
             if (pcmBytes.Length > 0)
             {
-                DispatchArchiveTurn(question, attemptAnswerId, paperItemId, turnOrder, prompt.QuestionText, pcmBytes, ct);
+                DispatchArchiveTurn(question, attemptAnswerId, paperItemId, turnOrder, currentPromptText, pcmBytes, ct);
             }
 
             var (decision, avatarSpokeAfterDecision) = await WaitForAvatarUtteranceCompletionAfterAsync(
@@ -258,6 +259,7 @@ public class RealtimeExamFlowService : IExamFlowService
             if (!string.IsNullOrWhiteSpace(decision.NextPromptText))
             {
                 OnTranscriptAppended?.Invoke($"AI: {decision.NextPromptText}");
+                currentPromptText = decision.NextPromptText;
             }
 
             var isClarificationTurn = IsClarificationReason(decision.Reason);
