@@ -39,7 +39,7 @@ public class WebRtcClient : IDisposable
         _pythonBaseUrl = pythonBaseUrl.TrimEnd('/');
     }
 
-    public async Task ConnectAsync()
+    public async Task ConnectAsync(string examAttemptId)
     {
         if (_isDisposed)
         {
@@ -79,7 +79,7 @@ public class WebRtcClient : IDisposable
         System.Diagnostics.Debug.WriteLine($"[WebRTC] SDP Offer:\n{offer.sdp}");
         await _peerConnection.setLocalDescription(offer);
 
-        var (sessionId, answerSdp) = await PostOfferAsync(offer.sdp, offer.type.ToString());
+        var (sessionId, answerSdp) = await PostOfferAsync(offer.sdp, offer.type.ToString(), examAttemptId);
         _sessionId = sessionId;
 
         var answerInit = new RTCSessionDescriptionInit
@@ -152,9 +152,9 @@ public class WebRtcClient : IDisposable
         }
     }
 
-    private async Task<(string sessionId, string sdp)> PostOfferAsync(string sdp, string type)
+    private async Task<(string sessionId, string sdp)> PostOfferAsync(string sdp, string type, string examAttemptId)
     {
-        var body = JsonSerializer.Serialize(new { sdp, type });
+        var body = JsonSerializer.Serialize(new { sdp, type, exam_attempt_id = examAttemptId });
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
 
         System.Diagnostics.Debug.WriteLine($"[WebRTC] POST {_pythonBaseUrl}/webrtc/offer ...");

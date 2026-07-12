@@ -15,7 +15,14 @@ public class MockExamDataFactory
                 Description = paper.Description,
                 Duration = paper.DurationMinutes,
                 ExamDate = paper.ExamDate,
-                Status = paper.Status
+                Status = paper.Status,
+                Kind = paper.ExamId == Guid.Parse("11111111-1111-1111-1111-111111111111")
+                    ? ExamKind.ClassTest
+                    : ExamKind.Centralized,
+                CanEnter = paper.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase),
+                EntryMessage = paper.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase)
+                    ? string.Empty
+                    : "Chua den luc vao thi cho bai nay.",
             })
             .ToList();
     }

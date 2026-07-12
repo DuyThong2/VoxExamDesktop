@@ -10,7 +10,7 @@ public class OtpEntryViewModel : BaseViewModel
     private readonly IExamEntryNavigator _navigator;
     private readonly ExamSessionState _sessionState;
     private readonly IExamEntryApiService _entryApi;
-    private readonly IExamApiService _examApi;
+    private readonly IExamSessionBootstrapService _sessionBootstrapService;
     private readonly AppSettings _settings;
 
     private readonly DispatcherTimer _refreshTimer;
@@ -25,13 +25,13 @@ public class OtpEntryViewModel : BaseViewModel
         IExamEntryNavigator navigator,
         ExamSessionState sessionState,
         IExamEntryApiService entryApi,
-        IExamApiService examApi,
+        IExamSessionBootstrapService sessionBootstrapService,
         AppSettings settings)
     {
         _navigator = navigator;
         _sessionState = sessionState;
         _entryApi = entryApi;
-        _examApi = examApi;
+        _sessionBootstrapService = sessionBootstrapService;
         _settings = settings;
 
         _secondsUntilRefresh = RefreshSeconds;
@@ -122,9 +122,7 @@ public class OtpEntryViewModel : BaseViewModel
         try
         {
             var ticket = await _entryApi.VerifyOtpAsync(examId, _otp);
-            _sessionState.EntryTicket = ticket;
-            var paper = await _examApi.GetExamPaperAsync(ticket.AttemptId.ToString());
-            _sessionState.LoadExamPaper(paper, ticket.AttemptId);
+            await _sessionBootstrapService.EnterWithTicketAsync(ticket);
             LocalFileLogger.Info("otp", "verify_success", new { examId, ticket.TicketId });
 
             Cleanup();
@@ -132,14 +130,17 @@ public class OtpEntryViewModel : BaseViewModel
         }
         catch (OtpVerificationException ex)
         {
-            // Otp's setter resets HasError to false as a side effect (so the error clears once
-            // the user starts retyping) -- clear Otp BEFORE setting HasError/ErrorMessage, or this
-            // assignment order silently undoes HasError=true in the same synchronous call and the
-            // error banner never actually shows.
             Otp = string.Empty;
             ErrorMessage = ex.Message;
             HasError = true;
             LocalFileLogger.Info("otp", "verify_rejected", new { examId, reason = ex.Message });
+        }
+        catch (ExamEntryRejectedException ex)
+        {
+            ErrorMessage = ex.Message;
+            HasError = true;
+            _sessionState.EntryTicket = null;
+            LocalFileLogger.Info("otp", "entry_rejected", new { examId, reason = ex.Message });
         }
         catch (Exception ex)
         {

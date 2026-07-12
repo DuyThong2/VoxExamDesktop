@@ -160,6 +160,8 @@ public partial class App : Application
             });
         }
 
+        services.AddSingleton<IExamSessionBootstrapService, ExamSessionBootstrapService>();
+
         services.AddHttpClient<IAuthApiService, AuthApiService>(client =>
         {
             client.BaseAddress = new Uri(settings.JavaBaseUrl);

@@ -2,6 +2,7 @@ using System.Text.Json;
 using VoxOralExam.Core.Interfaces;
 using VoxOralExam.DesktopApp.Infrastructure;
 using VoxOralExam.DesktopApp.Models;
+using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.Services;
 
@@ -9,6 +10,7 @@ public class ScreenProctoringService : IProctoringService, IDisposable
 {
     private readonly CameraService _camera;
     private readonly WebRtcClient _webRtc;
+    private readonly ExamSessionState _sessionState;
     private bool _isStarted;
     private bool _isStopping;
     private bool _isDisposed;
@@ -16,10 +18,11 @@ public class ScreenProctoringService : IProctoringService, IDisposable
     public event Action<string>? OnStatusChanged;
     public event Action<ProctoringEvent>? OnProctoringEvent;
 
-    public ScreenProctoringService(CameraService camera, WebRtcClient webRtc)
+    public ScreenProctoringService(CameraService camera, WebRtcClient webRtc, ExamSessionState sessionState)
     {
         _camera = camera;
         _webRtc = webRtc;
+        _sessionState = sessionState;
     }
 
     public async Task StartAsync()
@@ -37,7 +40,10 @@ public class ScreenProctoringService : IProctoringService, IDisposable
         _webRtc.OnProctoringEvent += HandleSseEvent;
 
         OnStatusChanged?.Invoke("Dang ket noi WebRTC...");
-        await _webRtc.ConnectAsync();
+        var examAttemptId = _sessionState.ExamAttemptId != Guid.Empty
+            ? _sessionState.ExamAttemptId.ToString("D")
+            : _sessionState.SessionId;
+        await _webRtc.ConnectAsync(examAttemptId);
 
         OnStatusChanged?.Invoke("Dang khoi dong camera...");
         _camera.OnRawFrame += OnCameraRawFrame;

@@ -9,8 +9,8 @@ public class AppSettings
     public string AvatarWebRtcOfferPath { get; set; } = "/avatar/webrtc/offer";
     public int MaxTurnsPerQuestion { get; set; } = 3;
     public int QuestionTurnTimeoutSeconds { get; set; } = 180;
-    public int InitialSilenceTimeoutSeconds { get; set; } = 8;
-    public int SilenceTimeoutAfterRepeatSeconds { get; set; } = 12;
+    public int InitialSilenceTimeoutSeconds { get; set; } = 12;
+    public int SilenceTimeoutAfterRepeatSeconds { get; set; } = 18;
     public int PostSpeechSilenceGracePeriodSeconds { get; set; } = 2;
     public int AvatarSpeechMaxWaitSeconds { get; set; } = 25;
     public int TurnAudioPreRollMilliseconds { get; set; } = 400;

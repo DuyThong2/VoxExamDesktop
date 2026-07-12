@@ -29,6 +29,17 @@ public class ExamEntryApiService : IExamEntryApiService
         {
             Content = JsonContent.Create(new { otp })
         };
+        return await SendTicketRequestAsync(request, ct);
+    }
+
+    public async Task<ExamEntryTicket> StartClassTestAsync(Guid examId, CancellationToken ct = default)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/exams/{examId:D}/class-test/start");
+        return await SendTicketRequestAsync(request, ct);
+    }
+
+    private async Task<ExamEntryTicket> SendTicketRequestAsync(HttpRequestMessage request, CancellationToken ct)
+    {
         var accessToken = _sessionState.CurrentUser?.AccessToken;
         if (!string.IsNullOrWhiteSpace(accessToken))
         {
@@ -37,30 +48,30 @@ public class ExamEntryApiService : IExamEntryApiService
 
         using var response = await _http.SendAsync(request, ct);
 
-        // Java's VerifyExamScheduleOtpUseCase reports every "can't proceed with this OTP attempt"
-        // case (wrong code, not a candidate, no schedule/paper assigned, expired/mismatched
-        // schedule) using the codebase's ordinary exceptions (Unauthorized/NotFound/BadRequest)
-        // rather than bespoke 410/422 statuses. Surface the server's own message for all of
-        // them instead of a generic string -- it's already specific and student-facing.
-        //
-        // A 401 with no Authorization header at all (e.g. missing/expired access token) comes
-        // back from Spring Security itself with an EMPTY body, not the app's JSON error shape --
-        // ReadFromJsonAsync on an empty body throws JsonException, so guard on content length
-        // before attempting to parse it.
-        if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.NotFound or HttpStatusCode.BadRequest)
+        if (response.StatusCode == HttpStatusCode.Unauthorized)
         {
             ErrorPayload? error = null;
             if (response.Content.Headers.ContentLength is > 0)
             {
                 error = await response.Content.ReadFromJsonAsync<ErrorPayload>(JsonOptions, ct);
             }
-            throw new OtpVerificationException(error?.Message ?? "Mã OTP không đúng hoặc đã hết hạn.");
+            throw new OtpVerificationException(error?.Message ?? "Ma OTP khong dung hoac da het han.");
+        }
+
+        if ((int)response.StatusCode >= 400 && (int)response.StatusCode < 500)
+        {
+            ErrorPayload? error = null;
+            if (response.Content.Headers.ContentLength is > 0)
+            {
+                error = await response.Content.ReadFromJsonAsync<ErrorPayload>(JsonOptions, ct);
+            }
+            throw new ExamEntryRejectedException(error?.Message ?? "Ban chua du dieu kien vao thi.");
         }
 
         response.EnsureSuccessStatusCode();
         var payload = await response.Content.ReadFromJsonAsync<ApiResponse<ExamEntryTicket>>(JsonOptions, ct);
         return payload?.Data
-            ?? throw new InvalidOperationException("Phản hồi xác thực OTP không chứa entry ticket.");
+            ?? throw new InvalidOperationException("Phan hoi vao thi khong chua entry ticket.");
     }
 
     private sealed class ApiResponse<T>
