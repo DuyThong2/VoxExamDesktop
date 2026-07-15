@@ -30,6 +30,7 @@ public class RealtimeExamFlowService : IExamFlowService
     private readonly AvatarWebRtcClient _avatarClient;
     private readonly MicAudioStreamer _micStreamer;
     private readonly IExamApiService _examApi;
+    private readonly QuestionAssetPresentationCoordinator _assetPresentationCoordinator;
 
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
@@ -39,6 +40,7 @@ public class RealtimeExamFlowService : IExamFlowService
     private TaskCompletionSource<bool>? _avatarUtteranceCompleteTcs;
     private bool _studentSpeechWindowOpen;
     private readonly List<Task> _pendingArchiveTasks = [];
+    private Guid? _lastAnnouncedSectionId;
 
     public RealtimeExamFlowService(
         TurnAudioUploader turnAudioUploader,
@@ -48,7 +50,8 @@ public class RealtimeExamFlowService : IExamFlowService
         RealtimeSessionClient sessionClient,
         AvatarWebRtcClient avatarClient,
         MicAudioStreamer micStreamer,
-        IExamApiService examApi)
+        IExamApiService examApi,
+        QuestionAssetPresentationCoordinator assetPresentationCoordinator)
     {
         _turnAudioUploader = turnAudioUploader;
         _turnArchiveClient = turnArchiveClient;
@@ -58,6 +61,7 @@ public class RealtimeExamFlowService : IExamFlowService
         _avatarClient = avatarClient;
         _micStreamer = micStreamer;
         _examApi = examApi;
+        _assetPresentationCoordinator = assetPresentationCoordinator;
     }
 
     public event Action<ExamQuestionPrompt>? OnQuestionPresented;
@@ -125,6 +129,7 @@ public class RealtimeExamFlowService : IExamFlowService
             await _avatarClient.ConnectAsync(_sessionState.ExamAttemptId, ct);
 
             _micStreamer.Start(recorder, _sessionClient);
+            _lastAnnouncedSectionId = null;
 
             for (_sessionState.QuestionIndex = 0; _sessionState.QuestionIndex < _sessionState.Questions.Count; _sessionState.QuestionIndex++)
             {
@@ -134,6 +139,9 @@ public class RealtimeExamFlowService : IExamFlowService
             }
 
             OnStatusChanged?.Invoke("Da hoan thanh bai van dap.");
+            await WaitForAvatarUtteranceCompletionAfterAsync(
+                triggerAsync: token => _sessionClient.SendExamEndAndWaitForAckAsync(token),
+                ct);
             OnExamCompleted?.Invoke();
             LocalFileLogger.Info("exam_flow", "run_completed");
 
@@ -180,17 +188,57 @@ public class RealtimeExamFlowService : IExamFlowService
         var attemptAnswerId = _sessionState.AttemptAnswerIdsByQuestionId[question.Id];
         var paperItemId = _sessionState.PaperItemIdsByQuestionId[question.Id];
         var maxTurnsPerQuestion = Math.Max(1, _settings.MaxTurnsPerQuestion);
+        var sectionInstruction = GetSectionInstructionToAnnounce(question);
 
         CloseStudentSpeechWindow();
+        _assetPresentationCoordinator.Clear();
         var questionContext = BuildQuestionContext(question);
-        var avatarSpokeForQuestion = await WaitForAvatarUtteranceCompletionAfterAsync(
+
+        // 1) Section lead-in alone (only speaks when this question starts a new section -- see
+        // GetSectionInstructionToAnnounce), then a deliberate pause before moving on, so it reads
+        // as its own beat rather than running straight into the question's own instruction.
+        await WaitForAvatarUtteranceCompletionAfterAsync(
             triggerAsync: token => _sessionClient.SendQuestionStartAsync(
                 attemptAnswerId,
                 paperItemId,
                 questionContext,
                 language: "en-US",
-                token),
+                promptText: null,
+                sectionInstruction: sectionInstruction,
+                ct: token),
             ct);
+        if (!string.IsNullOrWhiteSpace(sectionInstruction))
+        {
+            await Task.Delay(TimeSpan.FromSeconds(2), ct);
+        }
+
+        // 2) Read the question's own instruction (if any) while showing its asset at the same
+        // time (if any) -- concurrent, not sequential, so the student sees the passage/image while
+        // being told what to do with it. The asset stays up for at least PreparationTimeSeconds
+        // regardless of how long the instruction takes to read.
+        bool avatarSpokeForQuestion;
+        var hasInstruction = !string.IsNullOrWhiteSpace(question.InstructionText);
+        if (hasInstruction || question.Asset is not null)
+        {
+            var instructionSpokenTask = hasInstruction
+                ? WaitForAvatarUtteranceCompletionAfterAsync(
+                    triggerAsync: token => _sessionClient.SendPresentQuestionAsync(question.InstructionText, token),
+                    ct)
+                : Task.FromResult(true);
+            if (question.Asset is not null)
+            {
+                OnStatusChanged?.Invoke("Dang hien tai nguyen cau hoi...");
+                var presentAssetTask = _assetPresentationCoordinator.PresentAsync(question.Asset, question.PreparationTimeSeconds, ct);
+                await Task.WhenAll(instructionSpokenTask, presentAssetTask);
+            }
+            avatarSpokeForQuestion = await instructionSpokenTask;
+        }
+
+        // 3) Ask the actual question -- the student is expected to answer right away afterwards.
+        avatarSpokeForQuestion = await WaitForAvatarUtteranceCompletionAfterAsync(
+            triggerAsync: token => _sessionClient.SendPresentQuestionAsync(prompt.QuestionText, token),
+            ct);
+
         if (avatarSpokeForQuestion)
         {
             OpenStudentSpeechWindow();
@@ -243,8 +291,12 @@ public class RealtimeExamFlowService : IExamFlowService
                 DispatchArchiveTurn(question, attemptAnswerId, paperItemId, turnOrder, currentPromptText, pcmBytes, ct);
             }
 
+            // Assumes worst case (this turn counts toward the budget, i.e. isn't a
+            // clarification) since we don't know Python's decision.Reason yet -- conservative,
+            // but the alternative (finding out too late) is exactly the bug this prevents.
+            var isLastAllowedTurn = assessmentTurnCount + 1 >= maxTurnsPerQuestion;
             var (decision, avatarSpokeAfterDecision) = await WaitForAvatarUtteranceCompletionAfterAsync(
-                triggerAsync: token => _sessionClient.SendTurnEndAndWaitAsync(token),
+                triggerAsync: token => _sessionClient.SendTurnEndAndWaitAsync(isLastAllowedTurn, token),
                 ct);
             _sessionClient.SetResumeCheckpoint(attemptAnswerId, turnOrder);
             LocalFileLogger.Info("exam_flow", "decision_received", new
@@ -286,6 +338,30 @@ public class RealtimeExamFlowService : IExamFlowService
         }
 
         CloseStudentSpeechWindow();
+        _assetPresentationCoordinator.Clear();
+    }
+
+    private string? GetSectionInstructionToAnnounce(Question question)
+    {
+        if (question.SectionId is null || question.SectionId == Guid.Empty)
+        {
+            return null;
+        }
+
+        if (_lastAnnouncedSectionId == question.SectionId)
+        {
+            return null;
+        }
+
+        _lastAnnouncedSectionId = question.SectionId;
+        if (string.IsNullOrWhiteSpace(question.SectionInstruction) && string.IsNullOrWhiteSpace(question.SectionTitle))
+        {
+            return null;
+        }
+
+        return string.IsNullOrWhiteSpace(question.SectionTitle)
+            ? question.SectionInstruction
+            : $"{question.SectionTitle}. {question.SectionInstruction}".Trim().Trim('.');
     }
 
     private void DispatchArchiveTurn(
@@ -619,7 +695,8 @@ public class RealtimeExamFlowService : IExamFlowService
             DurationSeconds = question.MaxResponseSeconds,
             MinResponseSeconds = question.MinResponseSeconds,
             MaxResponseSeconds = question.MaxResponseSeconds,
-            EvaluationGuide = BuildEvaluationGuideDto(evaluationGuide)
+            EvaluationGuide = BuildEvaluationGuideDto(evaluationGuide),
+            Asset = BuildQuestionAssetContextDto(question.Asset)
         };
     }
 
@@ -648,6 +725,31 @@ public class RealtimeExamFlowService : IExamFlowService
         QuestionType.LongAnswer => "long_answer",
         QuestionType.Opinion => "opinion",
         QuestionType.Description => "description",
+        _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
+    };
+
+    private static QuestionAssetContextDto? BuildQuestionAssetContextDto(QuestionAsset? asset)
+    {
+        if (asset is null)
+        {
+            return null;
+        }
+
+        return new QuestionAssetContextDto
+        {
+            Type = ToPythonAssetType(asset.Type),
+            Transcript = asset.Transcript,
+            Description = asset.Description,
+            AltText = asset.AltText
+        };
+    }
+
+    private static string ToPythonAssetType(QuestionAssetType type) => type switch
+    {
+        QuestionAssetType.Audio => "audio",
+        QuestionAssetType.Image => "image",
+        QuestionAssetType.Video => "video",
+        QuestionAssetType.TextPassage => "text_passage",
         _ => throw new ArgumentOutOfRangeException(nameof(type), type, null)
     };
 

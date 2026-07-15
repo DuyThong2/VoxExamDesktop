@@ -175,6 +175,7 @@ public partial class App : Application
         services.AddSingleton<RealtimeSessionClient>();
         services.AddSingleton<AvatarWebRtcClient>();
         services.AddSingleton<MicAudioStreamer>();
+        services.AddSingleton<QuestionAssetPresentationCoordinator>();
         services.AddSingleton<RealtimeExamFlowService>();
         services.AddSingleton<IExamFlowService>(sp => sp.GetRequiredService<RealtimeExamFlowService>());
 

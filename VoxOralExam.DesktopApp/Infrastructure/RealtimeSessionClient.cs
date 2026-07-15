@@ -42,6 +42,7 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     private CancellationTokenSource? _receiveLoopCts;
     private Task? _receiveLoopTask;
     private TaskCompletionSource<RealtimeDecision>? _pendingDecisionTcs;
+    private TaskCompletionSource<bool>? _pendingExamEndAckTcs;
     private Guid _examAttemptId;
     private bool _intentionalClose;
     private (Guid AnswerId, int TurnOrder)? _resumeCheckpoint;
@@ -141,6 +142,8 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         Guid? paperItemId,
         QuestionContextDto question,
         string language,
+        string? promptText,
+        string? sectionInstruction,
         CancellationToken ct)
     {
         var payload = new
@@ -149,9 +152,31 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
             answer_id = answerId.ToString("D"),
             paper_item_id = paperItemId?.ToString("D"),
             question,
-            language
+            language,
+            prompt_text = promptText,
+            section_instruction = sectionInstruction
         };
         return SendJsonAsync(payload, ct);
+    }
+
+    public Task SendPresentQuestionAsync(string promptText, CancellationToken ct)
+    {
+        var payload = new
+        {
+            type = "present_question",
+            prompt_text = promptText
+        };
+        return SendJsonAsync(payload, ct);
+    }
+
+    public async Task SendExamEndAndWaitForAckAsync(CancellationToken ct)
+    {
+        var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pendingExamEndAckTcs = tcs;
+        await SendJsonAsync(new { type = "exam_end" }, ct);
+
+        using var registration = ct.Register(() => tcs.TrySetCanceled());
+        await tcs.Task;
     }
 
     public Task SendResumeAsync(Guid answerId, int turnOrder, CancellationToken ct)
@@ -171,12 +196,16 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     /// one's decision arrives), so a single pending-TCS field is sufficient -- no per-call
     /// correlation id needed.
     /// </summary>
-    public async Task<RealtimeDecision> SendTurnEndAndWaitAsync(CancellationToken ct)
+    public async Task<RealtimeDecision> SendTurnEndAndWaitAsync(bool isLastAllowedTurn, CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<RealtimeDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingDecisionTcs = tcs;
 
-        await SendJsonAsync(new { type = "turn_end" }, ct);
+        // Tells Python not to speak another follow-up it can't actually get an answer to --
+        // without this, Python decides + speaks a follow-up in one step with no idea that
+        // MaxTurnsPerQuestion is about to force the question closed on the WPF side the moment
+        // that speech finishes, abandoning a question the student never gets to answer.
+        await SendJsonAsync(new { type = "turn_end", is_last_allowed_turn = isLastAllowedTurn }, ct);
 
         using var registration = ct.Register(() => tcs.TrySetCanceled());
         return await tcs.Task;
@@ -309,6 +338,10 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                     break;
                 case "question_start_ack":
                     LocalFileLogger.Info("realtime_ws", "ack_received", new { type, json });
+                    break;
+                case "exam_end_ack":
+                    LocalFileLogger.Info("realtime_ws", "ack_received", new { type, json });
+                    _pendingExamEndAckTcs?.TrySetResult(true);
                     break;
                 default:
                     LocalFileLogger.Info("realtime_ws", "unhandled_message_type", new { type, json });

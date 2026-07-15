@@ -7,6 +7,8 @@ public class ExamSessionState
     public string SessionId { get; set; } = string.Empty;
     public int SelectedAudioInputDeviceIndex { get; set; }
     public string SelectedAudioInputDeviceName { get; set; } = string.Empty;
+    public int SelectedAudioOutputDeviceIndex { get; set; }
+    public string SelectedAudioOutputDeviceName { get; set; } = string.Empty;
     public Exam? SelectedExam { get; set; }
     public ExamEntryTicket? EntryTicket { get; set; }
 
@@ -54,7 +56,13 @@ public class ExamSessionState
         QuestionIndex = 0;
         Questions = examPaper.PaperQuestions
             .OrderBy(item => item.OrderIndex)
-            .Select(item => item.Question)
+            .Select(item =>
+            {
+                item.Question.SectionId = item.SectionId;
+                item.Question.SectionTitle = item.SectionTitle;
+                item.Question.SectionInstruction = item.SectionInstruction;
+                return item.Question;
+            })
             .ToList();
         AttemptAnswerIdsByQuestionId = examPaper.PaperQuestions
             .ToDictionary(

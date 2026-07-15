@@ -13,6 +13,10 @@ public class Question
     public int PreparationTimeSeconds { get; set; }
     public int MinResponseSeconds { get; set; }
     public int MaxResponseSeconds { get; set; }
+    public Guid? SectionId { get; set; }
+    public string SectionTitle { get; set; } = string.Empty;
+    public string SectionInstruction { get; set; } = string.Empty;
+    public QuestionAsset? Asset { get; set; }
 
     // Mirrors Java's Question.type (QuestionType enum) — same entity, same position.
     public QuestionType Type { get; set; }

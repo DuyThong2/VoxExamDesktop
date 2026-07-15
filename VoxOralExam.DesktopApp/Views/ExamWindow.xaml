@@ -209,6 +209,7 @@
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
 
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
@@ -232,7 +233,93 @@
                                    LineHeight="24"
                                    Margin="0,0,0,16" />
 
-                        <StackPanel Grid.Row="2" Orientation="Horizontal">
+                        <Border Grid.Row="2"
+                                Margin="0,0,0,16"
+                                Padding="12"
+                                Background="#F8FAFC"
+                                BorderBrush="#E2E8F0"
+                                BorderThickness="1"
+                                CornerRadius="10">
+                            <!-- Only takes up space/shows a border when the current question actually has a
+                                 displayable asset. Previously this Border had no Visibility of its own, so it
+                                 (and its "no attachment" placeholder text) rendered on every question, including
+                                 ones with no asset at all. -->
+                            <Border.Style>
+                                <Style TargetType="Border">
+                                    <Setter Property="Visibility" Value="Collapsed" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding HasImageAsset}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding HasTextPassageAsset}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding HasMediaAsset}" Value="True">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Border.Style>
+                            <Grid>
+                                <Image Source="{Binding CurrentQuestionAssetImage}"
+                                       Stretch="Uniform"
+                                       MaxHeight="260">
+                                    <Image.Style>
+                                        <Style TargetType="Image">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasImageAsset}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Image.Style>
+                                </Image>
+
+                                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                              MaxHeight="260"
+                                              Padding="4">
+                                    <ScrollViewer.Style>
+                                        <Style TargetType="ScrollViewer">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasTextPassageAsset}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </ScrollViewer.Style>
+                                    <TextBlock Text="{Binding CurrentQuestionAsset.Transcript}"
+                                               TextWrapping="Wrap"
+                                               LineHeight="24"
+                                               FontSize="15"
+                                               Foreground="#0F172A" />
+                                </ScrollViewer>
+
+                                <MediaElement x:Name="QuestionAssetMedia"
+                                              LoadedBehavior="Manual"
+                                              UnloadedBehavior="Stop"
+                                              Stretch="Uniform"
+                                              Source="{Binding CurrentQuestionMediaSource, NotifyOnTargetUpdated=True, UpdateSourceTrigger=PropertyChanged}"
+                                              TargetUpdated="QuestionAssetMedia_TargetUpdated"
+                                              MediaEnded="QuestionAssetMedia_MediaEnded"
+                                              MediaFailed="QuestionAssetMedia_MediaFailed"
+                                              MaxHeight="260">
+                                    <MediaElement.Style>
+                                        <Style TargetType="MediaElement">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasMediaAsset}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </MediaElement.Style>
+                                </MediaElement>
+                            </Grid>
+                        </Border>
+
+                        <StackPanel Grid.Row="3" Orientation="Horizontal">
                             <Ellipse Width="8" Height="8" Fill="#F59E0B" Margin="0,0,8,0" VerticalAlignment="Center" />
                             <TextBlock Text="Dang cho hoc sinh tra loi..." FontSize="13" Foreground="#F59E0B" />
                         </StackPanel>

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Windows;
 using System.Windows.Input;
 using VoxOralExam.DesktopApp.Models;
 using VoxOralExam.DesktopApp.Services;
@@ -98,29 +99,34 @@ public class MainViewModel : BaseViewModel
 
         if (!exam.CanEnter)
         {
-            ErrorMessage = string.IsNullOrWhiteSpace(exam.EntryMessage)
-                ? "Bai thi hien chua du dieu kien de vao thi."
-                : exam.EntryMessage;
+            ShowEntryError(string.IsNullOrWhiteSpace(exam.EntryMessage)
+                ? "Bài thi hiện chưa đủ điều kiện để vào thi."
+                : exam.EntryMessage);
             return;
         }
 
-        if (exam.Kind == ExamKind.ClassTest)
+        // A class test always skips OTP (no schedule concept). A centralized exam only skips it
+        // when the teacher/admin has explicitly disabled OTP for it (Exam.requiresOtp); otherwise
+        // it goes through the normal OTP entry + schedule-window flow below.
+        var skipsOtp = exam.Kind == ExamKind.ClassTest || !exam.RequiresOtp;
+
+        if (skipsOtp)
         {
             if (!exam.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase))
             {
-                ErrorMessage = "Bài kiểm tra trên lớp chưa được giáo viên mở, vui lòng đợi.";
+                ShowEntryError("Bài kiểm tra chưa được giáo viên mở, vui lòng đợi.");
                 return;
             }
         }
         else if (!IsUpcomingOrInProgress(exam))
         {
-            ErrorMessage = "Bài thi không còn trong thời gian cho phép vào thi.";
+            ShowEntryError("Bài thi không còn trong thời gian cho phép vào thi.");
             return;
         }
 
         ResetExamSession(exam);
 
-        if (exam.Kind == ExamKind.ClassTest)
+        if (skipsOtp)
         {
             try
             {
@@ -132,19 +138,25 @@ public class MainViewModel : BaseViewModel
             catch (ExamEntryRejectedException ex)
             {
                 _sessionState.EntryTicket = null;
-                ErrorMessage = ex.Message;
+                ShowEntryError(ex.Message);
                 LocalFileLogger.Info("class_test", "start_rejected", new { examId = exam.Id, reason = ex.Message });
             }
             catch (Exception ex)
             {
                 _sessionState.EntryTicket = null;
-                ErrorMessage = $"Không thể bắt đầu bài kiểm tra trên lớp: {ex.Message}";
+                ShowEntryError($"Không thể bắt đầu bài kiểm tra: {ex.Message}");
                 LocalFileLogger.Error("class_test", "start_failed", ex, new { examId = exam.Id });
             }
             return;
         }
 
         _navigator.GoTo(ExamEntryStage.OtpEntry);
+    }
+
+    private void ShowEntryError(string message)
+    {
+        ErrorMessage = message;
+        MessageBox.Show(message, "Không thể vào thi", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     private void ResetExamSession(Exam exam)

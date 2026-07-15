@@ -14,7 +14,7 @@ public class ExamPaper
     public string Subject { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public int DurationMinutes { get; set; }
-    public DateTime ExamDate { get; set; }
+    public DateTime? ExamDate { get; set; }
     public string Status { get; set; } = string.Empty;
     public List<ExamPaperQuestion> PaperQuestions { get; set; } = [];
 }

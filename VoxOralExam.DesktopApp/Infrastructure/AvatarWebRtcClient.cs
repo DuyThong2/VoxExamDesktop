@@ -47,6 +47,7 @@ public sealed class AvatarWebRtcClient : IDisposable
 
     private readonly AppSettings _settings;
     private readonly IHttpClientFactory _httpClientFactory;
+    private readonly ExamSessionState _sessionState;
 
     private RTCPeerConnection? _peerConnection;
     private VP8Codec? _vp8Decoder;
@@ -61,10 +62,26 @@ public sealed class AvatarWebRtcClient : IDisposable
     public event Action<RTCPeerConnectionState>? OnConnectionStateChanged;
     public event Action<bool>? OnSpeakingChanged;
 
-    public AvatarWebRtcClient(AppSettings settings, IHttpClientFactory httpClientFactory)
+    public AvatarWebRtcClient(AppSettings settings, IHttpClientFactory httpClientFactory, ExamSessionState sessionState)
     {
         _settings = settings;
         _httpClientFactory = httpClientFactory;
+        _sessionState = sessionState;
+    }
+
+    /// <summary>WinMM output device indices/names, numbered the same way as WaveOutEvent.DeviceNumber
+    /// (both go through NAudio's WaveOut* WinMM binding), so a device picked here is safe to hand
+    /// straight to a WaveOutEvent's DeviceNumber -- mirrors TurnAudioRecorder.ListInputDevices().</summary>
+    public static IReadOnlyList<(int DeviceIndex, string ProductName)> ListOutputDevices()
+    {
+        var devices = new List<(int DeviceIndex, string ProductName)>();
+        for (var index = 0; index < WaveOut.DeviceCount; index++)
+        {
+            var caps = WaveOut.GetCapabilities(index);
+            devices.Add((index, caps.ProductName));
+        }
+
+        return devices;
     }
 
     public async Task ConnectAsync(Guid examAttemptId, CancellationToken ct)
@@ -81,7 +98,7 @@ public sealed class AvatarWebRtcClient : IDisposable
             DiscardOnBufferOverflow = true,
             BufferDuration = TimeSpan.FromSeconds(5)
         };
-        _waveOut = new WaveOutEvent();
+        _waveOut = new WaveOutEvent { DeviceNumber = _sessionState.SelectedAudioOutputDeviceIndex };
         _waveOut.Init(_waveProvider);
         _waveOut.Play();
 

@@ -1,9 +1,10 @@
 using System.Collections.ObjectModel;
-using System.Media;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using NAudio.Wave;
+using NAudio.Wave.SampleProviders;
+using VoxOralExam.DesktopApp.Infrastructure;
 using VoxOralExam.DesktopApp.Models;
 using VoxOralExam.DesktopApp.Services;
 using VoxOralExam.DesktopApp.State;
@@ -28,7 +29,9 @@ public class DevicePreflightViewModel : BaseViewModel
     private double _microphoneLevel;
     private BitmapImage? _cameraPreview;
     private AudioInputOption? _selectedAudioInput;
+    private AudioOutputOption? _selectedAudioOutput;
     private WaveInEvent? _micTestRecorder;
+    private WaveOutEvent? _outputTestPlayer;
     private CameraService? _cameraTestService;
 
     public DevicePreflightViewModel(
@@ -47,9 +50,11 @@ public class DevicePreflightViewModel : BaseViewModel
         ToggleCameraTestCommand = new RelayCommand(ToggleCameraTest);
 
         LoadAudioInputDevices();
+        LoadAudioOutputDevices();
     }
 
     public ObservableCollection<AudioInputOption> AudioInputDevices { get; } = [];
+    public ObservableCollection<AudioOutputOption> AudioOutputDevices { get; } = [];
 
     public string DeviceTestStatus
     {
@@ -87,6 +92,12 @@ public class DevicePreflightViewModel : BaseViewModel
         set => SetProperty(ref _selectedAudioInput, value);
     }
 
+    public AudioOutputOption? SelectedAudioOutput
+    {
+        get => _selectedAudioOutput;
+        set => SetProperty(ref _selectedAudioOutput, value);
+    }
+
     public ICommand EnterExamCommand { get; }
     public ICommand BackCommand { get; }
     public ICommand PlayTestSoundCommand { get; }
@@ -98,6 +109,8 @@ public class DevicePreflightViewModel : BaseViewModel
     {
         StopMicTest();
         StopCameraTest();
+        _outputTestPlayer?.Dispose();
+        _outputTestPlayer = null;
     }
 
     private void EnterExam()
@@ -105,6 +118,9 @@ public class DevicePreflightViewModel : BaseViewModel
         // Persist the chosen mic so the exam's audio pipeline uses it (moved here from login).
         _sessionState.SelectedAudioInputDeviceIndex = SelectedAudioInput?.DeviceIndex ?? 0;
         _sessionState.SelectedAudioInputDeviceName = SelectedAudioInput?.DisplayName ?? string.Empty;
+        // Persist the chosen speaker/headphone so AvatarWebRtcClient plays the avatar's speech there.
+        _sessionState.SelectedAudioOutputDeviceIndex = SelectedAudioOutput?.DeviceIndex ?? 0;
+        _sessionState.SelectedAudioOutputDeviceName = SelectedAudioOutput?.DisplayName ?? string.Empty;
 
         // Release the test devices BEFORE the exam opens so InExam can grab the camera/mic cleanly.
         // TODO(§E): open each device ONCE via a MediaCaptureHub and hand the WARM device to InExam so
@@ -139,11 +155,75 @@ public class DevicePreflightViewModel : BaseViewModel
         });
     }
 
+    private void LoadAudioOutputDevices()
+    {
+        AudioOutputDevices.Clear();
+        foreach (var (deviceIndex, productName) in AvatarWebRtcClient.ListOutputDevices())
+        {
+            AudioOutputDevices.Add(new AudioOutputOption
+            {
+                DeviceIndex = deviceIndex,
+                DisplayName = $"{deviceIndex}. {productName}"
+            });
+        }
+
+        SelectedAudioOutput = AudioOutputDevices.FirstOrDefault(option => option.DeviceIndex == _sessionState.SelectedAudioOutputDeviceIndex)
+            ?? AudioOutputDevices.FirstOrDefault();
+
+        LocalFileLogger.Info("device_test", "audio_output_devices_loaded", new
+        {
+            count = AudioOutputDevices.Count,
+            selected = SelectedAudioOutput?.DisplayName
+        });
+    }
+
     private void PlayTestSound()
     {
-        SystemSounds.Asterisk.Play();
-        DeviceTestStatus = "Đã phát âm thanh test ra tai nghe/loa mặc định";
-        LocalFileLogger.Info("device_test", "play_test_sound");
+        if (SelectedAudioOutput is null)
+        {
+            DeviceTestStatus = "Hãy chọn loa/tai nghe trước khi test";
+            LocalFileLogger.Info("device_test", "play_test_sound_skipped_no_device");
+            return;
+        }
+
+        try
+        {
+            _outputTestPlayer?.Dispose();
+            var tone = new SignalGenerator(16_000, 1) { Type = SignalGeneratorType.Sin, Frequency = 440, Gain = 0.3 };
+            _outputTestPlayer = new WaveOutEvent { DeviceNumber = SelectedAudioOutput.DeviceIndex };
+            _outputTestPlayer.Init(tone.ToWaveProvider());
+            _outputTestPlayer.Play();
+            DeviceTestStatus = $"Đã phát âm thanh test ra: {SelectedAudioOutput.DisplayName}";
+            LocalFileLogger.Info("device_test", "play_test_sound", new
+            {
+                SelectedAudioOutput.DeviceIndex,
+                SelectedAudioOutput.DisplayName
+            });
+
+            // Short test tone, not an endless one -- stop it after 600ms instead of relying on the
+            // caller to press a second button (there's no natural "level meter" equivalent for
+            // output, so a one-shot beep-and-stop is the closest mirror of the mic test).
+            var player = _outputTestPlayer;
+            _ = Task.Delay(600).ContinueWith(_ =>
+            {
+                Application.Current.Dispatcher.Invoke(() =>
+                {
+                    if (!ReferenceEquals(_outputTestPlayer, player))
+                    {
+                        return;
+                    }
+
+                    _outputTestPlayer?.Stop();
+                    _outputTestPlayer?.Dispose();
+                    _outputTestPlayer = null;
+                });
+            });
+        }
+        catch (Exception ex)
+        {
+            DeviceTestStatus = $"Lỗi phát test âm thanh: {ex.Message}";
+            LocalFileLogger.Error("device_test", "play_test_sound_failed", ex);
+        }
     }
 
     private void ToggleMicTest()

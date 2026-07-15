@@ -38,6 +38,24 @@ public class QuestionContextDto
 
     [JsonPropertyName("evaluation_guide")]
     public EvaluationGuideDto? EvaluationGuide { get; set; }
+
+    [JsonPropertyName("asset")]
+    public QuestionAssetContextDto? Asset { get; set; }
+}
+
+public class QuestionAssetContextDto
+{
+    [JsonPropertyName("type")]
+    public string Type { get; set; } = string.Empty;
+
+    [JsonPropertyName("transcript")]
+    public string Transcript { get; set; } = string.Empty;
+
+    [JsonPropertyName("description")]
+    public string Description { get; set; } = string.Empty;
+
+    [JsonPropertyName("alt_text")]
+    public string AltText { get; set; } = string.Empty;
 }
 
 public class EvaluationGuideDto

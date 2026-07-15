@@ -16,9 +16,14 @@ public class AuthApiService : IAuthApiService
         PropertyNameCaseInsensitive = true
     };
 
-    private const string GetUserQuery = """
-                                        query GetUser($id: ID!) {
-                                          user(id: $id) {
+    // `profile` resolves the CURRENTLY AUTHENTICATED user and only requires isAuthenticated()
+    // -- unlike the top-level `user(id: ...)` query, which is SYSTEM_ADMIN-only (for admins
+    // looking up an arbitrary user by id) and was wrongly being used here for self-lookup,
+    // causing every non-system-admin login (student/teacher/school-admin -- i.e. everyone who
+    // actually uses this app) to silently fail to load their own profile.
+    private const string GetProfileQuery = """
+                                        query GetProfile {
+                                          profile {
                                             id
                                             email
                                             phone
@@ -86,9 +91,7 @@ public class AuthApiService : IAuthApiService
             ? loginResponse.Data.Roles
             : tokenPayload.Roles;
 
-        var userProfile = string.IsNullOrWhiteSpace(userId)
-            ? null
-            : await GetUserProfileAsync(accessToken, userId, cancellationToken);
+        var userProfile = await GetUserProfileAsync(accessToken, cancellationToken);
 
         return new AuthenticatedUserContext
         {
@@ -112,17 +115,13 @@ public class AuthApiService : IAuthApiService
         };
     }
 
-    private async Task<UserProfileResponseDto?> GetUserProfileAsync(string accessToken, string userId, CancellationToken cancellationToken)
+    private async Task<UserProfileResponseDto?> GetUserProfileAsync(string accessToken, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "/graphql");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
         request.Content = JsonContent.Create(new GraphQlRequestDto
         {
-            Query = GetUserQuery,
-            Variables = new GetUserVariablesDto
-            {
-                Id = userId
-            }
+            Query = GetProfileQuery
         });
 
         using var response = await _httpClient.SendAsync(request, cancellationToken);
@@ -131,8 +130,8 @@ public class AuthApiService : IAuthApiService
             return null;
         }
 
-        var graphQlResponse = await response.Content.ReadFromJsonAsync<GraphQlResponseDto<GraphQlUserDataDto>>(JsonOptions, cancellationToken);
-        return graphQlResponse?.Data?.User;
+        var graphQlResponse = await response.Content.ReadFromJsonAsync<GraphQlResponseDto<GraphQlProfileDataDto>>(JsonOptions, cancellationToken);
+        return graphQlResponse?.Data?.Profile;
     }
 
     private static string ExtractErrorMessage(string responseJson, string? reasonPhrase)
