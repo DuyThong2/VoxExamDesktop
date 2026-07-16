@@ -45,6 +45,20 @@ public sealed class AvatarWebRtcClient : IDisposable
     // for about one second before declaring the avatar finished speaking.
     private const int SpeakingOffStreak = 50;
 
+    // Mirrors RealtimeSessionClient's reconnect backoff -- this connection has no durable
+    // server-side state to resume (avatar media is recvonly and stateless from WPF's point of
+    // view), so a plain re-offer/re-answer handshake is all reconnect needs.
+    private static readonly TimeSpan[] ReconnectBackoff =
+    [
+        TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4),
+        TimeSpan.FromSeconds(8), TimeSpan.FromSeconds(15)
+    ];
+
+    // PCMU frames arrive roughly every 20ms under normal conditions; a gap several times that
+    // signals a real stall worth reacting to (see HandleAudioFrameReceived) rather than ordinary
+    // jitter.
+    private static readonly TimeSpan AudioGapThreshold = TimeSpan.FromMilliseconds(400);
+
     private readonly AppSettings _settings;
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly ExamSessionState _sessionState;
@@ -57,10 +71,22 @@ public sealed class AvatarWebRtcClient : IDisposable
     private bool _isSpeaking;
     private int _loudStreak;
     private int _quietStreak;
+    private Guid _examAttemptId;
+    private bool _intentionalClose;
+    private bool _isReconnecting;
+    private DateTime? _lastAudioFrameReceivedAt;
 
     public event Action<BitmapImage>? OnVideoFrame;
     public event Action<RTCPeerConnectionState>? OnConnectionStateChanged;
     public event Action<bool>? OnSpeakingChanged;
+    /// <summary>Fired after a dropped connection (state=failed) is successfully re-established.</summary>
+    public event Action? OnReconnected;
+    /// <summary>Fired once, the first time ReconnectBackoff's fast attempts (~30s total) are
+    /// exhausted without success -- signals a likely real outage rather than a brief blip. Does
+    /// NOT mean reconnect gave up: an indefinite slower retry loop (LongOutageRetryInterval)
+    /// keeps running afterward and still fires OnReconnected if/when it eventually succeeds. The
+    /// caller should surface this as "still trying to reconnect", not as a fatal error.</summary>
+    public event Action? OnReconnecting;
 
     public AvatarWebRtcClient(AppSettings settings, IHttpClientFactory httpClientFactory, ExamSessionState sessionState)
     {
@@ -91,7 +117,8 @@ public sealed class AvatarWebRtcClient : IDisposable
             throw new ObjectDisposedException(nameof(AvatarWebRtcClient));
         }
 
-        _vp8Decoder = new VP8Codec();
+        _examAttemptId = examAttemptId;
+        _intentionalClose = false;
 
         _waveProvider = new BufferedWaveProvider(new WaveFormat(RTP_AUDIO_CLOCK_RATE, 16, 1))
         {
@@ -102,11 +129,29 @@ public sealed class AvatarWebRtcClient : IDisposable
         _waveOut.Init(_waveProvider);
         _waveOut.Play();
 
+        await ConnectCoreAsync(examAttemptId, ct);
+    }
+
+    /// <summary>
+    /// Builds a fresh RTCPeerConnection and does the offer/answer handshake. Split out from
+    /// ConnectAsync so AttemptReconnectAsync can re-run just this part after a dropped
+    /// connection without tearing down and re-initializing the audio output device each retry.
+    /// </summary>
+    private async Task ConnectCoreAsync(Guid examAttemptId, CancellationToken ct)
+    {
+        _vp8Decoder = new VP8Codec();
+
         _peerConnection = new RTCPeerConnection(null);
         _peerConnection.onconnectionstatechange += state =>
         {
             LocalFileLogger.Info("avatar_webrtc", "connection_state_changed", new { state = state.ToString() });
             OnConnectionStateChanged?.Invoke(state);
+
+            if (state == RTCPeerConnectionState.failed && !_intentionalClose)
+            {
+                LocalFileLogger.Info("avatar_webrtc", "unexpected_disconnect", new { _examAttemptId });
+                _ = AttemptReconnectAsync();
+            }
         };
 
         var videoCapabilities = new List<SDPAudioVideoMediaFormat> { new(SDPMediaTypesEnum.video, 96, "VP8/90000") };
@@ -131,6 +176,105 @@ public sealed class AvatarWebRtcClient : IDisposable
         });
 
         LocalFileLogger.Info("avatar_webrtc", "connected", new { examAttemptId });
+    }
+
+    // Mirrors RealtimeSessionClient's LongOutageRetryInterval -- once the fast backoff is
+    // exhausted this is likely a real outage (internet down at the exam site), not a blip, so
+    // keep retrying indefinitely at a fixed interval instead of giving up permanently.
+    private static readonly TimeSpan LongOutageRetryInterval = TimeSpan.FromSeconds(20);
+
+    /// <summary>
+    /// Re-establishes the avatar peer connection after it was declared "failed" -- e.g. because
+    /// Python's event loop was blocked long enough (a slow follow-up-decision LLM call under a
+    /// degraded network) that no RTP/ICE keepalive could be sent, and consent checks on this side
+    /// timed out. Without this, the avatar goes permanently silent for the rest of the exam even
+    /// though Python keeps synthesizing and "completing" utterances into a dead connection.
+    /// </summary>
+    private async Task AttemptReconnectAsync()
+    {
+        if (_isReconnecting || _isDisposed || _intentionalClose)
+        {
+            return;
+        }
+
+        _isReconnecting = true;
+        try
+        {
+            TeardownPeerConnection();
+            _waveProvider?.ClearBuffer();
+            ResetSpeakingState();
+
+            foreach (var delay in ReconnectBackoff)
+            {
+                if (_isDisposed || _intentionalClose)
+                {
+                    return;
+                }
+
+                await Task.Delay(delay);
+                if (await TryReconnectOnceAsync(delay))
+                {
+                    return;
+                }
+            }
+
+            // Signals "this looks like a real outage, still retrying in the background at a
+            // slower pace" -- not "gave up" (see the doc comment on OnReconnecting).
+            LocalFileLogger.Error(
+                "avatar_webrtc", "reconnect_short_backoff_exhausted",
+                new InvalidOperationException("Short avatar reconnect backoff exhausted; entering long-retry mode."));
+            OnReconnecting?.Invoke();
+
+            while (!_isDisposed && !_intentionalClose)
+            {
+                await Task.Delay(LongOutageRetryInterval);
+                if (await TryReconnectOnceAsync(LongOutageRetryInterval, longRetry: true))
+                {
+                    return;
+                }
+            }
+        }
+        finally
+        {
+            _isReconnecting = false;
+        }
+    }
+
+    private async Task<bool> TryReconnectOnceAsync(TimeSpan delay, bool longRetry = false)
+    {
+        if (_isDisposed || _intentionalClose)
+        {
+            return false;
+        }
+
+        try
+        {
+            LocalFileLogger.Info(
+                "avatar_webrtc", "reconnect_attempt",
+                new { _examAttemptId, delaySeconds = delay.TotalSeconds, longRetry });
+            await ConnectCoreAsync(_examAttemptId, CancellationToken.None);
+            LocalFileLogger.Info("avatar_webrtc", "reconnected", new { _examAttemptId });
+            OnReconnected?.Invoke();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("avatar_webrtc", "reconnect_attempt_failed", ex);
+            TeardownPeerConnection();
+            return false;
+        }
+    }
+
+    /// <summary>Closes just the peer connection/decoder -- not the audio output device, which
+    /// stays alive across reconnects so WaveOutEvent doesn't need to be re-initialized on every
+    /// retry.</summary>
+    private void TeardownPeerConnection()
+    {
+        _peerConnection?.close();
+        _peerConnection = null;
+        _vp8Decoder?.Dispose();
+        _vp8Decoder = null;
+        _lastAudioFrameReceivedAt = null;
     }
 
     private void HandleVideoFrameReceived(System.Net.IPEndPoint remote, uint timestamp, byte[] frame, VideoFormat format)
@@ -194,6 +338,27 @@ public sealed class AvatarWebRtcClient : IDisposable
 
         try
         {
+            // SIPSorceryMedia.Abstractions.EncodedAudioFrame carries no RTP sequence number or
+            // timestamp -- only DurationMilliSeconds -- so real per-packet loss detection isn't
+            // possible at this layer. What IS observable is the wall-clock gap between
+            // successive frames: PCMU frames normally arrive back-to-back every ~20ms, so a much
+            // bigger gap means something upstream stalled (network jitter, or the Python-side
+            // event-loop freeze this was written to guard against -- see AttemptReconnectAsync).
+            // If that backlog is just appended once the stall clears, BufferedWaveProvider plays
+            // it back-to-back far faster than real time -- audibly a burst/garble ("rè") rather
+            // than a clean gap. Dropping the stale backlog and resuming live from the freshest
+            // frame trades a brief silence for avoiding that garble.
+            var now = DateTime.UtcNow;
+            if (_lastAudioFrameReceivedAt is { } lastReceivedAt && now - lastReceivedAt > AudioGapThreshold)
+            {
+                LocalFileLogger.Info("avatar_webrtc", "audio_gap_detected", new
+                {
+                    gapMilliseconds = (now - lastReceivedAt).TotalMilliseconds,
+                });
+                _waveProvider.ClearBuffer();
+            }
+            _lastAudioFrameReceivedAt = now;
+
             var pcm = new byte[encoded.Length * 2];
             long sumAbsAmplitude = 0;
             for (var i = 0; i < encoded.Length; i++)
@@ -269,14 +434,15 @@ public sealed class AvatarWebRtcClient : IDisposable
             return Task.CompletedTask;
         }
 
+        // Marks this an intentional close first so a state change fired by the close() call
+        // below doesn't race AttemptReconnectAsync into starting.
+        _intentionalClose = true;
+
         // Just like WebRtcClient.cs's DisconnectAsync, closing the local peer connection is
         // enough -- Python's own onconnectionstatechange handler (realtime/avatar_webrtc.py)
         // detects the resulting ICE/DTLS disconnect and cleans up server-side; no separate REST
         // call needed.
-        _peerConnection?.close();
-        _peerConnection = null;
-        _vp8Decoder?.Dispose();
-        _vp8Decoder = null;
+        TeardownPeerConnection();
         _waveOut?.Stop();
         _waveOut?.Dispose();
         _waveOut = null;
@@ -292,9 +458,9 @@ public sealed class AvatarWebRtcClient : IDisposable
             return;
         }
 
+        _intentionalClose = true;
         _isDisposed = true;
-        _peerConnection?.close();
-        _vp8Decoder?.Dispose();
+        TeardownPeerConnection();
         _waveOut?.Stop();
         _waveOut?.Dispose();
         ResetSpeakingState();

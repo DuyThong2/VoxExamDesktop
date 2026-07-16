@@ -160,6 +160,7 @@ public partial class App : Application
             });
         }
 
+        services.AddSingleton<RealtimeAttemptProgressClient>();
         services.AddSingleton<IExamSessionBootstrapService, ExamSessionBootstrapService>();
 
         services.AddHttpClient<IAuthApiService, AuthApiService>(client =>
@@ -172,6 +173,7 @@ public partial class App : Application
         services.AddSingleton<ITurnUploadUrlProvider, TurnUploadUrlProvider>();
         services.AddSingleton<TurnAudioUploader>();
         services.AddSingleton<TurnArchiveClient>();
+        services.AddSingleton<LocalAvatarSpeaker>();
         services.AddSingleton<RealtimeSessionClient>();
         services.AddSingleton<AvatarWebRtcClient>();
         services.AddSingleton<MicAudioStreamer>();

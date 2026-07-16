@@ -69,9 +69,9 @@ public class ExamViewModel : BaseViewModel
         _examFlow.OnStatusChanged += HandleExamStatusChanged;
         _examFlow.OnExamCompleted += HandleExamCompleted;
         _examFlow.OnStudentSpeakingChanged += HandleStudentSpeakingChanged;
+        _examFlow.OnAvatarSpeakingChanged += HandleAvatarSpeakingChanged;
         _assetPresentationCoordinator.OnAssetDisplayRequested += HandleAssetDisplayRequested;
         _avatarClient.OnVideoFrame += HandleAvatarVideoFrame;
-        _avatarClient.OnSpeakingChanged += HandleAvatarSpeakingChanged;
 
         StartCountdown();
     }
@@ -265,9 +265,9 @@ public class ExamViewModel : BaseViewModel
             _examFlow.OnStatusChanged -= HandleExamStatusChanged;
             _examFlow.OnExamCompleted -= HandleExamCompleted;
             _examFlow.OnStudentSpeakingChanged -= HandleStudentSpeakingChanged;
+            _examFlow.OnAvatarSpeakingChanged -= HandleAvatarSpeakingChanged;
             _assetPresentationCoordinator.OnAssetDisplayRequested -= HandleAssetDisplayRequested;
             _avatarClient.OnVideoFrame -= HandleAvatarVideoFrame;
-            _avatarClient.OnSpeakingChanged -= HandleAvatarSpeakingChanged;
             _camera.OnPreviewFrame -= HandlePreviewFrame;
             _proctoring.OnStatusChanged -= HandleProctoringStatusChanged;
             _proctoring.OnProctoringEvent -= HandleProctoringEvent;

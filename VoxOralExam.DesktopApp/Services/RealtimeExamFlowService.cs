@@ -69,6 +69,10 @@ public class RealtimeExamFlowService : IExamFlowService
     public event Action<string>? OnStatusChanged;
     public event Action? OnExamCompleted;
     public event Action<bool>? OnStudentSpeakingChanged;
+    /// <summary>Plain forward of _sessionClient.OnAvatarSpeakingChanged -- see that event's doc
+    /// comment (RealtimeSessionClient.cs) for why this replaced AvatarWebRtcClient.OnSpeakingChanged
+    /// as the ripple UI's signal source.</summary>
+    public event Action<bool>? OnAvatarSpeakingChanged;
 
     public Task StartAsync(CancellationToken ct)
     {
@@ -114,8 +118,12 @@ public class RealtimeExamFlowService : IExamFlowService
         _sessionClient.OnVadSpeechStart += HandleVadSpeechStart;
         _sessionClient.OnVadSpeechEnd += HandleVadSpeechEnd;
         _sessionClient.OnAvatarUtteranceComplete += HandleAvatarUtteranceComplete;
+        _sessionClient.OnAvatarSpeakingChanged += ForwardAvatarSpeakingChanged;
         _sessionClient.OnError += HandleSessionError;
+        _sessionClient.OnReconnecting += HandleSessionReconnecting;
         _sessionClient.OnReconnected += HandleSessionReconnected;
+        _avatarClient.OnReconnecting += HandleAvatarReconnecting;
+        _avatarClient.OnReconnected += HandleAvatarReconnected;
 
         try
         {
@@ -125,8 +133,11 @@ public class RealtimeExamFlowService : IExamFlowService
             OnStatusChanged?.Invoke("Dang ket noi realtime session...");
             await _sessionClient.ConnectAsync(_sessionState.ExamAttemptId, ct);
 
-            OnStatusChanged?.Invoke("Dang ket noi avatar...");
-            await _avatarClient.ConnectAsync(_sessionState.ExamAttemptId, ct);
+            if (_settings.EnableAvatarWebRtc)
+            {
+                OnStatusChanged?.Invoke("Dang ket noi avatar...");
+                await _avatarClient.ConnectAsync(_sessionState.ExamAttemptId, ct);
+            }
 
             _micStreamer.Start(recorder, _sessionClient);
             _lastAnnouncedSectionId = null;
@@ -170,13 +181,20 @@ public class RealtimeExamFlowService : IExamFlowService
             _sessionClient.OnVadSpeechStart -= HandleVadSpeechStart;
             _sessionClient.OnVadSpeechEnd -= HandleVadSpeechEnd;
             _sessionClient.OnAvatarUtteranceComplete -= HandleAvatarUtteranceComplete;
+            _sessionClient.OnAvatarSpeakingChanged -= ForwardAvatarSpeakingChanged;
             _sessionClient.OnError -= HandleSessionError;
+            _sessionClient.OnReconnecting -= HandleSessionReconnecting;
             _sessionClient.OnReconnected -= HandleSessionReconnected;
+            _avatarClient.OnReconnecting -= HandleAvatarReconnecting;
+            _avatarClient.OnReconnected -= HandleAvatarReconnected;
             OnStudentSpeakingChanged?.Invoke(false);
             _micStreamer.Stop();
             await recorder.StopAsync();
             _recorder = null;
-            await _avatarClient.DisconnectAsync();
+            if (_settings.EnableAvatarWebRtc)
+            {
+                await _avatarClient.DisconnectAsync();
+            }
             await _sessionClient.CloseAsync();
             LocalFileLogger.Info("exam_flow", "run_finally_complete");
         }
@@ -241,7 +259,15 @@ public class RealtimeExamFlowService : IExamFlowService
 
         if (avatarSpokeForQuestion)
         {
+            // Arm the mic/recorder BEFORE the preparation announcement below, not after -- if the
+            // student starts answering early (while that announcement is still playing),
+            // HandleVadSpeechStart gates only on _studentSpeechWindowOpen and will call
+            // _recorder.BeginTurnCapture() regardless of whether WaitForSpeechStartAsync has been
+            // called yet, so their audio is captured instead of lost. See the turn-1 check right
+            // before WaitForSpeechStartAsync below, and AnnouncePreparationAndRecordingAsync's own
+            // doc comment, for the other half of this.
             OpenStudentSpeechWindow();
+            await AnnouncePreparationAndRecordingAsync(question, ct);
         }
         else
         {
@@ -276,7 +302,16 @@ public class RealtimeExamFlowService : IExamFlowService
                 break;
             }
 
-            var spoke = await WaitForSpeechStartAsync(initialTimeout, ct);
+            // If the student already started answering while the preparation/recording
+            // announcement was still playing (see AnnouncePreparationAndRecordingAsync),
+            // HandleVadSpeechStart already called _recorder.BeginTurnCapture() for them -- VAD's
+            // speech_start already fired once and won't fire again, so WaitForSpeechStartAsync
+            // would otherwise just wait out the full initialTimeout for a signal that will never
+            // come, producing a false "no response" timeout despite the student having answered.
+            // Only relevant for turn 1 -- later follow-up turns never have that announcement.
+            var spoke = turnOrder == 1 && _recorder is not null && _recorder.IsTurnActive
+                ? true
+                : await WaitForSpeechStartAsync(initialTimeout, ct);
             if (spoke)
             {
                 OnStatusChanged?.Invoke("Hoc sinh dang noi...");
@@ -296,7 +331,7 @@ public class RealtimeExamFlowService : IExamFlowService
             // but the alternative (finding out too late) is exactly the bug this prevents.
             var isLastAllowedTurn = assessmentTurnCount + 1 >= maxTurnsPerQuestion;
             var (decision, avatarSpokeAfterDecision) = await WaitForAvatarUtteranceCompletionAfterAsync(
-                triggerAsync: token => _sessionClient.SendTurnEndAndWaitAsync(isLastAllowedTurn, token),
+                triggerAsync: token => _sessionClient.SendTurnEndAndWaitAsync(turnOrder, isLastAllowedTurn, token),
                 ct);
             _sessionClient.SetResumeCheckpoint(attemptAnswerId, turnOrder);
             LocalFileLogger.Info("exam_flow", "decision_received", new
@@ -442,6 +477,121 @@ public class RealtimeExamFlowService : IExamFlowService
         }
     }
 
+    // Randomized so the avatar doesn't say the literal same sentence every single question --
+    // mirrors the pattern agents/src/node/followUpDecisionGraph/FollowUpNode already uses
+    // (_NO_SPEECH_PREFIXES etc., random.choice over several template phrasings).
+    //
+    // Deliberately split into separate template groups (prep-only vs. each duration-clause shape)
+    // rather than one template with {0}/{1}/{2} baked into a single sentence -- PreparationTimeSeconds,
+    // MinResponseSeconds and MaxResponseSeconds are configured independently per question and any
+    // combination can be zero/unset. Baking all three into one sentence would read as nonsense
+    // ("between 0 and 0 seconds") whenever min/max aren't both set. BuildDurationClause below picks
+    // the right group (or omits the clause) for whichever subset is actually present.
+    private static readonly string[] PreparationAnnouncementTemplates =
+    [
+        "You have {0} seconds to prepare. I will start recording in {0} seconds.",
+        "Take {0} seconds to think about your answer. Recording starts in {0} seconds.",
+        "You have {0} seconds to get ready. I'll begin recording in {0} seconds.",
+    ];
+
+    private static readonly string[] BothDurationTemplates =
+    [
+        "We expect an answer between {0} and {1} seconds.",
+        "Try to answer in about {0} to {1} seconds.",
+        "Aim for somewhere between {0} and {1} seconds when you respond.",
+    ];
+
+    private static readonly string[] MinOnlyDurationTemplates =
+    [
+        "We expect an answer of at least {0} seconds.",
+        "Please speak for at least {0} seconds.",
+    ];
+
+    private static readonly string[] MaxOnlyDurationTemplates =
+    [
+        "Please keep your answer under {0} seconds.",
+        "Try to answer within {0} seconds.",
+    ];
+
+    private static readonly string[] RecordingStartedAnnouncementTemplates =
+    [
+        "I am recording now.",
+        "Recording has started -- go ahead.",
+        "I'm listening now, please begin.",
+    ];
+
+    /// <summary>
+    /// Speaks a preparation-time (+ expected-answer-length, if configured) announcement, waits out
+    /// the actual preparation window, then announces recording has started. A no-op if the
+    /// question doesn't declare a preparation time -- PreparationTimeSeconds is what drives the
+    /// whole wait/announce mechanic here, so without it there's nothing to wait for regardless of
+    /// whether Min/MaxResponseSeconds are set. Deliberately does NOT gate the mic on any of this --
+    /// the caller (RunQuestionAsync) already calls OpenStudentSpeechWindow() before this runs, so a
+    /// student who starts answering early (mid-announcement or mid-countdown) is still captured;
+    /// see the turn-1 IsTurnActive check right before WaitForSpeechStartAsync in RunQuestionAsync.
+    ///
+    /// Caveat this doesn't attempt to solve: the mic is now armed while the avatar may still be
+    /// speaking (something that never happened before this method existed -- previously
+    /// OpenStudentSpeechWindow only ever ran after the avatar had fully finished). On a speaker
+    /// setup without echo cancellation/headphones, the avatar's own voice could in principle leak
+    /// into the mic and confuse VAD. Not verified against real hardware -- worth testing with an
+    /// actual speaker+mic setup before relying on this in a real exam.
+    /// </summary>
+    private async Task AnnouncePreparationAndRecordingAsync(Question question, CancellationToken ct)
+    {
+        var prepSeconds = question.PreparationTimeSeconds;
+        if (prepSeconds <= 0)
+        {
+            return;
+        }
+
+        var prepText = string.Format(
+            PreparationAnnouncementTemplates[Random.Shared.Next(PreparationAnnouncementTemplates.Length)],
+            prepSeconds);
+        var durationClause = BuildDurationClause(question.MinResponseSeconds, question.MaxResponseSeconds);
+        var announcement = string.IsNullOrEmpty(durationClause) ? prepText : $"{prepText} {durationClause}";
+
+        await WaitForAvatarUtteranceCompletionAfterAsync(
+            triggerAsync: token => _sessionClient.SendPresentQuestionAsync(announcement, token),
+            ct);
+
+        await Task.Delay(TimeSpan.FromSeconds(prepSeconds), ct);
+
+        var recordingNowText = RecordingStartedAnnouncementTemplates[Random.Shared.Next(RecordingStartedAnnouncementTemplates.Length)];
+        await WaitForAvatarUtteranceCompletionAfterAsync(
+            triggerAsync: token => _sessionClient.SendPresentQuestionAsync(recordingNowText, token),
+            ct);
+    }
+
+    /// <summary>Covers all four combinations of Min/MaxResponseSeconds being set or not (both,
+    /// min-only, max-only, neither) -- returns "" for "neither" so the caller can skip appending
+    /// anything rather than speaking an empty/nonsensical clause.</summary>
+    private static string BuildDurationClause(int minResponseSeconds, int maxResponseSeconds)
+    {
+        var hasMin = minResponseSeconds > 0;
+        var hasMax = maxResponseSeconds > 0;
+
+        if (hasMin && hasMax)
+        {
+            return string.Format(
+                BothDurationTemplates[Random.Shared.Next(BothDurationTemplates.Length)],
+                minResponseSeconds, maxResponseSeconds);
+        }
+        if (hasMin)
+        {
+            return string.Format(
+                MinOnlyDurationTemplates[Random.Shared.Next(MinOnlyDurationTemplates.Length)],
+                minResponseSeconds);
+        }
+        if (hasMax)
+        {
+            return string.Format(
+                MaxOnlyDurationTemplates[Random.Shared.Next(MaxOnlyDurationTemplates.Length)],
+                maxResponseSeconds);
+        }
+        return "";
+    }
+
     private async Task<bool> WaitForSpeechStartAsync(TimeSpan timeout, CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -573,6 +723,8 @@ public class RealtimeExamFlowService : IExamFlowService
         _avatarUtteranceCompleteTcs?.TrySetResult(true);
     }
 
+    private void ForwardAvatarSpeakingChanged(bool isSpeaking) => OnAvatarSpeakingChanged?.Invoke(isSpeaking);
+
     private void HandleVadSpeechStart()
     {
         if (!_studentSpeechWindowOpen)
@@ -605,6 +757,15 @@ public class RealtimeExamFlowService : IExamFlowService
         OnStatusChanged?.Invoke($"Loi realtime session: {message}");
     }
 
+    private void HandleSessionReconnecting()
+    {
+        // Fires once RealtimeSessionClient's fast reconnect backoff (~30s) is exhausted -- it
+        // keeps retrying indefinitely in the background after this (see
+        // RealtimeSessionClient.LongOutageRetryInterval), so this is "still trying", not fatal.
+        LocalFileLogger.Info("exam_flow", "realtime_session_reconnecting", null);
+        OnStatusChanged?.Invoke("Mat ket noi realtime session (co the do mat mang). Dang tiep tuc thu ket noi lai...");
+    }
+
     private void HandleSessionReconnected(int lastArchivedTurnOrder)
     {
         // Best-effort realignment: logs the server's durable view so a mismatch against this
@@ -612,6 +773,20 @@ public class RealtimeExamFlowService : IExamFlowService
         // turns to force agreement -- see the class doc's Phase 6 gap note.
         LocalFileLogger.Info("exam_flow", "realtime_session_reconnected", new { lastArchivedTurnOrder });
         OnStatusChanged?.Invoke("Da ket noi lai realtime session.");
+    }
+
+    private void HandleAvatarReconnecting()
+    {
+        // Mirrors HandleSessionReconnecting -- see AvatarWebRtcClient.OnReconnecting's doc
+        // comment for why this isn't fatal either.
+        LocalFileLogger.Info("exam_flow", "avatar_reconnecting", null);
+        OnStatusChanged?.Invoke("Mat ket noi avatar (co the do mat mang). Dang tiep tuc thu ket noi lai...");
+    }
+
+    private void HandleAvatarReconnected()
+    {
+        LocalFileLogger.Info("exam_flow", "avatar_reconnected", null);
+        OnStatusChanged?.Invoke("Da ket noi lai avatar.");
     }
 
     private static bool IsClarificationReason(string? reason) =>

@@ -38,10 +38,25 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
 
     private readonly AppSettings _settings;
 
+    // ClientWebSocket.SendAsync must never be called concurrently on the same instance -- a
+    // second overlapping call throws InvalidOperationException. MicAudioStreamer fires one
+    // SendAudioFrameAsync per PCM chunk without waiting for the previous send to finish, and
+    // SendJsonAsync (question_start/turn_end/resume/exam_end) can land at the same time from a
+    // different call path. Under a fast network each send completes well within one chunk
+    // interval so this never collided in practice; under a slow network SendAsync can take long
+    // enough that two calls do overlap, and the failure was being silently swallowed (see the
+    // old catch in SendAudioFrameAsync), dropping mic audio without any visible error. This
+    // semaphore serializes every send instead of relying on timing luck.
+    private readonly SemaphoreSlim _sendLock = new(1, 1);
+
     private ClientWebSocket? _webSocket;
     private CancellationTokenSource? _receiveLoopCts;
     private Task? _receiveLoopTask;
     private TaskCompletionSource<RealtimeDecision>? _pendingDecisionTcs;
+    // Which turn_order _pendingDecisionTcs is currently waiting on -- lets a resume_ack's
+    // recovered_turn_order/decision (see HandleMessage's "resume_ack" case) know whether it
+    // actually matches what SendTurnEndAndWaitAsync is still waiting for.
+    private int? _pendingDecisionTurnOrder;
     private TaskCompletionSource<bool>? _pendingExamEndAckTcs;
     private Guid _examAttemptId;
     private bool _intentionalClose;
@@ -52,15 +67,32 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     public event Action<string>? OnPartialTranscript;
     public event Action<string>? OnFinalTranscript;
     public event Action<string>? OnError;
+    /// <summary>Fired only when the connection is closed intentionally (CloseAsync/exam ended) --
+    /// NOT fired for an unexpected drop, which goes through AttemptReconnectAsync/OnReconnecting
+    /// instead. Do not treat this as an error signal.</summary>
     public event Action? OnDisconnected;
+    /// <summary>Fired once, the first time ReconnectBackoff's fast attempts (~30s total) are
+    /// exhausted without success after an unexpected drop -- signals a likely real outage rather
+    /// than a brief blip. Does NOT mean reconnect gave up: an indefinite slower retry loop
+    /// (LongOutageRetryInterval) keeps running afterward and still fires OnReconnected if/when it
+    /// eventually succeeds. The caller should surface this as "still trying to reconnect".</summary>
+    public event Action? OnReconnecting;
     public event Action<int>? OnReconnected;
     public event Action<int, string>? OnAvatarUtteranceComplete;
+    /// <summary>Fired true right before local TTS playback starts for a "speak" message with
+    /// non-empty text, false right after it ends (success or failure). Drives the avatar
+    /// speaking-ripple UI -- see HandleSpeakAsync's doc comment for why this replaced the old
+    /// WebRTC-audio-amplitude-based signal.</summary>
+    public event Action<bool>? OnAvatarSpeakingChanged;
 
     public bool IsConnected => _webSocket?.State == WebSocketState.Open;
 
-    public RealtimeSessionClient(AppSettings settings)
+    private readonly LocalAvatarSpeaker _avatarSpeaker;
+
+    public RealtimeSessionClient(AppSettings settings, LocalAvatarSpeaker avatarSpeaker)
     {
         _settings = settings;
+        _avatarSpeaker = avatarSpeaker;
     }
 
     /// <summary>
@@ -93,25 +125,33 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         _receiveLoopTask = ReceiveLoopAsync(_receiveLoopCts.Token);
     }
 
+    // After ReconnectBackoff's fast attempts (~30s total) are exhausted, a real outage (e.g. the
+    // exam site's internet actually being down, not just a brief blip) is more likely than not --
+    // giving up permanently there would silently abandon the exam attempt with no way back. Keep
+    // retrying at this fixed interval indefinitely instead; it only stops via _intentionalClose
+    // (exam ended/stopped) or ConnectCoreAsync finally succeeding.
+    private static readonly TimeSpan LongOutageRetryInterval = TimeSpan.FromSeconds(20);
+
     private async Task AttemptReconnectAsync()
     {
         foreach (var delay in ReconnectBackoff)
         {
+            if (_intentionalClose)
+            {
+                return;
+            }
+
             await Task.Delay(delay);
+            if (_intentionalClose)
+            {
+                return;
+            }
+
             try
             {
                 LocalFileLogger.Info("realtime_ws", "reconnect_attempt", new { _examAttemptId, delaySeconds = delay.TotalSeconds });
                 await ConnectCoreAsync(_examAttemptId, CancellationToken.None);
-
-                var checkpoint = _resumeCheckpoint;
-                var lastArchivedTurnOrder = 0;
-                if (checkpoint is not null)
-                {
-                    lastArchivedTurnOrder = await SendResumeAndAwaitAckAsync(checkpoint.Value.AnswerId, checkpoint.Value.TurnOrder);
-                }
-
-                LocalFileLogger.Info("realtime_ws", "reconnected", new { _examAttemptId, lastArchivedTurnOrder });
-                OnReconnected?.Invoke(lastArchivedTurnOrder);
+                await ResumeAfterReconnectAsync();
                 return;
             }
             catch (Exception ex)
@@ -120,8 +160,62 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
             }
         }
 
-        LocalFileLogger.Error("realtime_ws", "reconnect_gave_up", new InvalidOperationException("Exhausted all reconnect attempts."));
-        OnDisconnected?.Invoke();
+        // Tells the UI once that this looks like a real outage, not a blip -- distinct from
+        // OnDisconnected (which is reserved for an intentional close) since this means "still
+        // trying, just slower now", not "connection is done". OnReconnected still fires normally
+        // whenever a later attempt (below) finally succeeds.
+        LocalFileLogger.Error(
+            "realtime_ws", "reconnect_short_backoff_exhausted",
+            new InvalidOperationException("Short reconnect backoff exhausted; entering long-retry mode."));
+        OnReconnecting?.Invoke();
+
+        while (!_intentionalClose)
+        {
+            await Task.Delay(LongOutageRetryInterval);
+            if (_intentionalClose)
+            {
+                return;
+            }
+
+            try
+            {
+                LocalFileLogger.Info(
+                    "realtime_ws", "reconnect_attempt",
+                    new { _examAttemptId, delaySeconds = LongOutageRetryInterval.TotalSeconds, longRetry = true });
+                await ConnectCoreAsync(_examAttemptId, CancellationToken.None);
+                await ResumeAfterReconnectAsync();
+                return;
+            }
+            catch (Exception ex)
+            {
+                LocalFileLogger.Error("realtime_ws", "reconnect_attempt_failed", ex);
+            }
+        }
+    }
+
+    private async Task ResumeAfterReconnectAsync()
+    {
+        var checkpoint = _resumeCheckpoint;
+        var lastArchivedTurnOrder = 0;
+        if (checkpoint is not null)
+        {
+            lastArchivedTurnOrder = await SendResumeAndAwaitAckAsync(checkpoint.Value.AnswerId, checkpoint.Value.TurnOrder);
+        }
+
+        // exam_end/exam_end_ack carries no content to recover (unlike turn_end's decision, see
+        // HandleMessage's "resume_ack" case) -- it's a plain "did you get this" handshake, so if
+        // SendExamEndAndWaitForAckAsync is still waiting when we reconnect, simplest is to just
+        // resend exam_end using the SAME pending TCS (not a new one) so that original caller's
+        // await still resolves once this resend's ack comes back.
+        var pendingExamEnd = _pendingExamEndAckTcs;
+        if (pendingExamEnd is not null && !pendingExamEnd.Task.IsCompleted)
+        {
+            LocalFileLogger.Info("realtime_ws", "resending_exam_end_after_reconnect", new { _examAttemptId });
+            await SendJsonAsync(new { type = "exam_end" }, CancellationToken.None);
+        }
+
+        LocalFileLogger.Info("realtime_ws", "reconnected", new { _examAttemptId, lastArchivedTurnOrder });
+        OnReconnected?.Invoke(lastArchivedTurnOrder);
     }
 
     private async Task<int> SendResumeAndAwaitAckAsync(Guid answerId, int turnOrder)
@@ -176,6 +270,22 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         await SendJsonAsync(new { type = "exam_end" }, ct);
 
         using var registration = ct.Register(() => tcs.TrySetCanceled());
+
+        // Same rationale as SendTurnEndAndWaitAsync's timeout: if the connection drops right here,
+        // ResumeAfterReconnectAsync re-sends exam_end on reconnect (see there) rather than trying
+        // to recover a specific decision -- exam_end/exam_end_ack carries no content to recover,
+        // it's a plain "did you get this" handshake, so a resend is simplest. This timeout is only
+        // the last-resort ceiling for when even that never gets through.
+        var timeoutSeconds = Math.Max(15, _settings.QuestionTurnTimeoutSeconds);
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+        using var timeoutRegistration = timeoutCts.Token.Register(() =>
+        {
+            LocalFileLogger.Error(
+                "realtime_ws", "exam_end_ack_timeout",
+                new TimeoutException($"No exam_end_ack within {timeoutSeconds}s."));
+            tcs.TrySetResult(false);
+        });
+
         await tcs.Task;
     }
 
@@ -195,11 +305,19 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     /// sequential (RealtimeExamFlowService never sends a second turn_end before the previous
     /// one's decision arrives), so a single pending-TCS field is sufficient -- no per-call
     /// correlation id needed.
+    ///
+    /// If the connection drops between turn_end being sent and the decision arriving, this used
+    /// to hang forever even after a successful reconnect -- nothing ever resolved this TCS except
+    /// an actual "decision" message. Two things now unstick it: (1) a resume_ack carrying a
+    /// recovered_turn_order/decision (see HandleMessage) if Python finished and durably persisted
+    /// the decision before the WS reply was lost; (2) a last-resort timeout below, for the rarer
+    /// case where turn_end itself never reached the server at all (nothing to recover).
     /// </summary>
-    public async Task<RealtimeDecision> SendTurnEndAndWaitAsync(bool isLastAllowedTurn, CancellationToken ct)
+    public async Task<RealtimeDecision> SendTurnEndAndWaitAsync(int turnOrder, bool isLastAllowedTurn, CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<RealtimeDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingDecisionTcs = tcs;
+        _pendingDecisionTurnOrder = turnOrder;
 
         // Tells Python not to speak another follow-up it can't actually get an answer to --
         // without this, Python decides + speaks a follow-up in one step with no idea that
@@ -208,7 +326,34 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         await SendJsonAsync(new { type = "turn_end", is_last_allowed_turn = isLastAllowedTurn }, ct);
 
         using var registration = ct.Register(() => tcs.TrySetCanceled());
-        return await tcs.Task;
+
+        // Generous ceiling reusing the existing per-turn timeout setting -- covers the rare case
+        // where reconnect/resume can't recover anything (turn_end never reached the server at
+        // all), so the exam flow gives up on this one turn instead of blocking forever.
+        var timeoutSeconds = Math.Max(15, _settings.QuestionTurnTimeoutSeconds);
+        using var timeoutCts = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds));
+        using var timeoutRegistration = timeoutCts.Token.Register(() =>
+        {
+            LocalFileLogger.Error(
+                "realtime_ws", "turn_end_decision_timeout",
+                new TimeoutException($"No decision (direct or resume-recovered) within {timeoutSeconds}s."),
+                new { turnOrder });
+            tcs.TrySetResult(new RealtimeDecision
+            {
+                ShouldContinue = false,
+                NextPromptText = null,
+                Reason = "connection_lost_timeout",
+            });
+        });
+
+        try
+        {
+            return await tcs.Task;
+        }
+        finally
+        {
+            _pendingDecisionTurnOrder = null;
+        }
     }
 
     public async Task SendAudioFrameAsync(byte[] pcm)
@@ -221,7 +366,20 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
 
         try
         {
-            await socket.SendAsync(pcm, WebSocketMessageType.Binary, endOfMessage: true, CancellationToken.None);
+            await _sendLock.WaitAsync();
+            try
+            {
+                if (socket.State != WebSocketState.Open)
+                {
+                    return;
+                }
+
+                await socket.SendAsync(pcm, WebSocketMessageType.Binary, endOfMessage: true, CancellationToken.None);
+            }
+            finally
+            {
+                _sendLock.Release();
+            }
         }
         catch (Exception ex)
         {
@@ -234,7 +392,16 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         var socket = _webSocket ?? throw new InvalidOperationException("RealtimeSessionClient is not connected.");
         var json = JsonSerializer.Serialize(payload);
         var bytes = Encoding.UTF8.GetBytes(json);
-        await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct);
+
+        await _sendLock.WaitAsync(ct);
+        try
+        {
+            await socket.SendAsync(bytes, WebSocketMessageType.Text, endOfMessage: true, ct);
+        }
+        finally
+        {
+            _sendLock.Release();
+        }
     }
 
     private async Task ReceiveLoopAsync(CancellationToken ct)
@@ -299,15 +466,7 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
             switch (type)
             {
                 case "decision":
-                    var decisionElement = doc.RootElement.GetProperty("decision");
-                    var decision = new RealtimeDecision
-                    {
-                        ShouldContinue = decisionElement.GetProperty("should_continue").GetBoolean(),
-                        NextPromptText = decisionElement.TryGetProperty("next_prompt_text", out var p) && p.ValueKind != JsonValueKind.Null
-                            ? p.GetString()
-                            : null,
-                        Reason = decisionElement.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : ""
-                    };
+                    var decision = ParseDecision(doc.RootElement.GetProperty("decision"));
                     _pendingDecisionTcs?.TrySetResult(decision);
                     break;
                 case "vad_speech_start":
@@ -329,12 +488,43 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                     var lastArchivedTurnOrder = doc.RootElement.TryGetProperty("last_archived_turn_order", out var lto) ? lto.GetInt32() : -1;
                     _pendingResumeAckTcs?.TrySetResult(lastArchivedTurnOrder);
                     LocalFileLogger.Info("realtime_ws", "resume_ack_received", new { lastArchivedTurnOrder });
+
+                    // Recovery: if this attempt reconnected while SendTurnEndAndWaitAsync was still
+                    // waiting on a decision that never arrived, Python may have finished computing
+                    // it anyway and persisted it durably before the WS reply was lost --
+                    // recovered_turn_order/decision being present and matching what we're still
+                    // waiting on means exactly that. Resolve the pending TCS directly instead of
+                    // leaving it to sit until SendTurnEndAndWaitAsync's own timeout gives up.
+                    if (doc.RootElement.TryGetProperty("recovered_turn_order", out var rto)
+                        && doc.RootElement.TryGetProperty("decision", out var recoveredDecisionElement)
+                        && _pendingDecisionTcs is not null
+                        && _pendingDecisionTurnOrder == rto.GetInt32())
+                    {
+                        var recoveredDecision = ParseDecision(recoveredDecisionElement);
+                        LocalFileLogger.Info("realtime_ws", "decision_recovered_via_resume", new { turnOrder = rto.GetInt32() });
+                        _pendingDecisionTcs.TrySetResult(recoveredDecision);
+                    }
                     break;
                 case "avatar_utterance_complete":
                     var sequence = doc.RootElement.TryGetProperty("sequence", out var seq) ? seq.GetInt32() : -1;
                     var utteranceText = GetText(doc);
                     LocalFileLogger.Info("realtime_ws", "avatar_utterance_complete_received", new { sequence, utteranceText });
                     OnAvatarUtteranceComplete?.Invoke(sequence, utteranceText);
+                    break;
+                case "speak":
+                    // Prototype (task/performance.txt): Python now sends the text to say instead
+                    // of synthesizing+streaming it itself over the avatar WebRTC audio track.
+                    // Extract plain values here (not the JsonElement/doc itself, which is
+                    // disposed the moment this synchronous method returns) before handing off to
+                    // the fire-and-forget synth+play task -- mirrors MicAudioStreamer's
+                    // fire-and-forget pattern so a slow/failed synth never blocks the receive loop.
+                    var speakSequence = doc.RootElement.TryGetProperty("sequence", out var sq) ? sq.GetInt32() : -1;
+                    var speakText = GetText(doc);
+                    var speakRate = doc.RootElement.TryGetProperty("rate", out var rt) && rt.ValueKind != JsonValueKind.Null
+                        ? rt.GetString()
+                        : null;
+                    LocalFileLogger.Info("realtime_ws", "speak_received", new { speakSequence, speakText });
+                    _ = HandleSpeakAsync(speakSequence, speakText, speakRate);
                     break;
                 case "question_start_ack":
                     LocalFileLogger.Info("realtime_ws", "ack_received", new { type, json });
@@ -356,6 +546,56 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
 
     private static string GetText(JsonDocument doc) =>
         doc.RootElement.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "";
+
+    private static RealtimeDecision ParseDecision(JsonElement decisionElement) => new()
+    {
+        ShouldContinue = decisionElement.GetProperty("should_continue").GetBoolean(),
+        NextPromptText = decisionElement.TryGetProperty("next_prompt_text", out var p) && p.ValueKind != JsonValueKind.Null
+            ? p.GetString()
+            : null,
+        Reason = decisionElement.TryGetProperty("reason", out var r) ? r.GetString() ?? "" : "",
+    };
+
+    /// <summary>
+    /// Synthesizes and plays one "speak" message locally, then raises OnAvatarUtteranceComplete
+    /// -- the same event/timing contract RealtimeExamFlowService already consumed when completion
+    /// used to be a round-trip signal from Python's own (now-unused for this path) TTS+WebRTC
+    /// playback. Firing it in `finally` regardless of success mirrors the old server-side
+    /// behavior (attempt_connection.py's _speak_and_notify also always sent its completion
+    /// message even when speak() failed), so a synth/playback error here degrades to silence
+    /// instead of stalling the exam flow forever waiting for a completion that will never arrive.
+    /// </summary>
+    private async Task HandleSpeakAsync(int sequence, string text, string? rate)
+    {
+        // Drives IsAvatarSpeaking (the ripple UI, AvatarVideoHost.xaml) directly from this local
+        // synth+playback's own lifecycle -- replaces the old signal, which inferred "speaking"
+        // from decoded amplitude on the avatar WebRTC audio track. That track only ever carries
+        // idle silence now that TTS synthesis/playback happens here instead of server-side (see
+        // task/performance.txt's TTS-on-WPF migration), so the old amplitude-based signal would
+        // never fire true again if left in place. This is strictly more accurate anyway: WPF now
+        // knows exactly when it starts/stops playing, no amplitude-threshold guessing needed.
+        var hasSpeech = !string.IsNullOrWhiteSpace(text);
+        try
+        {
+            if (hasSpeech)
+            {
+                OnAvatarSpeakingChanged?.Invoke(true);
+            }
+            await _avatarSpeaker.SpeakAsync(text, rate, CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("realtime_ws", "local_avatar_speak_failed", ex, new { sequence, text });
+        }
+        finally
+        {
+            if (hasSpeech)
+            {
+                OnAvatarSpeakingChanged?.Invoke(false);
+            }
+            OnAvatarUtteranceComplete?.Invoke(sequence, text);
+        }
+    }
 
     public async Task CloseAsync()
     {
@@ -394,6 +634,7 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     {
         await CloseAsync();
         _receiveLoopCts?.Dispose();
+        _sendLock.Dispose();
     }
 }
 
