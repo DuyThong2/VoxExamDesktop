@@ -3,11 +3,117 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:converters="clr-namespace:VoxOralExam.DesktopApp.Converters"
              mc:Ignorable="d"
              d:DesignHeight="550" d:DesignWidth="850">
 
     <UserControl.Resources>
         <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+        <converters:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibility" />
+        <converters:ZeroCountToVisibilityConverter x:Key="CountToVisibilityConverter" />
+
+        <Style x:Key="StartExamButtonStyle" TargetType="Button">
+            <Setter Property="Background" Value="#2563EB" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="BorderThickness" Value="0" />
+            <Setter Property="Padding" Value="16,8" />
+            <Setter Property="FontSize" Value="13" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="6"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center" />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="#1D4ED8" />
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter Property="Background" Value="#1E40AF" />
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!--
+        Table columns are declared identically (same Width + SharedSizeGroup name) on the header
+        Grid and on every row's Grid, inside a shared Grid.IsSharedSizeScope="True" ancestor.
+        This is what makes the "Thời lượng"/"Thời gian thi"/action columns line up across rows
+        with very different title lengths, instead of each row auto-sizing to its own content.
+        -->
+        <DataTemplate x:Key="ExamItemTemplate">
+            <Border Background="White" BorderBrush="#F1F5F9" BorderThickness="0,0,0,1"
+                    Padding="16,12">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" MinWidth="200" />
+                        <ColumnDefinition Width="Auto" SharedSizeGroup="ExamDuration" />
+                        <ColumnDefinition Width="Auto" SharedSizeGroup="ExamDate" />
+                        <ColumnDefinition Width="Auto" SharedSizeGroup="ExamAction" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Grid.Column="0" Text="{Binding Title}"
+                               FontSize="14" FontWeight="SemiBold"
+                               TextWrapping="Wrap" VerticalAlignment="Center"
+                               Margin="0,0,16,0" />
+
+                    <TextBlock Grid.Column="1" Text="{Binding Duration, StringFormat='{}{0} phút'}"
+                               FontSize="13" Foreground="#6B7280"
+                               VerticalAlignment="Center" Margin="0,0,16,0" />
+
+                    <TextBlock Grid.Column="2" FontSize="13" Foreground="#6B7280"
+                               VerticalAlignment="Center" Margin="0,0,16,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Text" Value="{Binding ExamDate, StringFormat='{}{0:dd/MM/yyyy HH:mm}'}" />
+                                <Style.Triggers>
+                                    <!--
+                                    No ExamDate is the NORMAL state for a class test that has no
+                                    teacher-set openAt (CreateClassTestUseCase: status goes straight
+                                    to IN_PROGRESS, joinable immediately, no fixed schedule). That is
+                                    not "missing data" the way it is for a centralized exam with no
+                                    schedule assigned, so it gets a different, clearer label.
+                                    -->
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding ExamDate}" Value="{x:Null}" />
+                                            <Condition Binding="{Binding Kind}" Value="ClassTest" />
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Text" Value="Mở ngay" />
+                                    </MultiDataTrigger>
+                                    <MultiDataTrigger>
+                                        <MultiDataTrigger.Conditions>
+                                            <Condition Binding="{Binding ExamDate}" Value="{x:Null}" />
+                                            <Condition Binding="{Binding Kind}" Value="Centralized" />
+                                        </MultiDataTrigger.Conditions>
+                                        <Setter Property="Text" Value="Chưa có lịch" />
+                                    </MultiDataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+
+                    <Button Grid.Column="3" Content="Bắt đầu thi"
+                            Style="{StaticResource StartExamButtonStyle}"
+                            Command="{Binding DataContext.StartExamCommand, RelativeSource={RelativeSource AncestorType=ListView}}"
+                            CommandParameter="{Binding}" />
+                </Grid>
+            </Border>
+        </DataTemplate>
+
+        <Style x:Key="ExamTableHeaderStyle" TargetType="TextBlock">
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Foreground" Value="#9CA3AF" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
     </UserControl.Resources>
 
     <Grid Margin="24">
@@ -18,15 +124,13 @@
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
-        <!-- Header -->
         <StackPanel Grid.Row="0" Margin="0,0,0,20">
-            <TextBlock Text="🎓 Vox Oral Exam"
+            <TextBlock Text="VOX Oral Exam"
                        FontSize="26" FontWeight="Bold" />
-            <TextBlock Text="Danh sách bài thi sắp tới / đang diễn ra"
+            <TextBlock Text="Danh sách bài thi sắp tới hoặc đang diễn ra"
                        FontSize="14" Foreground="Gray" Margin="0,4,0,0" />
         </StackPanel>
 
-        <!-- Loading indicator -->
         <StackPanel Grid.Row="1" HorizontalAlignment="Center"
                     Visibility="{Binding IsLoading, Converter={StaticResource BoolToVisibility}}"
                     Margin="0,20,0,20">
@@ -36,91 +140,100 @@
                        HorizontalAlignment="Center" Margin="0,8,0,0" />
         </StackPanel>
 
-        <!-- Error message -->
         <TextBlock Grid.Row="1"
                    Text="{Binding ErrorMessage}"
                    Foreground="Red" FontSize="13"
                    Visibility="{Binding ErrorMessage, Converter={StaticResource BoolToVisibility}}"
                    TextWrapping="Wrap" Margin="0,8,0,0" />
 
-        <!-- Exam list -->
-        <ListView Grid.Row="2"
-                  ItemsSource="{Binding Exams}"
-                  BorderThickness="0"
-                  Visibility="{Binding IsLoading, Converter={StaticResource BoolToVisibility}, FallbackValue=Visible}">
-            <ListView.ItemTemplate>
-                <DataTemplate>
-                    <Border Background="White" CornerRadius="8"
-                            Padding="16" Margin="0,0,0,10"
-                            BorderBrush="#E5E7EB" BorderThickness="1">
-                        <Border.Effect>
-                            <DropShadowEffect BlurRadius="10" ShadowDepth="1" Opacity="0.08" />
-                        </Border.Effect>
+        <ScrollViewer Grid.Row="2"
+                      Visibility="{Binding IsLoading, Converter={StaticResource InverseBoolToVisibility}, FallbackValue=Visible}">
+            <StackPanel>
+                <TextBlock Text="Bài thi tập trung" FontSize="15" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <Border BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="8">
+                    <Grid IsSharedSizeScope="True">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
 
-                        <Grid>
-                            <Grid.ColumnDefinitions>
-                                <ColumnDefinition Width="*" />
-                                <ColumnDefinition Width="Auto" />
-                            </Grid.ColumnDefinitions>
+                        <Border Grid.Row="0" Background="#F9FAFB" CornerRadius="8,8,0,0"
+                                BorderBrush="#E5E7EB" BorderThickness="0,0,0,1" Padding="16,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" MinWidth="200" />
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="ExamDuration" />
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="ExamDate" />
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="ExamAction" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="TÊN BÀI THI" Style="{StaticResource ExamTableHeaderStyle}" />
+                                <TextBlock Grid.Column="1" Text="THỜI LƯỢNG" Style="{StaticResource ExamTableHeaderStyle}" Margin="0,0,16,0" />
+                                <TextBlock Grid.Column="2" Text="THỜI GIAN THI" Style="{StaticResource ExamTableHeaderStyle}" Margin="0,0,16,0" />
+                                <TextBlock Grid.Column="3" Text="" Style="{StaticResource ExamTableHeaderStyle}" />
+                            </Grid>
+                        </Border>
 
-                            <StackPanel Grid.Column="0">
-                                <TextBlock Text="{Binding Title}"
-                                           FontSize="16" FontWeight="SemiBold" />
-                                <StackPanel Orientation="Horizontal" Margin="0,6,0,0">
-                                    <TextBlock FontSize="13" Foreground="Gray">
-                                        <Run Text="{Binding Subject}" />
-                                        <Run Text=" • " />
-                                        <Run Text="{Binding Duration, StringFormat='{}{0} phút'}" />
-                                        <Run Text=" • " />
-                                        <Run Text="{Binding ExamDate, StringFormat='{}{0:dd/MM/yyyy HH:mm}'}" />
-                                    </TextBlock>
-                                </StackPanel>
-                            </StackPanel>
+                        <ListView Grid.Row="1" ItemsSource="{Binding CentralizedExams}"
+                                  ItemTemplate="{StaticResource ExamItemTemplate}"
+                                  BorderThickness="0" Padding="0">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="Padding" Value="0" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                        </ListView>
+                    </Grid>
+                </Border>
+                <TextBlock Text="Chưa có bài thi tập trung nào."
+                           Foreground="Gray" FontSize="13"
+                           Visibility="{Binding CentralizedExams.Count, Converter={StaticResource CountToVisibilityConverter}}"
+                           Margin="0,4,0,16" />
 
-                            <StackPanel Grid.Column="1" VerticalAlignment="Center">
-                                <Button Content="Bắt đầu thi"
-                                        Command="{Binding DataContext.StartExamCommand, RelativeSource={RelativeSource AncestorType=ListView}}"
-                                        CommandParameter="{Binding}"
-                                        Padding="16,8"
-                                        FontSize="13" FontWeight="SemiBold"
-                                        Cursor="Hand">
-                                    <Button.Style>
-                                        <Style TargetType="Button">
-                                            <Setter Property="Background" Value="#2563EB" />
-                                            <Setter Property="Foreground" Value="White" />
-                                            <Setter Property="BorderThickness" Value="0" />
-                                            <Setter Property="Template">
-                                                <Setter.Value>
-                                                    <ControlTemplate TargetType="Button">
-                                                        <Border Background="{TemplateBinding Background}"
-                                                                CornerRadius="6"
-                                                                Padding="{TemplateBinding Padding}">
-                                                            <ContentPresenter HorizontalAlignment="Center"
-                                                                              VerticalAlignment="Center" />
-                                                        </Border>
-                                                        <ControlTemplate.Triggers>
-                                                            <Trigger Property="IsMouseOver" Value="True">
-                                                                <Setter Property="Background" Value="#1D4ED8" />
-                                                            </Trigger>
-                                                            <Trigger Property="IsPressed" Value="True">
-                                                                <Setter Property="Background" Value="#1E40AF" />
-                                                            </Trigger>
-                                                        </ControlTemplate.Triggers>
-                                                    </ControlTemplate>
-                                                </Setter.Value>
-                                            </Setter>
-                                        </Style>
-                                    </Button.Style>
-                                </Button>
-                            </StackPanel>
-                        </Grid>
-                    </Border>
-                </DataTemplate>
-            </ListView.ItemTemplate>
-        </ListView>
+                <TextBlock Text="Bài kiểm tra trên lớp" FontSize="15" FontWeight="SemiBold" Margin="0,16,0,8" />
+                <Border BorderBrush="#E5E7EB" BorderThickness="1" CornerRadius="8">
+                    <Grid IsSharedSizeScope="True">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
 
-        <!-- Refresh button -->
-        <Button Grid.Row="3" Content="🔄 Làm mới"
+                        <Border Grid.Row="0" Background="#F9FAFB" CornerRadius="8,8,0,0"
+                                BorderBrush="#E5E7EB" BorderThickness="0,0,0,1" Padding="16,10">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" MinWidth="200" />
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="ExamDuration" />
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="ExamDate" />
+                                    <ColumnDefinition Width="Auto" SharedSizeGroup="ExamAction" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Grid.Column="0" Text="TÊN BÀI THI" Style="{StaticResource ExamTableHeaderStyle}" />
+                                <TextBlock Grid.Column="1" Text="THỜI LƯỢNG" Style="{StaticResource ExamTableHeaderStyle}" Margin="0,0,16,0" />
+                                <TextBlock Grid.Column="2" Text="THỜI GIAN THI" Style="{StaticResource ExamTableHeaderStyle}" Margin="0,0,16,0" />
+                                <TextBlock Grid.Column="3" Text="" Style="{StaticResource ExamTableHeaderStyle}" />
+                            </Grid>
+                        </Border>
+
+                        <ListView Grid.Row="1" ItemsSource="{Binding ClassTestExams}"
+                                  ItemTemplate="{StaticResource ExamItemTemplate}"
+                                  BorderThickness="0" Padding="0">
+                            <ListView.ItemContainerStyle>
+                                <Style TargetType="ListViewItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="Padding" Value="0" />
+                                </Style>
+                            </ListView.ItemContainerStyle>
+                        </ListView>
+                    </Grid>
+                </Border>
+                <TextBlock Text="Chưa có bài kiểm tra trên lớp nào."
+                           Foreground="Gray" FontSize="13"
+                           Visibility="{Binding ClassTestExams.Count, Converter={StaticResource CountToVisibilityConverter}}"
+                           Margin="0,4,0,0" />
+            </StackPanel>
+        </ScrollViewer>
+
+        <Button Grid.Row="3" Content="Làm mới"
                 Command="{Binding RefreshCommand}"
                 HorizontalAlignment="Right"
                 Padding="16,8" Margin="0,16,0,0"

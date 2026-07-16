@@ -2,11 +2,13 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
-using VoxOralExam.Core.Dtos;
+using VoxOralExam.Core.Models;
+using VoxOralExam.Core.Models.Dtos;
 using VoxOralExam.Core.Interfaces;
-using VoxOralExam.DesktopApp.Infrastructure;
-using VoxOralExam.DesktopApp.Models;
-using VoxOralExam.DesktopApp.Services;
+using VoxOralExam.DesktopApp.Infra.Clients.AIService;
+using VoxOralExam.DesktopApp.Infra.Devices;
+using VoxOralExam.DesktopApp.Services.DomainService;
+using VoxOralExam.DesktopApp.Services.ExamFlow;
 using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
@@ -19,6 +21,7 @@ public class ExamViewModel : BaseViewModel
     private readonly IExamFlowService _examFlow;
     private readonly AvatarWebRtcClient _avatarClient;
     private readonly IExamApiService _examApi;
+    private readonly QuestionAssetPresentationCoordinator _assetPresentationCoordinator;
 
     private string _studentName = string.Empty;
     private string _studentId = string.Empty;
@@ -40,6 +43,9 @@ public class ExamViewModel : BaseViewModel
     private bool _isCameraOn;
     private bool _isCleaningUp;
     private Task? _cleanupTask;
+    private QuestionAsset? _currentQuestionAsset;
+    private BitmapImage? _currentQuestionAssetImage;
+    private Uri? _currentQuestionMediaSource;
 
     public ExamViewModel(
         CameraService camera,
@@ -47,7 +53,8 @@ public class ExamViewModel : BaseViewModel
         ExamSessionState sessionState,
         IExamFlowService examFlow,
         AvatarWebRtcClient avatarClient,
-        IExamApiService examApi)
+        IExamApiService examApi,
+        QuestionAssetPresentationCoordinator assetPresentationCoordinator)
     {
         _camera = camera;
         _proctoring = proctoring;
@@ -55,6 +62,7 @@ public class ExamViewModel : BaseViewModel
         _examFlow = examFlow;
         _avatarClient = avatarClient;
         _examApi = examApi;
+        _assetPresentationCoordinator = assetPresentationCoordinator;
 
         LoadSessionData();
 
@@ -63,8 +71,9 @@ public class ExamViewModel : BaseViewModel
         _examFlow.OnStatusChanged += HandleExamStatusChanged;
         _examFlow.OnExamCompleted += HandleExamCompleted;
         _examFlow.OnStudentSpeakingChanged += HandleStudentSpeakingChanged;
+        _examFlow.OnAvatarSpeakingChanged += HandleAvatarSpeakingChanged;
+        _assetPresentationCoordinator.OnAssetDisplayRequested += HandleAssetDisplayRequested;
         _avatarClient.OnVideoFrame += HandleAvatarVideoFrame;
-        _avatarClient.OnSpeakingChanged += HandleAvatarSpeakingChanged;
 
         StartCountdown();
     }
@@ -155,6 +164,56 @@ public class ExamViewModel : BaseViewModel
 
     public ObservableCollection<LogEntry> LogEntries { get; } = new();
 
+    public QuestionAsset? CurrentQuestionAsset
+    {
+        get => _currentQuestionAsset;
+        set
+        {
+            if (SetProperty(ref _currentQuestionAsset, value))
+            {
+                OnPropertyChanged(nameof(HasImageAsset));
+                OnPropertyChanged(nameof(HasMediaAsset));
+                OnPropertyChanged(nameof(HasTextPassageAsset));
+            }
+        }
+    }
+
+    public BitmapImage? CurrentQuestionAssetImage
+    {
+        get => _currentQuestionAssetImage;
+        set
+        {
+            if (SetProperty(ref _currentQuestionAssetImage, value))
+            {
+                OnPropertyChanged(nameof(HasImageAsset));
+            }
+        }
+    }
+
+    public Uri? CurrentQuestionMediaSource
+    {
+        get => _currentQuestionMediaSource;
+        set
+        {
+            if (SetProperty(ref _currentQuestionMediaSource, value))
+            {
+                OnPropertyChanged(nameof(HasMediaAsset));
+            }
+        }
+    }
+
+    public bool HasImageAsset =>
+        CurrentQuestionAsset?.Type == QuestionAssetType.Image && CurrentQuestionAssetImage is not null;
+
+    public bool HasMediaAsset =>
+        CurrentQuestionAsset is not null
+        && (CurrentQuestionAsset.Type == QuestionAssetType.Video || CurrentQuestionAsset.Type == QuestionAssetType.Audio)
+        && CurrentQuestionMediaSource is not null;
+
+    public bool HasTextPassageAsset =>
+        CurrentQuestionAsset?.Type == QuestionAssetType.TextPassage
+        && !string.IsNullOrWhiteSpace(CurrentQuestionAsset?.Transcript);
+
     public async Task InitializeAsync()
     {
         if (_initialized)
@@ -208,8 +267,9 @@ public class ExamViewModel : BaseViewModel
             _examFlow.OnStatusChanged -= HandleExamStatusChanged;
             _examFlow.OnExamCompleted -= HandleExamCompleted;
             _examFlow.OnStudentSpeakingChanged -= HandleStudentSpeakingChanged;
+            _examFlow.OnAvatarSpeakingChanged -= HandleAvatarSpeakingChanged;
+            _assetPresentationCoordinator.OnAssetDisplayRequested -= HandleAssetDisplayRequested;
             _avatarClient.OnVideoFrame -= HandleAvatarVideoFrame;
-            _avatarClient.OnSpeakingChanged -= HandleAvatarSpeakingChanged;
             _camera.OnPreviewFrame -= HandlePreviewFrame;
             _proctoring.OnStatusChanged -= HandleProctoringStatusChanged;
             _proctoring.OnProctoringEvent -= HandleProctoringEvent;
@@ -231,6 +291,7 @@ public class ExamViewModel : BaseViewModel
         CurrentQuestion = _sessionState.CurrentQuestion?.QuestionText ?? string.Empty;
         QuestionNumber = _sessionState.QuestionIndex + 1;
         TotalQuestions = _sessionState.Questions.Count;
+        ApplyCurrentQuestionAsset(_sessionState.CurrentQuestion?.Asset);
 
         LogEntries.Add(new LogEntry { Time = DateTime.Now.AddMinutes(-2), Message = "Nguoi dung da dang nhap thanh cong", Type = LogType.Success });
         LogEntries.Add(new LogEntry { Time = DateTime.Now.AddMinutes(-1), Message = $"Thiet bi: {_sessionState.CurrentUser?.Device.DeviceName ?? "unknown"}", Type = LogType.Info });
@@ -243,12 +304,11 @@ public class ExamViewModel : BaseViewModel
             return;
         }
 
-        // Safety net only: the normal path loads the paper in MainViewModel before this window
-        // opens. If nothing is loaded, fall back to whatever exam id the session already knows
-        // (the mock service returns its first paper for a null id).
-        var examId = _sessionState.ExamId == Guid.Empty ? null : _sessionState.ExamId.ToString();
-        var paper = await _examApi.GetExamPaperAsync(examId);
-        _sessionState.LoadExamPaper(paper);
+        var sessionId = _sessionState.EntryTicket?.AttemptId != Guid.Empty
+            ? _sessionState.EntryTicket?.AttemptId.ToString()
+            : (_sessionState.ExamAttemptId == Guid.Empty ? null : _sessionState.ExamAttemptId.ToString());
+        var paper = await _examApi.GetExamPaperAsync(sessionId);
+        _sessionState.LoadExamPaper(paper, _sessionState.EntryTicket?.AttemptId);
     }
 
     private async Task StartCameraAsync()
@@ -303,7 +363,7 @@ public class ExamViewModel : BaseViewModel
         AddLog(status, LogType.Info);
     }
 
-    private void HandleProctoringEvent(Models.ProctoringEvent evt)
+    private void HandleProctoringEvent(ProctoringEvent evt)
     {
         AddLog($"[{evt.Type}] {evt.Message}", LogType.Warning);
     }
@@ -348,6 +408,23 @@ public class ExamViewModel : BaseViewModel
         });
     }
 
+    public void NotifyQuestionAssetMediaEnded()
+    {
+        _assetPresentationCoordinator.CompleteMediaPlayback();
+    }
+
+    public void NotifyQuestionAssetMediaFailed(string? reason = null)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            if (!string.IsNullOrWhiteSpace(reason))
+            {
+                AddLog($"Khong the phat media asset: {reason}", LogType.Warning);
+            }
+        });
+        _assetPresentationCoordinator.CompleteMediaPlayback();
+    }
+
     private void HandleTranscriptAppended(string transcript)
     {
         Application.Current.Dispatcher.Invoke(() =>
@@ -372,6 +449,78 @@ public class ExamViewModel : BaseViewModel
             AiStatus = "Da hoan thanh bai thi";
             AddLog("Bai thi van dap da hoan thanh", LogType.Success);
         });
+
+        _ = CloseWindowAfterDelayAsync();
+    }
+
+    private async Task CloseWindowAfterDelayAsync()
+    {
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(4));
+            await Application.Current.Dispatcher.InvokeAsync(() =>
+            {
+                var window = Application.Current.Windows
+                    .OfType<Window>()
+                    .FirstOrDefault(current => ReferenceEquals(current.DataContext, this));
+                window?.Close();
+            });
+        }
+        catch
+        {
+            // Best-effort auto close only. Cleanup still runs if the user closes manually.
+        }
+    }
+
+    private void HandleAssetDisplayRequested(QuestionAsset? asset)
+    {
+        Application.Current.Dispatcher.Invoke(() => ApplyCurrentQuestionAsset(asset));
+    }
+
+    private void ApplyCurrentQuestionAsset(QuestionAsset? asset)
+    {
+        CurrentQuestionAsset = asset;
+        CurrentQuestionAssetImage = null;
+        CurrentQuestionMediaSource = null;
+
+        if (asset is null)
+        {
+            return;
+        }
+
+        if (asset.Type == QuestionAssetType.TextPassage)
+        {
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(asset.Url))
+        {
+            return;
+        }
+
+        try
+        {
+            if (asset.Type == QuestionAssetType.Image)
+            {
+                var image = new BitmapImage();
+                image.BeginInit();
+                image.CacheOption = BitmapCacheOption.OnLoad;
+                image.UriSource = new Uri(asset.Url, UriKind.Absolute);
+                image.EndInit();
+                image.Freeze();
+                CurrentQuestionAssetImage = image;
+                return;
+            }
+
+            if (asset.Type == QuestionAssetType.Video || asset.Type == QuestionAssetType.Audio)
+            {
+                CurrentQuestionMediaSource = new Uri(asset.Url, UriKind.Absolute);
+            }
+        }
+        catch (Exception ex)
+        {
+            AddLog($"Khong the tai asset cau hoi: {ex.Message}", LogType.Warning);
+        }
     }
 }
 
@@ -389,3 +538,5 @@ public enum LogType
     Warning,
     Error
 }
+
+

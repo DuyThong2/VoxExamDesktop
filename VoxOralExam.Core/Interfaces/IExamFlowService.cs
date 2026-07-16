@@ -1,4 +1,4 @@
-using VoxOralExam.Core.Dtos;
+﻿using VoxOralExam.Core.Models.Dtos;
 
 namespace VoxOralExam.Core.Interfaces;
 
@@ -9,7 +9,9 @@ public interface IExamFlowService
     event Action<string>? OnStatusChanged;
     event Action? OnExamCompleted;
     event Action<bool>? OnStudentSpeakingChanged;
+    event Action<bool>? OnAvatarSpeakingChanged;
 
     Task StartAsync(CancellationToken ct);
     Task StopAsync();
 }
+

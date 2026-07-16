@@ -1,11 +1,22 @@
-using System.IO;
+﻿using System.IO;
 using System.Net.Http;
 using System.Windows;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using VoxOralExam.Core.Interfaces;
-using VoxOralExam.DesktopApp.Infrastructure;
+using VoxOralExam.DesktopApp.Infra.Clients.AIService;
+using VoxOralExam.DesktopApp.Infra.Clients.DomainService;
+using VoxOralExam.DesktopApp.Infra.Clients.DomainService.Impl;
+using VoxOralExam.DesktopApp.Infra.Devices;
+using VoxOralExam.DesktopApp.Infra.Devices.Impl;
+using VoxOralExam.DesktopApp.Mocks;
 using VoxOralExam.DesktopApp.Services;
+using VoxOralExam.DesktopApp.Services.DomainService;
+using VoxOralExam.DesktopApp.Services.DomainService.Impl;
+using VoxOralExam.DesktopApp.Services.EntryFlow;
+using VoxOralExam.DesktopApp.Services.EntryFlow.Impl;
+using VoxOralExam.DesktopApp.Services.ExamFlow;
+using VoxOralExam.DesktopApp.Services.ExamFlow.Impl;
 using VoxOralExam.DesktopApp.State;
 using VoxOralExam.DesktopApp.ViewModels;
 
@@ -63,7 +74,7 @@ public partial class App : Application
         // The entry flow finished (device pre-flight passed) and asked to start the exam. Hand off to
         // the exam surface, then close the shell so ShutdownMode=OnLastWindowClose still exits the app
         // when the exam window closes.
-        // TODO(§A): fold InExam into the shell (single lockdown-controlled window) instead of opening
+        // TODO(Â§A): fold InExam into the shell (single lockdown-controlled window) instead of opening
         // a separate ExamWindow here.
         LocalFileLogger.Info("app", "launch_exam_window");
         var examWindow = _services.GetRequiredService<Views.ExamWindow>();
@@ -160,6 +171,9 @@ public partial class App : Application
             });
         }
 
+        services.AddSingleton<RealtimeAttemptProgressClient>();
+        services.AddSingleton<IExamSessionBootstrapService, ExamSessionBootstrapService>();
+
         services.AddHttpClient<IAuthApiService, AuthApiService>(client =>
         {
             client.BaseAddress = new Uri(settings.JavaBaseUrl);
@@ -170,9 +184,11 @@ public partial class App : Application
         services.AddSingleton<ITurnUploadUrlProvider, TurnUploadUrlProvider>();
         services.AddSingleton<TurnAudioUploader>();
         services.AddSingleton<TurnArchiveClient>();
+        services.AddSingleton<LocalAvatarSpeaker>();
         services.AddSingleton<RealtimeSessionClient>();
         services.AddSingleton<AvatarWebRtcClient>();
         services.AddSingleton<MicAudioStreamer>();
+        services.AddSingleton<QuestionAssetPresentationCoordinator>();
         services.AddSingleton<RealtimeExamFlowService>();
         services.AddSingleton<IExamFlowService>(sp => sp.GetRequiredService<RealtimeExamFlowService>());
 
@@ -221,3 +237,5 @@ public partial class App : Application
         }
     }
 }
+
+

@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using VoxOralExam.DesktopApp.ViewModels;
 
@@ -98,5 +99,39 @@ public partial class ExamWindow : Window
     {
         _isDragging = false;
         ((Border)sender).ReleaseMouseCapture();
+    }
+
+    private void QuestionAssetMedia_TargetUpdated(object sender, DataTransferEventArgs e)
+    {
+        if (sender is not MediaElement mediaElement)
+        {
+            return;
+        }
+
+        if (mediaElement.Source is null)
+        {
+            mediaElement.Stop();
+            return;
+        }
+
+        mediaElement.Stop();
+        mediaElement.Position = TimeSpan.Zero;
+        mediaElement.Play();
+    }
+
+    private void QuestionAssetMedia_MediaEnded(object sender, RoutedEventArgs e)
+    {
+        if (DataContext is ExamViewModel vm)
+        {
+            vm.NotifyQuestionAssetMediaEnded();
+        }
+    }
+
+    private void QuestionAssetMedia_MediaFailed(object sender, ExceptionRoutedEventArgs e)
+    {
+        if (DataContext is ExamViewModel vm)
+        {
+            vm.NotifyQuestionAssetMediaFailed(e.ErrorException?.Message);
+        }
     }
 }
