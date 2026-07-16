@@ -1,12 +1,16 @@
-using System.Windows.Input;
-using VoxOralExam.DesktopApp.Services;
+﻿using System.Windows.Input;
+using VoxOralExam.DesktopApp.Infra.Devices;
+using VoxOralExam.DesktopApp.Services.DomainService;
+using VoxOralExam.DesktopApp.Services.EntryFlow;
 using VoxOralExam.DesktopApp.State;
+
+using VoxOralExam.DesktopApp.Services;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
 
 /// <summary>
 /// Stage: Login. Authenticates the student against Java and advances to the exam list. Device tests
-/// used to live here; they moved to DevicePreflight (after OTP) -- see docs/wpf-redesign-plan.md §A.
+/// used to live here; they moved to DevicePreflight (after OTP) -- see docs/wpf-redesign-plan.md Â§A.
 /// </summary>
 public class LoginViewModel : BaseViewModel
 {
@@ -151,3 +155,4 @@ public class RelayCommand<T> : ICommand
     public bool CanExecute(object? parameter) => _canExecute?.Invoke((T?)parameter) ?? true;
     public void Execute(object? parameter) => _execute((T?)parameter);
 }
+

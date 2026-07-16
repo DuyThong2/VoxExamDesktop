@@ -1,20 +1,22 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
-using VoxOralExam.DesktopApp.Infrastructure;
-using VoxOralExam.DesktopApp.Models;
-using VoxOralExam.DesktopApp.Services;
+using VoxOralExam.DesktopApp.Infra.Devices;
+using VoxOralExam.DesktopApp.Services.EntryFlow;
 using VoxOralExam.DesktopApp.State;
+
+using VoxOralExam.DesktopApp.Infra.Clients.AIService;
+using VoxOralExam.DesktopApp.Services;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
 
 /// <summary>
 /// Stage: DevicePreflight (camera / microphone / speaker test), the last stage before InExam. The
 /// device-test UI that used to live on the login screen now lives here, after OTP -- the standard
-/// pre-flight pattern (docs/wpf-redesign-plan.md §A). "Vào thi" persists the chosen mic to the session,
+/// pre-flight pattern (docs/wpf-redesign-plan.md Â§A). "VÃ o thi" persists the chosen mic to the session,
 /// releases the test devices, and hands off to the exam surface.
 /// </summary>
 public class DevicePreflightViewModel : BaseViewModel
@@ -23,7 +25,7 @@ public class DevicePreflightViewModel : BaseViewModel
     private readonly AppSettings _settings;
     private readonly ExamSessionState _sessionState;
 
-    private string _deviceTestStatus = "Chưa kiểm tra thiết bị";
+    private string _deviceTestStatus = "ChÆ°a kiá»ƒm tra thiáº¿t bá»‹";
     private bool _isMicTesting;
     private bool _isCameraTesting;
     private double _microphoneLevel;
@@ -104,7 +106,7 @@ public class DevicePreflightViewModel : BaseViewModel
     public ICommand ToggleMicTestCommand { get; }
     public ICommand ToggleCameraTestCommand { get; }
 
-    /// <summary>Stop any running mic/camera test. Called on "Vào thi" and when the view is unloaded.</summary>
+    /// <summary>Stop any running mic/camera test. Called on "VÃ o thi" and when the view is unloaded.</summary>
     public void CleanupDeviceTests()
     {
         StopMicTest();
@@ -123,9 +125,9 @@ public class DevicePreflightViewModel : BaseViewModel
         _sessionState.SelectedAudioOutputDeviceName = SelectedAudioOutput?.DisplayName ?? string.Empty;
 
         // Release the test devices BEFORE the exam opens so InExam can grab the camera/mic cleanly.
-        // TODO(§E): open each device ONCE via a MediaCaptureHub and hand the WARM device to InExam so
+        // TODO(Â§E): open each device ONCE via a MediaCaptureHub and hand the WARM device to InExam so
         // ExamViewModel stops cold-starting the camera. For now InExam re-opens them, as before.
-        // TODO(§A): only allow "Vào thi" once the camera + mic checks have actually passed.
+        // TODO(Â§A): only allow "VÃ o thi" once the camera + mic checks have actually passed.
         CleanupDeviceTests();
         _navigator.RequestStartExam();
     }
@@ -146,8 +148,8 @@ public class DevicePreflightViewModel : BaseViewModel
             ?? AudioInputDevices.FirstOrDefault();
 
         DeviceTestStatus = AudioInputDevices.Count == 0
-            ? "Không tìm thấy microphone nào"
-            : $"Sẵn sàng với mic: {SelectedAudioInput?.DisplayName}";
+            ? "KhÃ´ng tÃ¬m tháº¥y microphone nÃ o"
+            : $"Sáºµn sÃ ng vá»›i mic: {SelectedAudioInput?.DisplayName}";
         LocalFileLogger.Info("device_test", "audio_input_devices_loaded", new
         {
             count = AudioInputDevices.Count,
@@ -181,7 +183,7 @@ public class DevicePreflightViewModel : BaseViewModel
     {
         if (SelectedAudioOutput is null)
         {
-            DeviceTestStatus = "Hãy chọn loa/tai nghe trước khi test";
+            DeviceTestStatus = "HÃ£y chá»n loa/tai nghe trÆ°á»›c khi test";
             LocalFileLogger.Info("device_test", "play_test_sound_skipped_no_device");
             return;
         }
@@ -193,7 +195,7 @@ public class DevicePreflightViewModel : BaseViewModel
             _outputTestPlayer = new WaveOutEvent { DeviceNumber = SelectedAudioOutput.DeviceIndex };
             _outputTestPlayer.Init(tone.ToWaveProvider());
             _outputTestPlayer.Play();
-            DeviceTestStatus = $"Đã phát âm thanh test ra: {SelectedAudioOutput.DisplayName}";
+            DeviceTestStatus = $"ÄÃ£ phÃ¡t Ã¢m thanh test ra: {SelectedAudioOutput.DisplayName}";
             LocalFileLogger.Info("device_test", "play_test_sound", new
             {
                 SelectedAudioOutput.DeviceIndex,
@@ -221,7 +223,7 @@ public class DevicePreflightViewModel : BaseViewModel
         }
         catch (Exception ex)
         {
-            DeviceTestStatus = $"Lỗi phát test âm thanh: {ex.Message}";
+            DeviceTestStatus = $"Lá»—i phÃ¡t test Ã¢m thanh: {ex.Message}";
             LocalFileLogger.Error("device_test", "play_test_sound_failed", ex);
         }
     }
@@ -241,7 +243,7 @@ public class DevicePreflightViewModel : BaseViewModel
     {
         if (SelectedAudioInput is null)
         {
-            DeviceTestStatus = "Hãy chọn microphone trước khi test";
+            DeviceTestStatus = "HÃ£y chá»n microphone trÆ°á»›c khi test";
             LocalFileLogger.Info("device_test", "start_mic_test_skipped_no_device");
             return;
         }
@@ -259,7 +261,7 @@ public class DevicePreflightViewModel : BaseViewModel
         _micTestRecorder.RecordingStopped += HandleMicTestRecordingStopped;
         _micTestRecorder.StartRecording();
         IsMicTesting = true;
-        DeviceTestStatus = $"Đang test mic: {SelectedAudioInput.DisplayName}";
+        DeviceTestStatus = $"Äang test mic: {SelectedAudioInput.DisplayName}";
         LocalFileLogger.Info("device_test", "mic_test_started", new
         {
             SelectedAudioInput.DeviceIndex,
@@ -312,7 +314,7 @@ public class DevicePreflightViewModel : BaseViewModel
             IsMicTesting = false;
             if (e.Exception is not null)
             {
-                DeviceTestStatus = $"Lỗi mic test: {e.Exception.Message}";
+                DeviceTestStatus = $"Lá»—i mic test: {e.Exception.Message}";
                 LocalFileLogger.Error("device_test", "mic_test_failed", e.Exception);
             }
         });
@@ -338,7 +340,7 @@ public class DevicePreflightViewModel : BaseViewModel
             _cameraTestService.OnPreviewFrame += HandleCameraTestPreviewFrame;
             await _cameraTestService.StartAsync();
             IsCameraTesting = true;
-            DeviceTestStatus = $"Đang test camera device {_settings.CameraDeviceIndex}";
+            DeviceTestStatus = $"Äang test camera device {_settings.CameraDeviceIndex}";
             LocalFileLogger.Info("device_test", "camera_test_started", new
             {
                 _settings.CameraDeviceIndex
@@ -346,7 +348,7 @@ public class DevicePreflightViewModel : BaseViewModel
         }
         catch (Exception ex)
         {
-            DeviceTestStatus = $"Lỗi camera test: {ex.Message}";
+            DeviceTestStatus = $"Lá»—i camera test: {ex.Message}";
             LocalFileLogger.Error("device_test", "camera_test_failed", ex, new
             {
                 _settings.CameraDeviceIndex
@@ -373,3 +375,5 @@ public class DevicePreflightViewModel : BaseViewModel
         Application.Current.Dispatcher.Invoke(() => CameraPreview = bitmapImage);
     }
 }
+
+

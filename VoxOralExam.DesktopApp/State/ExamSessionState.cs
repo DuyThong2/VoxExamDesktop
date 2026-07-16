@@ -1,4 +1,5 @@
-using VoxOralExam.DesktopApp.Models;
+using VoxOralExam.Core.Context;
+using VoxOralExam.Core.Models;
 
 namespace VoxOralExam.DesktopApp.State;
 

@@ -1,7 +1,12 @@
 using System.Windows.Input;
 using System.Windows.Threading;
-using VoxOralExam.DesktopApp.Services;
+using VoxOralExam.Core.Interfaces;
+using VoxOralExam.DesktopApp.Services.DomainService;
+using VoxOralExam.DesktopApp.Services.EntryFlow;
+using VoxOralExam.DesktopApp.Services.ExamFlow;
 using VoxOralExam.DesktopApp.State;
+
+using VoxOralExam.DesktopApp.Services;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
 
@@ -156,3 +161,4 @@ public class OtpEntryViewModel : BaseViewModel
         }
     }
 }
+

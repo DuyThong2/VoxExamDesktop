@@ -2,11 +2,13 @@ using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
-using VoxOralExam.Core.Dtos;
+using VoxOralExam.Core.Models;
+using VoxOralExam.Core.Models.Dtos;
 using VoxOralExam.Core.Interfaces;
-using VoxOralExam.DesktopApp.Infrastructure;
-using VoxOralExam.DesktopApp.Models;
-using VoxOralExam.DesktopApp.Services;
+using VoxOralExam.DesktopApp.Infra.Clients.AIService;
+using VoxOralExam.DesktopApp.Infra.Devices;
+using VoxOralExam.DesktopApp.Services.DomainService;
+using VoxOralExam.DesktopApp.Services.ExamFlow;
 using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
@@ -361,7 +363,7 @@ public class ExamViewModel : BaseViewModel
         AddLog(status, LogType.Info);
     }
 
-    private void HandleProctoringEvent(Models.ProctoringEvent evt)
+    private void HandleProctoringEvent(ProctoringEvent evt)
     {
         AddLog($"[{evt.Type}] {evt.Message}", LogType.Warning);
     }
@@ -536,3 +538,5 @@ public enum LogType
     Warning,
     Error
 }
+
+

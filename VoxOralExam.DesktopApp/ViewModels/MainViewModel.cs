@@ -1,9 +1,14 @@
 using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Input;
-using VoxOralExam.DesktopApp.Models;
-using VoxOralExam.DesktopApp.Services;
+using VoxOralExam.Core.Interfaces;
+using VoxOralExam.Core.Models;
+using VoxOralExam.DesktopApp.Services.DomainService;
+using VoxOralExam.DesktopApp.Services.EntryFlow;
+using VoxOralExam.DesktopApp.Services.ExamFlow;
 using VoxOralExam.DesktopApp.State;
+
+using VoxOralExam.DesktopApp.Services;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
 
@@ -79,7 +84,7 @@ public class MainViewModel : BaseViewModel
         }
         catch (Exception ex)
         {
-            ErrorMessage = $"Không thể tải danh sách bài thi: {ex.Message}";
+            ErrorMessage = $"KhÃ´ng thá»ƒ táº£i danh sÃ¡ch bÃ i thi: {ex.Message}";
             LocalFileLogger.Error("exam_list", "load_failed", ex);
         }
         finally
@@ -100,7 +105,7 @@ public class MainViewModel : BaseViewModel
         if (!exam.CanEnter)
         {
             ShowEntryError(string.IsNullOrWhiteSpace(exam.EntryMessage)
-                ? "Bài thi hiện chưa đủ điều kiện để vào thi."
+                ? "BÃ i thi hiá»‡n chÆ°a Ä‘á»§ Ä‘iá»u kiá»‡n Ä‘á»ƒ vÃ o thi."
                 : exam.EntryMessage);
             return;
         }
@@ -114,13 +119,13 @@ public class MainViewModel : BaseViewModel
         {
             if (!exam.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase))
             {
-                ShowEntryError("Bài kiểm tra chưa được giáo viên mở, vui lòng đợi.");
+                ShowEntryError("BÃ i kiá»ƒm tra chÆ°a Ä‘Æ°á»£c giÃ¡o viÃªn má»Ÿ, vui lÃ²ng Ä‘á»£i.");
                 return;
             }
         }
         else if (!IsUpcomingOrInProgress(exam))
         {
-            ShowEntryError("Bài thi không còn trong thời gian cho phép vào thi.");
+            ShowEntryError("BÃ i thi khÃ´ng cÃ²n trong thá»i gian cho phÃ©p vÃ o thi.");
             return;
         }
 
@@ -144,7 +149,7 @@ public class MainViewModel : BaseViewModel
             catch (Exception ex)
             {
                 _sessionState.EntryTicket = null;
-                ShowEntryError($"Không thể bắt đầu bài kiểm tra: {ex.Message}");
+                ShowEntryError($"KhÃ´ng thá»ƒ báº¯t Ä‘áº§u bÃ i kiá»ƒm tra: {ex.Message}");
                 LocalFileLogger.Error("class_test", "start_failed", ex, new { examId = exam.Id });
             }
             return;
@@ -156,7 +161,7 @@ public class MainViewModel : BaseViewModel
     private void ShowEntryError(string message)
     {
         ErrorMessage = message;
-        MessageBox.Show(message, "Không thể vào thi", MessageBoxButton.OK, MessageBoxImage.Warning);
+        MessageBox.Show(message, "KhÃ´ng thá»ƒ vÃ o thi", MessageBoxButton.OK, MessageBoxImage.Warning);
     }
 
     private void ResetExamSession(Exam exam)
@@ -175,3 +180,4 @@ public class MainViewModel : BaseViewModel
         exam.Status.Equals("upcoming", StringComparison.OrdinalIgnoreCase)
         || exam.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase);
 }
+

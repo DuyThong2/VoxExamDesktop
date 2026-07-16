@@ -1,4 +1,4 @@
-using VoxOralExam.Core.Dtos;
+﻿using VoxOralExam.Core.Models.Dtos;
 
 namespace VoxOralExam.Core.Interfaces;
 
@@ -14,3 +14,4 @@ public interface IExamFlowService
     Task StartAsync(CancellationToken ct);
     Task StopAsync();
 }
+

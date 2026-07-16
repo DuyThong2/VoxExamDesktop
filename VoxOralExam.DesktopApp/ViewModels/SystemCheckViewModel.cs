@@ -1,5 +1,5 @@
-using System.Windows.Input;
-using VoxOralExam.DesktopApp.Services;
+﻿using System.Windows.Input;
+using VoxOralExam.DesktopApp.Services.EntryFlow;
 using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
@@ -23,7 +23,7 @@ public class SystemCheckViewModel : BaseViewModel
 
     private void Continue()
     {
-        // TODO(§B - lockdown, detection half first): run ISystemDetector.ScanAsync(blocklist) and show
+        // TODO(Â§B - lockdown, detection half first): run ISystemDetector.ScanAsync(blocklist) and show
         //   the result here:
         //   - detect remote-control (AnyDesk/TeamViewer), screen recorders (OBS), VIRTUAL CAMERA and
         //     virtual audio (highest priority -- they defeat camera proctoring), VM markers, monitor count.
@@ -35,3 +35,4 @@ public class SystemCheckViewModel : BaseViewModel
         _navigator.GoTo(ExamEntryStage.DevicePreflight);
     }
 }
+
