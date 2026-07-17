@@ -309,7 +309,11 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     /// "no answer ever came" means for the exam (stop the question? retry?) is
     /// RealtimeExamFlowService's call, not this network client's.
     /// </summary>
-    public async Task<RealtimeDecision> SendTurnEndAndWaitAsync(int turnOrder, bool isLastAllowedTurn, CancellationToken ct)
+    public async Task<RealtimeDecision> SendTurnEndAndWaitAsync(
+        int turnOrder,
+        bool isLastAllowedTurn,
+        double durationSeconds,
+        CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<RealtimeDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingDecisionTcs = tcs;
@@ -319,7 +323,12 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         // without this, Python decides + speaks a follow-up in one step with no idea that
         // MaxTurnsPerQuestion is about to force the question closed on the WPF side the moment
         // that speech finishes, abandoning a question the student never gets to answer.
-        await SendJsonAsync(new { type = "turn_end", is_last_allowed_turn = isLastAllowedTurn }, ct);
+        await SendJsonAsync(new
+        {
+            type = "turn_end",
+            is_last_allowed_turn = isLastAllowedTurn,
+            duration_seconds = durationSeconds
+        }, ct);
 
         using var registration = ct.Register(() => tcs.TrySetCanceled());
 
@@ -585,4 +594,3 @@ public sealed class RealtimeDecision
     public string? NextPromptText { get; set; }
     public string Reason { get; set; } = string.Empty;
 }
-

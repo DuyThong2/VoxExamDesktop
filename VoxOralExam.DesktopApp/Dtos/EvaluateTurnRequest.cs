@@ -10,6 +10,7 @@ public class EvaluateTurnRequest
     public int TurnOrder { get; set; }
     public string PromptText { get; set; } = string.Empty;
     public string Language { get; set; } = "en";
+    public double? DurationSeconds { get; set; }
     public QuestionContextDto Question { get; set; } = new();
 }
 

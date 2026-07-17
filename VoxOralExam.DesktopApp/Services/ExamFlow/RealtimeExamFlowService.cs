@@ -26,6 +26,13 @@ namespace VoxOralExam.DesktopApp.Services.ExamFlow;
 /// </summary>
 public partial class RealtimeExamFlowService : IExamFlowService
 {
+    private static readonly HashSet<string> ClarificationReasons = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "clarify_prompt",
+        "decline_repair",
+        "remind_respectfully",
+    };
+
     private readonly TurnAudioUploader _turnAudioUploader;
     private readonly TurnArchiveClient _turnArchiveClient;
     private readonly ExamSessionState _sessionState;
@@ -43,7 +50,9 @@ public partial class RealtimeExamFlowService : IExamFlowService
     private TaskCompletionSource<bool>? _vadSpeechStartTcs;
     private TaskCompletionSource<bool>? _vadSpeechEndTcs;
     private TaskCompletionSource<bool>? _avatarUtteranceCompleteTcs;
+    private TaskCompletionSource<bool>? _prepInterruptTcs;
     private bool _studentSpeechWindowOpen;
+    private bool _isMicMuted;
     private readonly List<Task> _pendingArchiveTasks = [];
     private Guid? _lastAnnouncedSectionId;
 
@@ -77,6 +86,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
     public event Action? OnExamCompleted;
     public event Action<bool>? OnStudentSpeakingChanged;
     public event Action<bool>? OnAvatarSpeakingChanged;
+    public bool IsMicMuted => _recorder?.IsMuted ?? _isMicMuted;
 
     public Task StartAsync(CancellationToken ct)
     {
@@ -109,6 +119,17 @@ public partial class RealtimeExamFlowService : IExamFlowService
         }
     }
 
+    public void SetMicMuted(bool muted)
+    {
+        _isMicMuted = muted;
+        if (_recorder is not null)
+        {
+            _recorder.IsMuted = muted;
+        }
+
+        LocalFileLogger.Info("exam_flow", "mic_mute_changed", new { muted });
+    }
+
     private async Task RunAsync(CancellationToken ct)
     {
         LocalFileLogger.Info("exam_flow", "run_begin");
@@ -118,6 +139,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
             _settings.TurnAudioPreRollMilliseconds,
             _sessionState.SelectedAudioInputDeviceIndex);
         _recorder = recorder;
+        recorder.IsMuted = _isMicMuted;
 
         _sessionClient.OnVadSpeechStart += HandleVadSpeechStart;
         _sessionClient.OnVadSpeechEnd += HandleVadSpeechEnd;
@@ -325,9 +347,10 @@ public partial class RealtimeExamFlowService : IExamFlowService
 
             CloseStudentSpeechWindow();
             var pcmBytes = _recorder!.GetTurnBufferAndReset();
+            var turnDurationSeconds = _recorder.LastTurnDurationSeconds;
             if (pcmBytes.Length > 0)
             {
-                DispatchArchiveTurn(question, attemptAnswerId, paperItemId, turnOrder, currentPromptText, pcmBytes, ct);
+                DispatchArchiveTurn(question, attemptAnswerId, paperItemId, turnOrder, currentPromptText, turnDurationSeconds, pcmBytes, ct);
             }
 
             // Assumes worst case (this turn counts toward the budget, i.e. isn't a
@@ -339,7 +362,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
             try
             {
                 (decision, avatarSpokeAfterDecision) = await WaitForAvatarUtteranceCompletionAfterAsync(
-                    triggerAsync: token => _sessionClient.SendTurnEndAndWaitAsync(turnOrder, isLastAllowedTurn, token),
+                    triggerAsync: token => _sessionClient.SendTurnEndAndWaitAsync(turnOrder, isLastAllowedTurn, turnDurationSeconds, token),
                     ct);
             }
             catch (TimeoutException ex)
@@ -429,10 +452,11 @@ public partial class RealtimeExamFlowService : IExamFlowService
         Guid paperItemId,
         int turnOrder,
         string promptText,
+        double durationSeconds,
         byte[] pcmBytes,
         CancellationToken ct)
     {
-        var task = ArchiveTurnAsync(question, attemptAnswerId, paperItemId, turnOrder, promptText, pcmBytes, ct);
+        var task = ArchiveTurnAsync(question, attemptAnswerId, paperItemId, turnOrder, promptText, durationSeconds, pcmBytes, ct);
         _pendingArchiveTasks.Add(task);
         // Path A (the live decision via SendTurnEndAndWaitAsync) never awaits this -- mirrors
         // the Python session's own decoupled Path A/Path B design. Failures are logged inside
@@ -447,6 +471,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
         Guid paperItemId,
         int turnOrder,
         string promptText,
+        double durationSeconds,
         byte[] pcmBytes,
         CancellationToken ct)
     {
@@ -454,7 +479,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
         {
             var wavBytes = _turnAudioUploader.EncodeWav(pcmBytes);
             var audioUrl = await _turnAudioUploader.UploadTurnAudioAsync(wavBytes, attemptAnswerId, turnOrder, ct);
-            var request = BuildEvaluateTurnRequest(question, attemptAnswerId, paperItemId, turnOrder, promptText, audioUrl);
+            var request = BuildEvaluateTurnRequest(question, attemptAnswerId, paperItemId, turnOrder, promptText, audioUrl, durationSeconds);
             await _turnArchiveClient.ArchiveTurnAsync(request, ct);
         }
         catch (Exception ex)
@@ -569,22 +594,43 @@ public partial class RealtimeExamFlowService : IExamFlowService
             return;
         }
 
-        var prepText = string.Format(
-            PreparationAnnouncementTemplates[Random.Shared.Next(PreparationAnnouncementTemplates.Length)],
-            prepSeconds);
-        var durationClause = BuildDurationClause(question.MinResponseSeconds, question.MaxResponseSeconds);
-        var announcement = string.IsNullOrEmpty(durationClause) ? prepText : $"{prepText} {durationClause}";
+        _prepInterruptTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            var prepText = string.Format(
+                PreparationAnnouncementTemplates[Random.Shared.Next(PreparationAnnouncementTemplates.Length)],
+                prepSeconds);
+            var durationClause = BuildDurationClause(question.MinResponseSeconds, question.MaxResponseSeconds);
+            var announcement = string.IsNullOrEmpty(durationClause) ? prepText : $"{prepText} {durationClause}";
 
-        await WaitForAvatarUtteranceCompletionAfterAsync(
-            triggerAsync: token => _sessionClient.SendPresentQuestionAsync(announcement, token),
-            ct);
+            var announcementTask = WaitForAvatarUtteranceCompletionAfterAsync(
+                triggerAsync: token => _sessionClient.SendPresentQuestionAsync(announcement, token),
+                ct);
+            if (await WaitForStepOrInterruptAsync(announcementTask, _prepInterruptTcs.Task))
+            {
+                _avatarSpeaker.Stop();
+                return;
+            }
 
-        await Task.Delay(TimeSpan.FromSeconds(prepSeconds), ct);
+            var delayTask = Task.Delay(TimeSpan.FromSeconds(prepSeconds), ct);
+            if (await WaitForStepOrInterruptAsync(delayTask, _prepInterruptTcs.Task))
+            {
+                return;
+            }
 
-        var recordingNowText = RecordingStartedAnnouncementTemplates[Random.Shared.Next(RecordingStartedAnnouncementTemplates.Length)];
-        await WaitForAvatarUtteranceCompletionAfterAsync(
-            triggerAsync: token => _sessionClient.SendPresentQuestionAsync(recordingNowText, token),
-            ct);
+            var recordingNowText = RecordingStartedAnnouncementTemplates[Random.Shared.Next(RecordingStartedAnnouncementTemplates.Length)];
+            var recordingTask = WaitForAvatarUtteranceCompletionAfterAsync(
+                triggerAsync: token => _sessionClient.SendPresentQuestionAsync(recordingNowText, token),
+                ct);
+            if (await WaitForStepOrInterruptAsync(recordingTask, _prepInterruptTcs.Task))
+            {
+                _avatarSpeaker.Stop();
+            }
+        }
+        finally
+        {
+            _prepInterruptTcs = null;
+        }
     }
 
     /// <summary>Covers all four combinations of Min/MaxResponseSeconds being set or not (both,
@@ -737,9 +783,22 @@ public partial class RealtimeExamFlowService : IExamFlowService
         return await tcs.Task;
     }
 
+    private static async Task<bool> WaitForStepOrInterruptAsync(Task stepTask, Task interruptTask)
+    {
+        var completedTask = await Task.WhenAny(stepTask, interruptTask);
+        if (completedTask == interruptTask)
+        {
+            return true;
+        }
+
+        await stepTask;
+        return false;
+    }
+
     private static bool IsClarificationReason(string? reason) =>
         !string.IsNullOrWhiteSpace(reason) &&
-        reason.StartsWith("clarification_", StringComparison.OrdinalIgnoreCase);
+        (reason.StartsWith("clarification_", StringComparison.OrdinalIgnoreCase) ||
+         ClarificationReasons.Contains(reason));
 
     private void EnsureSessionInitialized()
     {
@@ -793,7 +852,8 @@ public partial class RealtimeExamFlowService : IExamFlowService
         Guid paperItemId,
         int turnOrder,
         string promptText,
-        string audioUrl) =>
+        string audioUrl,
+        double durationSeconds) =>
         new()
         {
             AudioRef = audioUrl,
@@ -802,6 +862,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
             TurnOrder = turnOrder,
             PromptText = promptText,
             Language = "en",
+            DurationSeconds = durationSeconds,
             Question = BuildQuestionContext(question)
         };
 
@@ -879,6 +940,3 @@ public partial class RealtimeExamFlowService : IExamFlowService
     private static string NormalizeDifficultyLevel(string? difficultyLevel) =>
         string.IsNullOrWhiteSpace(difficultyLevel) ? "medium" : difficultyLevel.Trim().ToLowerInvariant();
 }
-
-
-

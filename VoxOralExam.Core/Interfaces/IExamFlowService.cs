@@ -11,7 +11,10 @@ public interface IExamFlowService
     event Action<bool>? OnStudentSpeakingChanged;
     event Action<bool>? OnAvatarSpeakingChanged;
 
+    bool IsMicMuted { get; }
+
     Task StartAsync(CancellationToken ct);
     Task StopAsync();
+    void SetMicMuted(bool muted);
 }
 

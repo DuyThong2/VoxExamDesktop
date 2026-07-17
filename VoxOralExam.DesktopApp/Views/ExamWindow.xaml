@@ -319,10 +319,44 @@
                             </Grid>
                         </Border>
 
-                        <StackPanel Grid.Row="3" Orientation="Horizontal">
-                            <Ellipse Width="8" Height="8" Fill="#F59E0B" Margin="0,0,8,0" VerticalAlignment="Center" />
-                            <TextBlock Text="Dang cho hoc sinh tra loi..." FontSize="13" Foreground="#F59E0B" />
-                        </StackPanel>
+                        <Grid Grid.Row="3">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
+                                <Ellipse Width="8" Height="8" Fill="#F59E0B" Margin="0,0,8,0" VerticalAlignment="Center" />
+                                <TextBlock Text="Dang cho hoc sinh tra loi..." FontSize="13" Foreground="#F59E0B" />
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                <TextBlock Text="{Binding MicStatusText}"
+                                           FontSize="12"
+                                           Foreground="#475569"
+                                           Margin="0,0,10,0"
+                                           VerticalAlignment="Center" />
+                                <Button Command="{Binding ToggleMuteCommand}"
+                                        Content="{Binding MuteButtonText}"
+                                        Padding="14,8"
+                                        MinWidth="96"
+                                        FontWeight="SemiBold"
+                                        Foreground="White"
+                                        BorderThickness="0"
+                                        Cursor="Hand">
+                                    <Button.Style>
+                                        <Style TargetType="Button">
+                                            <Setter Property="Background" Value="#0F766E" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsMicMuted}" Value="True">
+                                                    <Setter Property="Background" Value="#DC2626" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Button.Style>
+                                </Button>
+                            </StackPanel>
+                        </Grid>
                     </Grid>
                 </Border>
             </Grid>

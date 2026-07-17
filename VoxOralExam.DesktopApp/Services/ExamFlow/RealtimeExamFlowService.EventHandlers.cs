@@ -55,6 +55,7 @@ public partial class RealtimeExamFlowService
         {
             _recorder.BeginTurnCapture();
         }
+        _prepInterruptTcs?.TrySetResult(true);
         _vadSpeechStartTcs?.TrySetResult(true);
         OnStudentSpeakingChanged?.Invoke(true);
     }

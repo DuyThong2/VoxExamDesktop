@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Text;
 using Microsoft.CognitiveServices.Speech;
 using NAudio.Wave;
@@ -26,6 +26,8 @@ public sealed class LocalAvatarSpeaker
 {
     private readonly AppSettings _settings;
     private readonly ExamSessionState _sessionState;
+    private readonly object _playbackSync = new();
+    private WaveOutEvent? _activeWaveOut;
 
     public LocalAvatarSpeaker(AppSettings settings, ExamSessionState sessionState)
     {
@@ -42,6 +44,24 @@ public sealed class LocalAvatarSpeaker
 
         var wav = await SynthesizeAsync(text, rate, ct).ConfigureAwait(false);
         await PlayAsync(wav, ct).ConfigureAwait(false);
+    }
+
+    public void Stop()
+    {
+        WaveOutEvent? waveOut;
+        lock (_playbackSync)
+        {
+            waveOut = _activeWaveOut;
+        }
+
+        try
+        {
+            waveOut?.Stop();
+        }
+        catch
+        {
+            // Best-effort interruption only.
+        }
     }
 
     private async Task<byte[]> SynthesizeAsync(string text, string? rate, CancellationToken ct)
@@ -128,6 +148,11 @@ public sealed class LocalAvatarSpeaker
         waveOut.PlaybackStopped += OnPlaybackStopped;
         try
         {
+            lock (_playbackSync)
+            {
+                _activeWaveOut = waveOut;
+            }
+
             waveOut.Init(reader);
             waveOut.Play();
 
@@ -137,8 +162,14 @@ public sealed class LocalAvatarSpeaker
         finally
         {
             waveOut.PlaybackStopped -= OnPlaybackStopped;
+            lock (_playbackSync)
+            {
+                if (ReferenceEquals(_activeWaveOut, waveOut))
+                {
+                    _activeWaveOut = null;
+                }
+            }
             waveOut.Stop();
         }
     }
 }
-

@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Windows;
+using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using VoxOralExam.Core.Models;
@@ -46,6 +47,7 @@ public class ExamViewModel : BaseViewModel
     private QuestionAsset? _currentQuestionAsset;
     private BitmapImage? _currentQuestionAssetImage;
     private Uri? _currentQuestionMediaSource;
+    private bool _isMicMuted;
 
     public ExamViewModel(
         CameraService camera,
@@ -74,6 +76,8 @@ public class ExamViewModel : BaseViewModel
         _examFlow.OnAvatarSpeakingChanged += HandleAvatarSpeakingChanged;
         _assetPresentationCoordinator.OnAssetDisplayRequested += HandleAssetDisplayRequested;
         _avatarClient.OnVideoFrame += HandleAvatarVideoFrame;
+        _isMicMuted = _examFlow.IsMicMuted;
+        ToggleMuteCommand = new RelayCommand(ToggleMute);
 
         StartCountdown();
     }
@@ -162,7 +166,24 @@ public class ExamViewModel : BaseViewModel
         set => SetProperty(ref _isStudentSpeaking, value);
     }
 
+    public bool IsMicMuted
+    {
+        get => _isMicMuted;
+        set
+        {
+            if (SetProperty(ref _isMicMuted, value))
+            {
+                OnPropertyChanged(nameof(MuteButtonText));
+                OnPropertyChanged(nameof(MicStatusText));
+            }
+        }
+    }
+
+    public string MuteButtonText => IsMicMuted ? "Bat mic" : "Tat mic";
+    public string MicStatusText => IsMicMuted ? "Mic dang tat" : "Mic dang bat";
+
     public ObservableCollection<LogEntry> LogEntries { get; } = new();
+    public ICommand ToggleMuteCommand { get; }
 
     public QuestionAsset? CurrentQuestionAsset
     {
@@ -521,6 +542,14 @@ public class ExamViewModel : BaseViewModel
         {
             AddLog($"Khong the tai asset cau hoi: {ex.Message}", LogType.Warning);
         }
+    }
+
+    private void ToggleMute()
+    {
+        var nextState = !IsMicMuted;
+        _examFlow.SetMicMuted(nextState);
+        IsMicMuted = _examFlow.IsMicMuted;
+        AddLog(IsMicMuted ? "Da tat mic cua hoc sinh" : "Da bat lai mic cua hoc sinh", LogType.Info);
     }
 }
 

@@ -7,7 +7,7 @@ public class AppSettings
     public string WebRtcSignalingUrl { get; set; } = "ws://localhost:8081/signaling";
     public string RealtimeWebSocketPath { get; set; } = "/realtime/attempts";
     public string AvatarWebRtcOfferPath { get; set; } = "/avatar/webrtc/offer";
-    public int MaxTurnsPerQuestion { get; set; } = 5;
+    public int MaxTurnsPerQuestion { get; set; } = 10;
     public int QuestionTurnTimeoutSeconds { get; set; } = 180;
     public int InitialSilenceTimeoutSeconds { get; set; } = 12;
     public int SilenceTimeoutAfterRepeatSeconds { get; set; } = 18;
