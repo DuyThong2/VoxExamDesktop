@@ -22,6 +22,7 @@ public class ExamViewModel : BaseViewModel
     private readonly AvatarWebRtcClient _avatarClient;
     private readonly IExamApiService _examApi;
     private readonly QuestionAssetPresentationCoordinator _assetPresentationCoordinator;
+    private readonly IExamRecordingService _recording;
 
     private string _studentName = string.Empty;
     private string _studentId = string.Empty;
@@ -42,6 +43,7 @@ public class ExamViewModel : BaseViewModel
     private bool _isStudentSpeaking;
     private bool _isCameraOn;
     private bool _isCleaningUp;
+    private bool _examCompleted;
     private Task? _cleanupTask;
     private QuestionAsset? _currentQuestionAsset;
     private BitmapImage? _currentQuestionAssetImage;
@@ -54,7 +56,8 @@ public class ExamViewModel : BaseViewModel
         IExamFlowService examFlow,
         AvatarWebRtcClient avatarClient,
         IExamApiService examApi,
-        QuestionAssetPresentationCoordinator assetPresentationCoordinator)
+        QuestionAssetPresentationCoordinator assetPresentationCoordinator,
+        IExamRecordingService recording)
     {
         _camera = camera;
         _proctoring = proctoring;
@@ -63,6 +66,7 @@ public class ExamViewModel : BaseViewModel
         _avatarClient = avatarClient;
         _examApi = examApi;
         _assetPresentationCoordinator = assetPresentationCoordinator;
+        _recording = recording;
 
         LoadSessionData();
 
@@ -74,6 +78,7 @@ public class ExamViewModel : BaseViewModel
         _examFlow.OnAvatarSpeakingChanged += HandleAvatarSpeakingChanged;
         _assetPresentationCoordinator.OnAssetDisplayRequested += HandleAssetDisplayRequested;
         _avatarClient.OnVideoFrame += HandleAvatarVideoFrame;
+        _recording.StatusChanged += HandleRecordingStatusChanged;
 
         StartCountdown();
     }
@@ -223,6 +228,43 @@ public class ExamViewModel : BaseViewModel
 
         _initialized = true;
         await EnsureExamLoadedAsync();
+
+        try
+        {
+            var ticket = _sessionState.EntryTicket
+                ?? throw new InvalidOperationException("Exam entry ticket is missing.");
+            RecordingStreamType[] streamTypes = ticket.StreamTypes.Count == 0
+                ? [RecordingStreamType.Camera, RecordingStreamType.Screen]
+                : ticket.StreamTypes
+                    .Select(value => value.Trim().ToLowerInvariant())
+                    .Select(value => value switch
+                    {
+                        "camera" => RecordingStreamType.Camera,
+                        "screen" => RecordingStreamType.Screen,
+                        _ => throw new InvalidOperationException($"Unsupported stream type: {value}")
+                    })
+                    .Distinct()
+                    .ToArray();
+
+            await _recording.StartAsync(
+                new RecordingSessionContext(
+                    ticket.AttemptId,
+                    string.IsNullOrWhiteSpace(ticket.ScheduleId)
+                        ? "local"
+                        : ticket.ScheduleId,
+                    string.IsNullOrWhiteSpace(ticket.SessionId)
+                        ? ticket.AttemptId.ToString("D")
+                        : ticket.SessionId,
+                    ticket.StreamJwt,
+                    streamTypes),
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("recording", "exam_recording_start_failed", ex);
+            AddLog($"Không thể bắt đầu ghi hình cục bộ: {ex.Message}", LogType.Warning);
+        }
+
         await StartCameraAsync();
         await _examFlow.StartAsync(CancellationToken.None);
     }
@@ -262,6 +304,9 @@ public class ExamViewModel : BaseViewModel
             _countdownTimer?.Stop();
             await _examFlow.StopAsync();
             await _proctoring.StopAsync();
+            await _recording.StopAsync(
+                _examCompleted ? RecordingStopReason.Submitted : RecordingStopReason.UserClosed,
+                CancellationToken.None);
             _examFlow.OnQuestionPresented -= HandleQuestionPresented;
             _examFlow.OnTranscriptAppended -= HandleTranscriptAppended;
             _examFlow.OnStatusChanged -= HandleExamStatusChanged;
@@ -273,6 +318,7 @@ public class ExamViewModel : BaseViewModel
             _camera.OnPreviewFrame -= HandlePreviewFrame;
             _proctoring.OnStatusChanged -= HandleProctoringStatusChanged;
             _proctoring.OnProctoringEvent -= HandleProctoringEvent;
+            _recording.StatusChanged -= HandleRecordingStatusChanged;
             _proctoring.Dispose();
         }
         finally
@@ -444,6 +490,7 @@ public class ExamViewModel : BaseViewModel
 
     private void HandleExamCompleted()
     {
+        _examCompleted = true;
         Application.Current.Dispatcher.Invoke(() =>
         {
             AiStatus = "Da hoan thanh bai thi";
@@ -451,6 +498,14 @@ public class ExamViewModel : BaseViewModel
         });
 
         _ = CloseWindowAfterDelayAsync();
+    }
+
+    private void HandleRecordingStatusChanged(RecordingStatus status)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            AddLog(status.Message, status.IsDegraded ? LogType.Warning : LogType.Info);
+        });
     }
 
     private async Task CloseWindowAfterDelayAsync()

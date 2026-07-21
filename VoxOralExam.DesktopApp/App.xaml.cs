@@ -9,6 +9,9 @@ using VoxOralExam.DesktopApp.Infra.Clients.DomainService;
 using VoxOralExam.DesktopApp.Infra.Clients.DomainService.Impl;
 using VoxOralExam.DesktopApp.Infra.Devices;
 using VoxOralExam.DesktopApp.Infra.Devices.Impl;
+using VoxOralExam.DesktopApp.Infra.Clients.StreamService;
+using VoxOralExam.DesktopApp.Infra.Recording;
+using VoxOralExam.DesktopApp.Infra.Recording.Storage;
 using VoxOralExam.DesktopApp.Mocks;
 using VoxOralExam.DesktopApp.Services;
 using VoxOralExam.DesktopApp.Services.DomainService;
@@ -19,6 +22,7 @@ using VoxOralExam.DesktopApp.Services.ExamFlow;
 using VoxOralExam.DesktopApp.Services.ExamFlow.Impl;
 using VoxOralExam.DesktopApp.State;
 using VoxOralExam.DesktopApp.ViewModels;
+using VoxOralExam.DesktopApp.Workers;
 
 namespace VoxOralExam.DesktopApp;
 
@@ -151,7 +155,8 @@ public partial class App : Application
                 sp.GetRequiredService<IHttpClientFactory>(),
                 settings.PythonBaseUrl));
 
-        services.AddSingleton(_ => new CameraService(settings));
+        services.AddSingleton<RecordingClock>();
+        services.AddSingleton<CameraService>();
         services.AddSingleton<ScreenProctoringService>();
         services.AddSingleton<IDeviceContextProvider, DeviceContextProvider>();
         services.AddSingleton<MockExamDataFactory>();
@@ -181,6 +186,23 @@ public partial class App : Application
         });
 
         services.AddSingleton<IProctoringService>(sp => sp.GetRequiredService<ScreenProctoringService>());
+        services.AddHttpClient<StreamSessionClient>(client =>
+        {
+            client.BaseAddress = new Uri(settings.StreamingBaseUrl);
+            client.Timeout = TimeSpan.FromSeconds(settings.RecordingUploadTimeoutSeconds);
+        });
+        services.AddHttpClient<SegmentUploadClient>(client =>
+        {
+            client.BaseAddress = new Uri(settings.StreamingBaseUrl);
+            client.Timeout = TimeSpan.FromSeconds(settings.RecordingUploadTimeoutSeconds);
+        });
+        services.AddSingleton<LocalSegmentStore>();
+        services.AddSingleton<SegmentUploadWorker>();
+        services.AddSingleton<ScreenSegmentRecorder>();
+        services.AddSingleton<CameraSegmentRecorder>();
+        services.AddSingleton<ExamRecordingService>();
+        services.AddSingleton<IExamRecordingService>(
+            sp => sp.GetRequiredService<ExamRecordingService>());
         services.AddSingleton<ITurnUploadUrlProvider, TurnUploadUrlProvider>();
         services.AddSingleton<TurnAudioUploader>();
         services.AddSingleton<TurnArchiveClient>();
@@ -229,6 +251,16 @@ public partial class App : Application
 
             var proctoring = _services.GetService<ScreenProctoringService>();
             proctoring?.StopAsync().GetAwaiter().GetResult();
+
+            var recording = _services.GetService<IExamRecordingService>();
+            recording?.StopAsync(
+                    VoxOralExam.Core.Models.RecordingStopReason.ApplicationShutdown,
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+
+            var uploadWorker = _services.GetService<SegmentUploadWorker>();
+            uploadWorker?.DisposeAsync().AsTask().GetAwaiter().GetResult();
             LocalFileLogger.Info("app", "ensure_exam_flow_stopped_complete");
         }
         catch (Exception ex)

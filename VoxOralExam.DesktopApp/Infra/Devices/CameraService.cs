@@ -1,6 +1,8 @@
 ﻿using System.Windows.Media.Imaging;
 using OpenCvSharp;
 using OpenCvSharp.Extensions;
+using VoxOralExam.DesktopApp.Infra.Recording;
+using VoxOralExam.DesktopApp.Services;
 using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.Infra.Devices;
@@ -16,6 +18,7 @@ public class CameraService : IDisposable
 {
     private VideoCapture? _capture;
     private readonly AppSettings _settings;
+    private readonly RecordingClock _recordingClock;
     private readonly object _lock = new();
     private bool _isCapturing;
     private CancellationTokenSource? _cts;
@@ -28,15 +31,22 @@ public class CameraService : IDisposable
     public event Action<byte[], int, int>? OnRawFrame;
 
     /// <summary>
+    /// Immutable camera frame for local recording. The camera remains single-owner: consumers
+    /// fan out from this event instead of opening the physical device a second time.
+    /// </summary>
+    public event Action<CameraFrame>? OnCapturedFrame;
+
+    /// <summary>
     /// BitmapImage cho WPF preview.
     /// </summary>
     public event Action<BitmapImage>? OnPreviewFrame;
 
     public bool IsCapturing => _isCapturing;
 
-    public CameraService(AppSettings settings)
+    public CameraService(AppSettings settings, RecordingClock recordingClock)
     {
         _settings = settings;
+        _recordingClock = recordingClock;
     }
 
     /// <summary>
@@ -118,6 +128,7 @@ public class CameraService : IDisposable
                 //    Mat.Data lÃ  pointer â†’ copy ra byte[] Ä‘á»ƒ an toÃ n cross-thread
                 var rawBytes = new byte[width * height * 3];
                 System.Runtime.InteropServices.Marshal.Copy(frame.Data, rawBytes, 0, rawBytes.Length);
+                var capturedAt = _recordingClock.Elapsed;
 
                 // Debug: log frame Ä‘áº§u Ä‘á»ƒ confirm camera grab Ä‘Æ°á»£c pixel data
                 if (_frameCount == 0)
@@ -130,11 +141,39 @@ public class CameraService : IDisposable
                 }
                 _frameCount++;
 
-                OnRawFrame?.Invoke(rawBytes, width, height);
+                try
+                {
+                    OnCapturedFrame?.Invoke(new CameraFrame(
+                        rawBytes,
+                        width,
+                        height,
+                        width * 3,
+                        capturedAt));
+                }
+                catch (Exception ex)
+                {
+                    LocalFileLogger.Error("camera", "recording_frame_consumer_failed", ex);
+                }
+
+                try
+                {
+                    OnRawFrame?.Invoke(rawBytes, width, height);
+                }
+                catch (Exception ex)
+                {
+                    LocalFileLogger.Error("camera", "raw_frame_consumer_failed", ex);
+                }
 
                 // 2. BitmapImage cho WPF preview (chuyá»ƒn Ä‘á»•i trÃªn background thread, Freeze Ä‘á»ƒ cross-thread safe)
                 var bitmapImage = MatToBitmapImage(frame);
-                OnPreviewFrame?.Invoke(bitmapImage);
+                try
+                {
+                    OnPreviewFrame?.Invoke(bitmapImage);
+                }
+                catch (Exception ex)
+                {
+                    LocalFileLogger.Error("camera", "preview_frame_consumer_failed", ex);
+                }
 
                 await Task.Delay(frameInterval, ct);
             }

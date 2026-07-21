@@ -27,6 +27,9 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
     public async Task EnterWithTicketAsync(ExamEntryTicket ticket, CancellationToken ct = default)
     {
         _sessionState.EntryTicket = ticket;
+        _sessionState.ExamAttemptId = ticket.AttemptId;
+        _sessionState.SessionId = string.IsNullOrWhiteSpace(ticket.SessionId) ? ticket.AttemptId.ToString("D") : ticket.SessionId;
+        _sessionState.ScheduleId = ticket.ScheduleId;
         var paper = await _examApi.GetExamPaperAsync(ticket.AttemptId.ToString(), ct);
         _sessionState.LoadExamPaper(paper, ticket.AttemptId);
         await ResumeQuestionIndexIfNeededAsync(ct);

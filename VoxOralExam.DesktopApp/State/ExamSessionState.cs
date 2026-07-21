@@ -6,6 +6,7 @@ namespace VoxOralExam.DesktopApp.State;
 public class ExamSessionState
 {
     public string SessionId { get; set; } = string.Empty;
+    public string ScheduleId { get; set; } = string.Empty;
     public int SelectedAudioInputDeviceIndex { get; set; }
     public string SelectedAudioInputDeviceName { get; set; } = string.Empty;
     public int SelectedAudioOutputDeviceIndex { get; set; }
@@ -34,6 +35,8 @@ public class ExamSessionState
 
     public bool HasNextQuestion => Questions.Count > 0 && QuestionIndex < Questions.Count - 1;
 
+    public string StreamJwt => EntryTicket?.StreamJwt ?? string.Empty;
+
     public void SetAuthenticatedUser(AuthenticatedUserContext userContext)
     {
         CurrentUser = userContext;
@@ -51,7 +54,9 @@ public class ExamSessionState
         ExamAttemptId = attemptId
             ?? EntryTicket?.AttemptId
             ?? (examPaper.ExamAttemptId != Guid.Empty ? examPaper.ExamAttemptId : Guid.NewGuid());
-        SessionId = ExamAttemptId.ToString();
+        SessionId = !string.IsNullOrWhiteSpace(EntryTicket?.SessionId)
+            ? EntryTicket.SessionId
+            : ExamAttemptId.ToString();
         ExamTitle = examPaper.Title;
         DurationMinutes = examPaper.DurationMinutes;
         QuestionIndex = 0;

@@ -25,4 +25,12 @@ public class ExamEntryTicket
     // TODO(§B/§C/§E): also carry the lockdown blocklist, minEnforcementTier, the presigned-upload
     // source for turn audio, and deliveryMode (ProctoredLab / ProctoredByod / TakeHome) so the
     // navigator can branch (take-home skips OTP + live monitor).
+    public string ScheduleId { get; set; } = string.Empty;
+
+    public string SessionId { get; set; } = string.Empty;
+
+    public IReadOnlyList<string> StreamTypes { get; set; } = [];
+
+    public DateTimeOffset StreamTokenExpiresAt { get; set; }
+
 }

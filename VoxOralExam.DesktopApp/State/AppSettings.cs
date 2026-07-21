@@ -5,6 +5,19 @@ public class AppSettings
     public string JavaBaseUrl { get; set; } = "http://localhost:8080";
     public string PythonBaseUrl { get; set; } = "http://localhost:8000";
     public string WebRtcSignalingUrl { get; set; } = "ws://localhost:8081/signaling";
+    public string StreamingBaseUrl { get; set; } = "http://localhost:8081";
+    public bool EnableLocalRecording { get; set; } = true;
+    // Keep upload disabled until vox-streaming exposes the upload-session contract.
+    // Local recording remains fully functional while this is false.
+    public bool EnableSegmentUpload { get; set; } = false;
+    public int RecordingSegmentSeconds { get; set; } = 10;
+    public int RecordingUploadTimeoutSeconds { get; set; } = 30;
+    public int RecordingFinalDrainSeconds { get; set; } = 20;
+    public int ScreenRecordingFps { get; set; } = 15;
+    public int ScreenRecordingBitrate { get; set; } = 4_000_000;
+    public int CameraRecordingBitrate { get; set; } = 2_000_000;
+    public int RecordingQueueCapacity { get; set; } = 4;
+    public long MinimumRecordingDiskBytes { get; set; } = 2L * 1024 * 1024 * 1024;
     public string RealtimeWebSocketPath { get; set; } = "/realtime/attempts";
     public string AvatarWebRtcOfferPath { get; set; } = "/avatar/webrtc/offer";
     public int MaxTurnsPerQuestion { get; set; } = 5;
