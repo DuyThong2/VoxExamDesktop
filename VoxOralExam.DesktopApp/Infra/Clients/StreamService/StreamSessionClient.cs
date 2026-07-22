@@ -7,7 +7,8 @@ namespace VoxOralExam.DesktopApp.Infra.Clients.StreamService;
 public sealed record StreamUploadSession(
     string StreamId,
     string StreamType,
-    DateTimeOffset ExpiresAt
+    DateTimeOffset ExpiresAt,
+    string UploadToken
 );
 
 public sealed class StreamSessionClient
@@ -38,14 +39,14 @@ public sealed class StreamSessionClient
         return await response.Content.ReadFromJsonAsync<StreamUploadSession>(cancellationToken: ct) ?? throw new InvalidOperationException("Streaming service return an empty session.");
     }
 
-    public async Task CompleteAsync(string streamId, string token, CancellationToken ct)
+    public async Task CompleteAsync(string streamId, string uploadToken, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
             $"/stream/sessions/{Uri.EscapeDataString(streamId)}/complete"
         );
 
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", uploadToken);
 
         using var response = await _http.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();

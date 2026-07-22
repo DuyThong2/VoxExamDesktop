@@ -23,6 +23,7 @@ using VoxOralExam.DesktopApp.Services.ExamFlow.Impl;
 using VoxOralExam.DesktopApp.State;
 using VoxOralExam.DesktopApp.ViewModels;
 using VoxOralExam.DesktopApp.Workers;
+using VoxOralExam.Core.Models;
 
 namespace VoxOralExam.DesktopApp;
 
@@ -53,6 +54,24 @@ public partial class App : Application
         _services = services.BuildServiceProvider();
 
         SessionEnding += App_SessionEnding;
+
+        var settings = _services.GetRequiredService<AppSettings>();
+        if (settings.LaunchStreamingDemo)
+        {
+            try
+            {
+                var demoWindow = _services.GetRequiredService<Views.StreamingDemoWindow>();
+                LocalFileLogger.Info("app", "streaming_demo_shown");
+                demoWindow.Show();
+                LocalFileLogger.Info("app", "startup_complete");
+            }
+            catch (Exception ex)
+            {
+                LocalFileLogger.Error("app", "startup_show_streaming_demo_failed", ex);
+                throw;
+            }
+            return;
+        }
 
         try
         {
@@ -93,7 +112,7 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         LocalFileLogger.Info("app", "exit_begin");
-        EnsureExamFlowStopped();
+        EnsureExamFlowStopped(TimeSpan.FromSeconds(5));
         SessionEnding -= App_SessionEnding;
         DispatcherUnhandledException -= App_DispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException -= CurrentDomain_UnhandledException;
@@ -177,6 +196,16 @@ public partial class App : Application
         }
 
         services.AddSingleton<RealtimeAttemptProgressClient>();
+        services.AddHttpClient<StudentStreamAccessClient>(client =>
+        {
+            client.BaseAddress = new Uri(settings.JavaBaseUrl);
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
+        services.AddHttpClient<DevStreamTokenClient>(client =>
+        {
+            client.BaseAddress = new Uri(settings.DevStreamTokenUrl);
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
         services.AddSingleton<IExamSessionBootstrapService, ExamSessionBootstrapService>();
 
         services.AddHttpClient<IAuthApiService, AuthApiService>(client =>
@@ -223,18 +252,30 @@ public partial class App : Application
         services.AddTransient<SystemCheckViewModel>();
         services.AddTransient<DevicePreflightViewModel>();
         services.AddTransient<ExamViewModel>();
+        services.AddTransient<StreamingDemoViewModel>();
 
         services.AddTransient<Views.ShellWindow>();
         services.AddTransient<Views.ExamWindow>();
+        services.AddTransient<Views.StreamingDemoWindow>();
     }
 
     private void App_SessionEnding(object? sender, SessionEndingCancelEventArgs e)
     {
         LocalFileLogger.Info("app", "session_ending");
-        EnsureExamFlowStopped();
+        // Windows gives an app only a short, OS-controlled window to respond to session ending
+        // before forcing termination -- tighter than OnExit's own safety-net budget.
+        EnsureExamFlowStopped(TimeSpan.FromSeconds(3));
     }
 
-    private void EnsureExamFlowStopped()
+    /// <summary>
+    /// Safety net only, not the primary cleanup path. The primary path is Window.Closing
+    /// (ExamWindow/StreamingDemoWindow) properly awaiting full cleanup -- including
+    /// ExamRecordingService.ShutdownAsync() -- before ever letting the window actually close, which
+    /// should make everything below a fast, idempotent no-op by the time OnExit/SessionEnding run.
+    /// This only does real work if that path somehow didn't run (a window bypassed Closing, or the
+    /// process is exiting via SessionEnding before any window had a chance to close normally).
+    /// </summary>
+    private void EnsureExamFlowStopped(TimeSpan timeout)
     {
         if (_isShuttingDown)
         {
@@ -246,22 +287,47 @@ public partial class App : Application
         try
         {
             LocalFileLogger.Info("app", "ensure_exam_flow_stopped_begin");
-            var examFlow = _services.GetService<IExamFlowService>();
-            examFlow?.StopAsync().GetAwaiter().GetResult();
 
-            var proctoring = _services.GetService<ScreenProctoringService>();
-            proctoring?.StopAsync().GetAwaiter().GetResult();
+            // Task.Run, not a direct call: OnExit/SessionEnding run on the UI thread, and this
+            // method's own caller may end up blocking that same thread on the result below --
+            // calling these async methods directly here would capture the WPF SynchronizationContext
+            // for every continuation inside them, then block waiting on that same, now-unresponsive,
+            // UI thread -- the exact deadlock class already fixed (and re-found) elsewhere in this
+            // app this session. Task.Run drops the ambient SynchronizationContext so nothing inside
+            // needs the UI thread to resume. Wait(timeout), not GetAwaiter().GetResult(), keeps this
+            // bounded instead of blocking shutdown indefinitely if something is still genuinely stuck.
+            var completed = Task.Run(async () =>
+            {
+                var examFlow = _services.GetService<IExamFlowService>();
+                if (examFlow is not null)
+                {
+                    await examFlow.StopAsync();
+                }
 
-            var recording = _services.GetService<IExamRecordingService>();
-            recording?.StopAsync(
-                    VoxOralExam.Core.Models.RecordingStopReason.ApplicationShutdown,
-                    CancellationToken.None)
-                .GetAwaiter()
-                .GetResult();
+                var proctoring = _services.GetService<ScreenProctoringService>();
+                if (proctoring is not null)
+                {
+                    await proctoring.StopAsync();
+                }
 
-            var uploadWorker = _services.GetService<SegmentUploadWorker>();
-            uploadWorker?.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            LocalFileLogger.Info("app", "ensure_exam_flow_stopped_complete");
+                var recording = _services.GetService<ExamRecordingService>();
+                if (recording is not null)
+                {
+                    await ((IAsyncDisposable)recording).DisposeAsync();
+                }
+            }).Wait(timeout);
+
+            if (completed)
+            {
+                LocalFileLogger.Info("app", "ensure_exam_flow_stopped_complete");
+            }
+            else
+            {
+                LocalFileLogger.Error(
+                    "app",
+                    "ensure_exam_flow_stopped_timed_out",
+                    new TimeoutException($"Shutdown cleanup did not finish within {timeout}."));
+            }
         }
         catch (Exception ex)
         {

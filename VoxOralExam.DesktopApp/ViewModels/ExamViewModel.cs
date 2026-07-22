@@ -10,6 +10,7 @@ using VoxOralExam.DesktopApp.Infra.Devices;
 using VoxOralExam.DesktopApp.Services.DomainService;
 using VoxOralExam.DesktopApp.Services.ExamFlow;
 using VoxOralExam.DesktopApp.State;
+using VoxOralExam.DesktopApp.Services;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
 
@@ -23,6 +24,7 @@ public class ExamViewModel : BaseViewModel
     private readonly IExamApiService _examApi;
     private readonly QuestionAssetPresentationCoordinator _assetPresentationCoordinator;
     private readonly IExamRecordingService _recording;
+    private readonly AppSettings _settings;
 
     private string _studentName = string.Empty;
     private string _studentId = string.Empty;
@@ -57,7 +59,8 @@ public class ExamViewModel : BaseViewModel
         AvatarWebRtcClient avatarClient,
         IExamApiService examApi,
         QuestionAssetPresentationCoordinator assetPresentationCoordinator,
-        IExamRecordingService recording)
+        IExamRecordingService recording,
+        AppSettings settings)
     {
         _camera = camera;
         _proctoring = proctoring;
@@ -67,6 +70,7 @@ public class ExamViewModel : BaseViewModel
         _examApi = examApi;
         _assetPresentationCoordinator = assetPresentationCoordinator;
         _recording = recording;
+        _settings = settings;
 
         LoadSessionData();
 
@@ -258,11 +262,19 @@ public class ExamViewModel : BaseViewModel
                     ticket.StreamJwt,
                     streamTypes),
                 CancellationToken.None);
+            if (_settings.RequireRecording && !_recording.IsRecording)
+            {
+                throw new InvalidOperationException("Recording is required before the exam can start.");
+            }
         }
         catch (Exception ex)
         {
             LocalFileLogger.Error("recording", "exam_recording_start_failed", ex);
-            AddLog($"Không thể bắt đầu ghi hình cục bộ: {ex.Message}", LogType.Warning);
+            AddLog($"Local recording could not start: {ex.Message}", LogType.Warning);
+            if (_settings.RequireRecording)
+            {
+                throw;
+            }
         }
 
         await StartCameraAsync();
@@ -307,6 +319,9 @@ public class ExamViewModel : BaseViewModel
             await _recording.StopAsync(
                 _examCompleted ? RecordingStopReason.Submitted : RecordingStopReason.UserClosed,
                 CancellationToken.None);
+            // ExamWindow is always the last window in the real exam flow -- safe to tear down the
+            // shared upload worker here rather than leaving it for App.xaml.cs's OnExit fallback.
+            await _recording.ShutdownAsync();
             _examFlow.OnQuestionPresented -= HandleQuestionPresented;
             _examFlow.OnTranscriptAppended -= HandleTranscriptAppended;
             _examFlow.OnStatusChanged -= HandleExamStatusChanged;

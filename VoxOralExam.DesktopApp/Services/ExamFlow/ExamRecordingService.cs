@@ -3,6 +3,7 @@ using VoxOralExam.Core.Models;
 using VoxOralExam.DesktopApp.Infra.Clients.StreamService;
 using VoxOralExam.DesktopApp.Infra.Devices;
 using VoxOralExam.DesktopApp.Infra.Recording;
+using VoxOralExam.DesktopApp.Infra.Recording.Audio;
 using VoxOralExam.DesktopApp.Infra.Recording.Storage;
 using VoxOralExam.DesktopApp.State;
 using VoxOralExam.DesktopApp.Workers;
@@ -12,6 +13,7 @@ namespace VoxOralExam.DesktopApp.Services.ExamFlow;
 public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposable
 {
     private readonly AppSettings _settings;
+    private readonly ExamSessionState _sessionState;
     private readonly StreamSessionClient _sessionClient;
     private readonly SegmentUploadWorker _uploadWorker;
     private readonly LocalSegmentStore _store;
@@ -23,9 +25,30 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
     private readonly Dictionary<RecordingStreamType, StreamUploadSession> _uploadSessions = [];
     private readonly HashSet<RecordingStreamType> _startedStreams = [];
 
+    // Tracks which started streams ever actually committed a segment, distinct from
+    // _startedStreams (which only means the recorder opened successfully). A stream that opened
+    // but captured zero frames for its whole duration (e.g. a very short Start-then-Stop test, or a
+    // capture source that silently never fires) has GetOutstandingCountAsync == 0 too -- nothing
+    // was ever pending -- but calling /complete for it tells vox-streaming to assemble a stream that
+    // never received a single segment, which its Kafka consumer will retry for a very long time
+    // before giving up. See StopCoreAsync's completion loop.
+    private readonly HashSet<RecordingStreamType> _committedStreams = [];
+
     private RecordingSessionContext? _context;
     private bool _uploadEnabledForAttempt;
     private bool _disposed;
+
+    // Recording audio (mic always; system/loopback audio for Screen only -- see AudioMixer) is
+    // owned here rather than by ScreenSegmentRecorder/CameraSegmentRecorder directly, and is a
+    // dedicated, separate NAudio capture from RealtimeExamFlowService's own TurnAudioRecorder
+    // (used for STT/VAD): the two flows have different lifecycles (this one spans exactly the
+    // local recording session; that one spans the realtime AI conversation) and the demo screen
+    // (StreamingDemoViewModel) never runs RealtimeExamFlowService at all, so this recorder needs to
+    // work standalone. Windows WASAPI shared-mode capture supports the same physical mic device
+    // being opened more than once, so this does not conflict with the STT capture when both run.
+    private TurnAudioRecorder? _micRecorder;
+    private SystemAudioLoopbackCapture? _loopbackCapture;
+    private AudioMixer? _audioMixer;
 
     public event Action<RecordingStatus>? StatusChanged;
 
@@ -33,6 +56,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
 
     public ExamRecordingService(
         AppSettings settings,
+        ExamSessionState sessionState,
         StreamSessionClient sessionClient,
         SegmentUploadWorker uploadWorker,
         LocalSegmentStore store,
@@ -42,6 +66,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         CameraService camera)
     {
         _settings = settings;
+        _sessionState = sessionState;
         _sessionClient = sessionClient;
         _uploadWorker = uploadWorker;
         _store = store;
@@ -70,9 +95,14 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
 
             _context = context;
             _startedStreams.Clear();
+            _committedStreams.Clear();
             _uploadSessions.Clear();
             _uploadEnabledForAttempt = _settings.EnableSegmentUpload;
             _clock.Start();
+
+            var micAvailable = await TryStartMicAsync(cancellationToken);
+            await TryStartLoopbackAsync(cancellationToken);
+            _audioMixer?.Start();
 
             _screenRecorder.SegmentCompleted += OnSegmentCompleted;
             _cameraRecorder.SegmentCompleted += OnSegmentCompleted;
@@ -80,6 +110,10 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
             _cameraRecorder.RecordingFailed += OnCameraRecordingFailed;
 
             var streamIds = await CreateStreamIdsAsync(context, cancellationToken);
+            if (_uploadEnabledForAttempt)
+            {
+                _uploadWorker.Start(_uploadSessions.Values);
+            }
 
             if (context.StreamTypes.Contains(RecordingStreamType.Screen))
             {
@@ -87,7 +121,9 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                 {
                     await _screenRecorder.StartAsync(
                         streamIds[RecordingStreamType.Screen],
-                        cancellationToken);
+                        await _store.GetNextSequenceAsync(streamIds[RecordingStreamType.Screen], cancellationToken),
+                        cancellationToken,
+                        includeAudio: micAvailable);
                     _startedStreams.Add(RecordingStreamType.Screen);
                 }
                 catch (Exception ex)
@@ -95,7 +131,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                     LocalFileLogger.Error("recording", "screen_start_failed", ex);
                     PublishStatus(
                         "screen_recording_unavailable",
-                        $"Không thể ghi màn hình: {ex.Message}",
+                        $"Screen recording is unavailable: {ex.Message}",
                         isDegraded: true);
                 }
             }
@@ -106,7 +142,9 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                 {
                     await _cameraRecorder.StartAsync(
                         streamIds[RecordingStreamType.Camera],
-                        cancellationToken);
+                        await _store.GetNextSequenceAsync(streamIds[RecordingStreamType.Camera], cancellationToken),
+                        cancellationToken,
+                        includeAudio: micAvailable);
                     _camera.OnCapturedFrame += OnCameraFrame;
                     _startedStreams.Add(RecordingStreamType.Camera);
                 }
@@ -115,7 +153,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                     LocalFileLogger.Error("recording", "camera_start_failed", ex);
                     PublishStatus(
                         "camera_recording_unavailable",
-                        $"Không thể ghi camera: {ex.Message}",
+                        $"Camera recording is unavailable: {ex.Message}",
                         isDegraded: true);
                 }
             }
@@ -126,13 +164,8 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                 throw new InvalidOperationException("No local recording source could be started.");
             }
 
-            if (_uploadEnabledForAttempt)
-            {
-                _uploadWorker.Start(context.StreamToken);
-            }
-
             IsRecording = true;
-            PublishStatus("recording_started", "Ghi hình cục bộ đã bắt đầu.");
+            PublishStatus("recording_started", "Local recording has started.");
         }
         catch
         {
@@ -183,7 +216,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                 LocalFileLogger.Error("recording", "upload_session_create_failed", ex, new { streamType });
                 PublishStatus(
                     "segment_upload_unavailable",
-                    "Không thể mở phiên upload; segment vẫn được giữ an toàn trên máy.",
+                    "The upload session is unavailable; segments will remain safely stored on this device.",
                     isDegraded: true);
             }
         }
@@ -207,8 +240,124 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         _cameraRecorder.TryEnqueue(frame);
     }
 
+    /// <summary>
+    /// Opens this recording session's dedicated mic capture (separate from
+    /// RealtimeExamFlowService's own TurnAudioRecorder -- see the field comment on _micRecorder).
+    /// Returns whether it succeeded so StartAsync can decide whether Screen/Camera should request
+    /// an audio stream at all: a mic that never opens must not leave either video file with an
+    /// audio stream that receives zero samples.
+    /// </summary>
+    private async Task<bool> TryStartMicAsync(CancellationToken ct)
+    {
+        var recorder = new TurnAudioRecorder(deviceNumber: _sessionState.SelectedAudioInputDeviceIndex);
+        var mixer = new AudioMixer(_clock);
+        try
+        {
+            recorder.StreamChunkAvailable += OnMicAudioChunk;
+            await recorder.StartAsync(ct);
+            mixer.MixedAudioAvailable += OnMixedScreenAudio;
+            _micRecorder = recorder;
+            _audioMixer = mixer;
+            return true;
+        }
+        catch (Exception ex)
+        {
+            recorder.StreamChunkAvailable -= OnMicAudioChunk;
+            recorder.Dispose();
+            mixer.Dispose();
+            LocalFileLogger.Error("recording", "mic_start_failed", ex);
+            PublishStatus(
+                "recording_audio_unavailable",
+                $"Recording audio is unavailable: {ex.Message}",
+                isDegraded: true);
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Adds system/device audio (e.g. the avatar's TTS voice) to Screen's audio track via
+    /// AudioMixer. Optional and independent of the mic: if this fails to open (e.g. no default
+    /// playback device), Screen's recording simply keeps its mic-only audio -- see the
+    /// degrade-not-roll-back decision for loopback capture.
+    /// </summary>
+    private async Task TryStartLoopbackAsync(CancellationToken ct)
+    {
+        if (_audioMixer is null)
+        {
+            return;
+        }
+
+        var loopback = new SystemAudioLoopbackCapture();
+        try
+        {
+            await loopback.StartAsync(ct);
+            loopback.DataAvailable += OnLoopbackAudioChunk;
+            _audioMixer.EnableLoopback(loopback.WaveFormat!);
+            _loopbackCapture = loopback;
+        }
+        catch (Exception ex)
+        {
+            loopback.Dispose();
+            LocalFileLogger.Error("recording", "loopback_start_failed", ex);
+            PublishStatus(
+                "system_audio_unavailable",
+                "System/device audio is unavailable; Screen recording will still include the microphone.",
+                isDegraded: true);
+        }
+    }
+
+    private void OnMicAudioChunk(byte[] pcm)
+    {
+        _audioMixer?.AddMicSamples(pcm);
+        if (_startedStreams.Contains(RecordingStreamType.Camera))
+        {
+            _cameraRecorder.EnqueueAudio(pcm, _clock.Elapsed);
+        }
+    }
+
+    private void OnLoopbackAudioChunk(byte[] raw) => _audioMixer?.AddLoopbackSamples(raw);
+
+    private void OnMixedScreenAudio(byte[] pcm, TimeSpan timestamp)
+    {
+        if (_startedStreams.Contains(RecordingStreamType.Screen))
+        {
+            _screenRecorder.EnqueueAudio(pcm, timestamp);
+        }
+    }
+
+    private async Task StopAudioCaptureAsync()
+    {
+        if (_micRecorder is not null)
+        {
+            var recorder = _micRecorder;
+            _micRecorder = null;
+            recorder.StreamChunkAvailable -= OnMicAudioChunk;
+            await recorder.StopAsync();
+            recorder.Dispose();
+        }
+
+        if (_loopbackCapture is not null)
+        {
+            var loopback = _loopbackCapture;
+            _loopbackCapture = null;
+            loopback.DataAvailable -= OnLoopbackAudioChunk;
+            await loopback.StopAsync();
+            loopback.Dispose();
+        }
+
+        if (_audioMixer is not null)
+        {
+            var mixer = _audioMixer;
+            _audioMixer = null;
+            mixer.MixedAudioAvailable -= OnMixedScreenAudio;
+            mixer.Dispose();
+        }
+    }
+
     private void OnSegmentCompleted(CompletedSegment segment)
     {
+        _committedStreams.Add(segment.StreamType);
+
         if (_uploadEnabledForAttempt)
         {
             _uploadWorker.NotifyPendingSegment();
@@ -216,7 +365,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
 
         PublishStatus(
             "segment_completed",
-            $"Đã hoàn tất segment {segment.StreamType}/{segment.Sequence:D6}.");
+            $"Segment {segment.StreamType}/{segment.Sequence:D6} was completed.");
     }
 
     private void OnScreenRecordingFailed(Exception exception)
@@ -224,7 +373,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         LocalFileLogger.Error("recording", "screen_runtime_failed", exception);
         PublishStatus(
             "screen_recording_failed",
-            $"Ghi màn hình đã dừng do lỗi: {exception.Message}",
+            $"Screen recording stopped because of an error: {exception.Message}",
             isDegraded: true);
     }
 
@@ -233,7 +382,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         LocalFileLogger.Error("recording", "camera_runtime_failed", exception);
         PublishStatus(
             "camera_recording_failed",
-            $"Ghi camera đã dừng do lỗi: {exception.Message}",
+            $"Camera recording stopped because of an error: {exception.Message}",
             isDegraded: true);
     }
 
@@ -262,6 +411,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         }
 
         _camera.OnCapturedFrame -= OnCameraFrame;
+        await StopAudioCaptureAsync();
         var recordingFailed = false;
 
         if (_startedStreams.Contains(RecordingStreamType.Screen))
@@ -298,31 +448,60 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                 ? 2
                 : Math.Max(1, _settings.RecordingFinalDrainSeconds);
             drainCts.CancelAfter(TimeSpan.FromSeconds(drainSeconds));
-            allUploaded = await _uploadWorker.WaitUntilIdleAsync(drainCts.Token);
+            // Best-effort combined wait so a fast stream doesn't have to poll on its own while a
+            // slower sibling is still draining. Whether this times out or not, each stream below
+            // is still checked and completed independently -- camera and screen must not share a
+            // single pass/fail gate: one stream stuck retrying (or, as with camera when the local
+            // device never opened, having nothing to upload at all) must not stop a perfectly
+            // finished sibling stream from ever calling /complete and getting assembled.
+            await _uploadWorker.WaitUntilIdleAsync(drainCts.Token);
 
-            if (allUploaded)
+            var completedStreams = new List<bool>();
+            foreach (var pair in _uploadSessions.Where(pair =>
+                         _startedStreams.Contains(pair.Key)))
             {
-                foreach (var pair in _uploadSessions.Where(pair =>
-                             _startedStreams.Contains(pair.Key)))
+                var streamId = pair.Value.StreamId;
+
+                if (!_committedStreams.Contains(pair.Key))
                 {
-                    try
-                    {
-                        await _sessionClient.CompleteAsync(
-                            pair.Value.StreamId,
-                            _context.StreamToken,
-                            cancellationToken);
-                    }
-                    catch (Exception ex)
-                    {
-                        allUploaded = false;
-                        LocalFileLogger.Error(
-                            "recording",
-                            "upload_session_complete_failed",
-                            ex,
-                            new { pair.Value.StreamId });
-                    }
+                    // Outstanding == 0 here would be trivially true too -- nothing was ever
+                    // produced for this stream, so there is nothing to wait on locally. But calling
+                    // /complete for it tells vox-streaming to assemble a stream with zero segments,
+                    // which its Kafka consumer retries for a very long time before giving up. Skip
+                    // it instead: there is nothing to assemble either way.
+                    completedStreams.Add(false);
+                    LocalFileLogger.Info("recording", "complete_skipped_no_segments", new { streamId });
+                    continue;
+                }
+
+                var outstanding = await _store.GetOutstandingCountAsync(
+                    new HashSet<string> { streamId }, cancellationToken);
+                if (outstanding > 0)
+                {
+                    completedStreams.Add(false);
+                    continue;
+                }
+
+                try
+                {
+                    await _sessionClient.CompleteAsync(
+                        streamId,
+                        pair.Value.UploadToken,
+                        cancellationToken);
+                    completedStreams.Add(true);
+                }
+                catch (Exception ex)
+                {
+                    completedStreams.Add(false);
+                    LocalFileLogger.Error(
+                        "recording",
+                        "upload_session_complete_failed",
+                        ex,
+                        new { streamId });
                 }
             }
+
+            allUploaded = completedStreams.Count > 0 && completedStreams.All(completed => completed);
         }
 
         _screenRecorder.SegmentCompleted -= OnSegmentCompleted;
@@ -335,7 +514,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         {
             PublishStatus(
                 "segments_pending",
-                "Một số segment chưa upload xong và vẫn được giữ trên máy.",
+                "Some segments are still pending and remain stored on this device.",
                 isDegraded: true);
         }
         else if (!_uploadEnabledForAttempt)
@@ -343,8 +522,8 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
             PublishStatus(
                 "segments_saved_locally",
                 _settings.EnableSegmentUpload
-                    ? "Các segment đã được giữ trên máy do phiên upload chưa khả dụng."
-                    : "Các segment đã được lưu cục bộ; upload đang tắt trong cấu hình.",
+                    ? "Segments remain on this device because the upload session is unavailable."
+                    : "Segments were stored locally because upload is disabled in configuration.",
                 isDegraded: _settings.EnableSegmentUpload);
         }
 
@@ -352,18 +531,19 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         {
             PublishStatus(
                 "recording_stopped_with_errors",
-                "Ghi hình đã dừng nhưng có nguồn ghi gặp lỗi.",
+                "Recording stopped, but at least one capture source reported an error.",
                 isDegraded: true);
         }
         else
         {
             PublishStatus(
                 "recording_stopped",
-                $"Ghi hình đã dừng ({reason}).");
+                $"Recording stopped ({reason}).");
         }
 
         _uploadSessions.Clear();
         _startedStreams.Clear();
+        _committedStreams.Clear();
         _context = null;
         _uploadEnabledForAttempt = false;
         IsRecording = false;
@@ -403,6 +583,18 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
     private static string ToWireValue(RecordingStreamType streamType) =>
         streamType == RecordingStreamType.Camera ? "camera" : "screen";
 
+    public async Task ShutdownAsync()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        await _uploadWorker.DisposeAsync();
+        _lifecycleGate.Dispose();
+    }
+
     public async ValueTask DisposeAsync()
     {
         if (_disposed)
@@ -410,8 +602,12 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
             return;
         }
 
+        // Fallback path: StartAsync/StopAsync's caller (ExamViewModel/StreamingDemoViewModel's
+        // Window.Closing cleanup) should already have called StopAsync then ShutdownAsync directly.
+        // This only does real work if that didn't happen for some reason (e.g. the DI container
+        // disposing this singleton on ServiceProvider teardown without the window cleanup having
+        // run) -- the _disposed guard above makes calling both orders safe.
         await StopAsync(RecordingStopReason.ApplicationShutdown, CancellationToken.None);
-        _disposed = true;
-        _lifecycleGate.Dispose();
+        await ShutdownAsync();
     }
 }

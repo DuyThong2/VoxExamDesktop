@@ -32,6 +32,7 @@ public sealed class LocalSegmentStore
         await _gate.WaitAsync(ct);
         try
         {
+            _manifest = null;
             _attemptDirectory = Path.Combine(BaseDirectory, context.AttemptId.ToString("D"));
             _manifestPath = Path.Combine(_attemptDirectory, "recording.json");
             Directory.CreateDirectory(_attemptDirectory);
@@ -62,6 +63,14 @@ public sealed class LocalSegmentStore
                     ct);
             }
 
+            if (_manifest is not null &&
+                (_manifest.AttemptId != context.AttemptId ||
+                 !string.Equals(_manifest.ScheduleId, context.ScheduleId, StringComparison.Ordinal) ||
+                 !string.Equals(_manifest.SessionId, context.SessionId, StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException("The recording manifest belongs to a different exam session.");
+            }
+
             _manifest ??= new RecordingManifest
             {
                 AttemptId = context.AttemptId,
@@ -76,6 +85,23 @@ public sealed class LocalSegmentStore
             }
 
             await SaveManifestUnsafeAsync(ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<long> GetNextSequenceAsync(string streamId, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var sequences = _manifest?.Segments
+                .Where(segment => string.Equals(segment.StreamId, streamId, StringComparison.Ordinal))
+                .Select(segment => segment.Sequence)
+                .ToArray() ?? [];
+            return sequences.Length == 0 ? 0 : sequences.Max() + 1;
         }
         finally
         {
@@ -183,6 +209,7 @@ public sealed class LocalSegmentStore
     }
 
     public async Task<IReadOnlyList<CompletedSegment>> GetPendingSegmentsAsync(
+        IReadOnlySet<string> streamIds,
         CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
@@ -197,6 +224,7 @@ public sealed class LocalSegmentStore
 
             return manifest.Segments
                 .Where(segment => segment.State is SegmentUploadState.Pending or SegmentUploadState.Failed)
+                .Where(segment => streamIds.Contains(segment.StreamId))
                 .OrderBy(segment => segment.StreamId, StringComparer.Ordinal)
                 .ThenBy(segment => segment.Sequence)
                 .Select(segment => ToCompletedSegment(segment, attemptDirectory))
@@ -221,13 +249,19 @@ public sealed class LocalSegmentStore
         CancellationToken ct) =>
         UpdateStateAsync(segment, SegmentUploadState.Failed, error, ct);
 
-    public async Task<int> GetOutstandingCountAsync(CancellationToken ct)
+    public async Task<int> GetOutstandingCountAsync(IReadOnlySet<string> streamIds, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
         try
         {
-            return _manifest?.Segments.Count(segment =>
-                segment.State != SegmentUploadState.Acknowledged) ?? 0;
+            if (_manifest is null || _attemptDirectory is null)
+            {
+                return 0;
+            }
+            return _manifest.Segments.Count(segment =>
+                streamIds.Contains(segment.StreamId) &&
+                segment.State != SegmentUploadState.Acknowledged &&
+                File.Exists(Path.GetFullPath(Path.Combine(_attemptDirectory, segment.RelativePath))));
         }
         finally
         {

@@ -1,20 +1,28 @@
 using System.Collections.Concurrent;
 using VoxOralExam.Core.Models;
 using VoxOralExam.DesktopApp.Infra.Devices;
-using VoxOralExam.DesktopApp.Infra.Recording.Encoding;
+using VoxOralExam.DesktopApp.Infra.Recording.Audio;
+using VoxOralExam.DesktopApp.Infra.Recording.VideoEncoding;
 using VoxOralExam.DesktopApp.Infra.Recording.Storage;
 using VoxOralExam.DesktopApp.State;
 using VoxOralExam.DesktopApp.Services;
+using System.IO;
 
 namespace VoxOralExam.DesktopApp.Infra.Recording;
 
 public sealed class CameraSegmentRecorder : IDisposable
 {
+    private abstract record QueueItem(TimeSpan Timestamp);
+
+    private sealed record VideoQueueItem(CameraFrame Frame) : QueueItem(Frame.Timestamp);
+
+    private sealed record AudioQueueItem(byte[] Pcm, TimeSpan Timestamp) : QueueItem(Timestamp);
+
     private readonly AppSettings _settings;
     private readonly LocalSegmentStore _store;
     private readonly RecordingClock _clock;
 
-    private BlockingCollection<CameraFrame>? _queue;
+    private BlockingCollection<QueueItem>? _queue;
     private Thread? _encodeThread;
     private VideoSegmentWriter? _writer;
     private Exception? _fatalError;
@@ -28,6 +36,11 @@ public sealed class CameraSegmentRecorder : IDisposable
     private volatile bool _acceptFrames;
     private bool _mediaFoundationAcquired;
     private bool _started;
+
+    // Set once per StartAsync call by ExamRecordingService, based on whether its mic capture
+    // actually opened -- see ScreenSegmentRecorder's identical field for why this isn't just always
+    // true.
+    private bool _includeAudio;
 
     public event Action<CompletedSegment>? SegmentCompleted;
 
@@ -43,7 +56,11 @@ public sealed class CameraSegmentRecorder : IDisposable
         _clock = clock;
     }
 
-    public Task StartAsync(string streamId, CancellationToken ct)
+    public Task StartAsync(
+        string streamId,
+        long initialSequence,
+        CancellationToken ct,
+        bool includeAudio = false)
     {
         ct.ThrowIfCancellationRequested();
         if (_started)
@@ -52,13 +69,14 @@ public sealed class CameraSegmentRecorder : IDisposable
         }
 
         _streamId = streamId;
-        _sequence = 0;
+        _sequence = initialSequence;
         _framesInSegment = 0;
         _fatalError = null;
+        _includeAudio = includeAudio;
         _width = 0;
         _height = 0;
-        _queue = new BlockingCollection<CameraFrame>(
-            new ConcurrentQueue<CameraFrame>(),
+        _queue = new BlockingCollection<QueueItem>(
+            new ConcurrentQueue<QueueItem>(),
             Math.Max(2, _settings.RecordingQueueCapacity));
         MediaFoundationRuntime.Acquire();
         _mediaFoundationAcquired = true;
@@ -77,7 +95,7 @@ public sealed class CameraSegmentRecorder : IDisposable
     {
         try
         {
-            return _acceptFrames && _queue is not null && _queue.TryAdd(frame);
+            return _acceptFrames && _queue is not null && _queue.TryAdd(new VideoQueueItem(frame));
         }
         catch (InvalidOperationException)
         {
@@ -85,21 +103,61 @@ public sealed class CameraSegmentRecorder : IDisposable
         }
     }
 
+    /// <summary>
+    /// Called by ExamRecordingService with the exam mic's raw PCM chunks (no mixing -- Camera only
+    /// ever gets mic, unlike Screen's mic+system-audio mix, see AudioMixer). Routed through the same
+    /// queue/thread that owns _writer so an audio write never races a video-frame-triggered segment
+    /// rotation swapping _writer out underneath it.
+    /// </summary>
+    public void EnqueueAudio(byte[] pcm, TimeSpan timestamp)
+    {
+        try
+        {
+            if (!_acceptFrames || _queue is null)
+            {
+                return;
+            }
+
+            _queue.TryAdd(new AudioQueueItem(pcm, timestamp));
+        }
+        catch (InvalidOperationException)
+        {
+        }
+    }
+
     private void EncodeLoop()
     {
         try
         {
-            foreach (var frame in _queue!.GetConsumingEnumerable())
+            foreach (var item in _queue!.GetConsumingEnumerable())
             {
-                EnsureWriter(frame);
-                RotateIfNeeded(frame);
-                _writer!.WriteBgr24(
-                    frame.Data,
-                    frame.Width,
-                    frame.Height,
-                    frame.Stride,
-                    frame.Timestamp - _segmentStart);
-                _framesInSegment++;
+                switch (item)
+                {
+                    case VideoQueueItem video:
+                        var frame = video.Frame;
+                        EnsureWriter(frame);
+                        RotateIfNeeded(frame);
+                        _writer!.WriteBgr24(
+                            frame.Data,
+                            frame.Width,
+                            frame.Height,
+                            frame.Stride,
+                            frame.Timestamp - _segmentStart);
+                        _framesInSegment++;
+                        break;
+
+                    case AudioQueueItem audio:
+                        // _writer is null until the first camera frame (EnsureWriter creates it
+                        // lazily) -- any audio arriving before that is dropped, same narrow
+                        // recording-start-only window as ScreenSegmentRecorder's
+                        // _firstVideoFrameSeen guard.
+                        if (_writer is { SupportsAudio: true } writer)
+                        {
+                            writer.WriteAudio(audio.Pcm, audio.Timestamp - _segmentStart);
+                        }
+
+                        break;
+                }
             }
         }
         catch (Exception ex)
@@ -145,7 +203,8 @@ public sealed class CameraSegmentRecorder : IDisposable
         _width,
         _height,
         Math.Clamp(_settings.CameraFps, 1, 60),
-        Math.Max(250_000, _settings.CameraRecordingBitrate));
+        Math.Max(250_000, _settings.CameraRecordingBitrate),
+        audioSampleRate: _includeAudio ? AudioMixer.TargetSampleRate : null);
 
     private void CompleteCurrentSegment(DateTimeOffset endedAtUtc)
     {
@@ -205,15 +264,23 @@ public sealed class CameraSegmentRecorder : IDisposable
             await Task.Run(() => _encodeThread.Join(), CancellationToken.None);
         }
 
+        // See ScreenSegmentRecorder.StopAsync's comment on the same pattern: CompleteCurrentSegment
+        // ends in a blocking GetAwaiter().GetResult() over CommitAsync, which awaits real async I/O
+        // while holding LocalSegmentStore's gate. Running that inline here would resume on the UI
+        // thread (via the WPF SynchronizationContext captured by the await above) and deadlock
+        // against CommitAsync's own continuation needing that same, now-blocked, thread.
         Exception? completionError = null;
-        try
+        await Task.Run(() =>
         {
-            CompleteCurrentSegment(_clock.ToUtc(_clock.Elapsed));
-        }
-        catch (Exception ex)
-        {
-            completionError = ex;
-        }
+            try
+            {
+                CompleteCurrentSegment(_clock.ToUtc(_clock.Elapsed));
+            }
+            catch (Exception ex)
+            {
+                completionError = ex;
+            }
+        }, CancellationToken.None);
 
         var fatalError = _fatalError;
         CleanupResources();

@@ -6,8 +6,15 @@ namespace VoxOralExam.DesktopApp.Infra.Recording.VideoEncoding;
 
 internal sealed class VideoSegmentWriter : IDisposable
 {
+    // Every audio sample this writer accepts is fixed 16-bit mono PCM (see AudioMixer/
+    // TurnAudioRecorder) -- WriteAudio only needs the sample rate to compute each sample's duration.
+    private const int AudioBitsPerSample = 16;
+    private const int AudioChannels = 1;
+
     private readonly IMFSinkWriter _writer;
     private readonly int _streamIndex;
+    private readonly int? _audioStreamIndex;
+    private readonly int _audioSampleRate;
     private readonly int _width;
     private readonly int _height;
     private readonly long _frameDurationTicks;
@@ -16,10 +23,13 @@ internal sealed class VideoSegmentWriter : IDisposable
     private ID3D11Texture2D? _stagingTexture;
 
     private long _lastSampleTime = -1;
+    private long _lastAudioSampleTime = -1;
     private bool _completed;
     private bool _disposed;
 
     public string OutputPath { get; }
+
+    public bool SupportsAudio => _audioStreamIndex is not null;
 
     public VideoSegmentWriter(
         string outputPath,
@@ -28,7 +38,8 @@ internal sealed class VideoSegmentWriter : IDisposable
         int framesPerSecond,
         int bitrate,
         ID3D11Device? device = null,
-        object? contextLock = null)
+        object? contextLock = null,
+        int? audioSampleRate = null)
     {
         OutputPath = outputPath;
         _width = width;
@@ -36,12 +47,16 @@ internal sealed class VideoSegmentWriter : IDisposable
         _frameDurationTicks = TimeSpan.TicksPerSecond / framesPerSecond;
         _device = device;
         _contextLock = contextLock;
-        (_writer, _streamIndex) = VideoSinkWriterFactory.Create(
+        _audioSampleRate = audioSampleRate ?? 0;
+        (_writer, _streamIndex, _audioStreamIndex) = VideoSinkWriterFactory.Create(
             outputPath,
             width,
             height,
             framesPerSecond,
-            bitrate);
+            bitrate,
+            audioSampleRate is { } sampleRate
+                ? new AudioFormatSpec(sampleRate, AudioChannels)
+                : null);
     }
 
     public void WriteTexture(ID3D11Texture2D texture, TimeSpan localTimestamp)
@@ -143,6 +158,47 @@ internal sealed class VideoSegmentWriter : IDisposable
 
         buffer.CurrentLength = outputStride * _height;
         WriteSample(buffer, localTimestamp);
+    }
+
+    public void WriteAudio(byte[] pcm, TimeSpan localTimestamp)
+    {
+        if (_audioStreamIndex is not { } audioStreamIndex)
+        {
+            throw new InvalidOperationException("This writer was not configured with an audio stream.");
+        }
+
+        using var buffer = MediaFactory.MFCreateMemoryBuffer(pcm.Length);
+        buffer.Lock(out var destinationPointer, out _, out _);
+        try
+        {
+            unsafe
+            {
+                fixed (byte* source = pcm)
+                {
+                    Buffer.MemoryCopy(source, (byte*)destinationPointer, pcm.Length, pcm.Length);
+                }
+            }
+        }
+        finally
+        {
+            buffer.Unlock();
+        }
+
+        buffer.CurrentLength = pcm.Length;
+
+        using var sample = MediaFactory.MFCreateSample();
+        sample.AddBuffer(buffer);
+
+        var bytesPerSample = AudioChannels * (AudioBitsPerSample / 8);
+        var frameCount = pcm.Length / bytesPerSample;
+        var duration = frameCount * TimeSpan.TicksPerSecond / _audioSampleRate;
+
+        var requestedTime = Math.Max(0, localTimestamp.Ticks);
+        var sampleTime = Math.Max(requestedTime, _lastAudioSampleTime + 1);
+        sample.SampleTime = sampleTime;
+        sample.SampleDuration = duration;
+        _writer.WriteSample(audioStreamIndex, sample);
+        _lastAudioSampleTime = sampleTime + duration - 1;
     }
 
     private void WriteSample(IMFMediaBuffer buffer, TimeSpan localTimestamp)
