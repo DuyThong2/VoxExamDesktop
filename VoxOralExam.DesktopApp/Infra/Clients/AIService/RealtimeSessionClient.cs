@@ -60,6 +60,7 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     private TaskCompletionSource<bool>? _pendingExamEndAckTcs;
     private Guid _examAttemptId;
     private bool _intentionalClose;
+    private bool _forceEndRequested;
     private (Guid AnswerId, int TurnOrder)? _resumeCheckpoint;
 
     public event Action? OnVadSpeechStart;
@@ -80,6 +81,7 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     public event Action<int>? OnReconnected;
     public event Action<int, string>? OnAvatarUtteranceComplete;
     public event Action<int, string, string?>? OnSpeakRequested;
+    public event Action<string>? OnForceEnded;
 
     public bool IsConnected => _webSocket?.State == WebSocketState.Open;
 
@@ -101,6 +103,7 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     {
         _examAttemptId = examAttemptId;
         _intentionalClose = false;
+        _forceEndRequested = false;
         await ConnectCoreAsync(examAttemptId, ct);
     }
 
@@ -482,6 +485,16 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                 case "error":
                     OnError?.Invoke(GetText(doc));
                     break;
+                case "force_end":
+                    _forceEndRequested = true;
+                    _intentionalClose = true;
+                    var reason = GetPropertyText(doc, "reason");
+                    LocalFileLogger.Info("realtime_ws", "force_end_received", new { reason });
+                    _pendingDecisionTcs?.TrySetCanceled();
+                    _pendingExamEndAckTcs?.TrySetCanceled();
+                    _pendingResumeAckTcs?.TrySetCanceled();
+                    OnForceEnded?.Invoke(reason);
+                    break;
                 case "resume_ack":
                     var lastArchivedTurnOrder = doc.RootElement.TryGetProperty("last_archived_turn_order", out var lto) ? lto.GetInt32() : -1;
                     _pendingResumeAckTcs?.TrySetResult(lastArchivedTurnOrder);
@@ -538,6 +551,9 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
 
     private static string GetText(JsonDocument doc) =>
         doc.RootElement.TryGetProperty("text", out var t) ? t.GetString() ?? "" : "";
+
+    private static string GetPropertyText(JsonDocument doc, string propertyName) =>
+        doc.RootElement.TryGetProperty(propertyName, out var value) ? value.GetString() ?? "" : "";
 
     private static RealtimeDecision ParseDecision(JsonElement decisionElement) => new()
     {

@@ -38,14 +38,16 @@
     <None Update="appsettings.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
-    <!-- Lives at the solution root (..\.env, sibling to VoxOralExam.Core/VoxOralExam.DesktopApp),
-         same convention as agents\.env: one secrets file per repo, not per project. Gitignored
-         and may not exist on a fresh clone, so Include with a Condition (not Update) keeps the
-         build from failing when it's missing. Link flattens it into the output dir as plain
-         ".env" so DotEnvLoader.Load(BaseDirectory + ".env") finds it unchanged. -->
+    
     <None Include="..\.env" Condition="Exists('..\.env')" Link=".env">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
+    <!-- Optional local-dev override, loaded second in App.xaml.cs so any key it sets wins over
+         ..\.env: lets local dev point JAVA_BASE_URL/PYTHON_BASE_URL/etc at localhost without
+         touching ..\.env, which stays pointed at the live deployment. Gitignored, not expected
+         to exist by default: create it from ..\.env.local.example when needed. -->
+    <None Include="..\.env.local" Condition="Exists('..\.env.local')" Link=".env.local">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
   </ItemGroup>
-
 </Project>

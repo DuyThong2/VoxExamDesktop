@@ -34,6 +34,7 @@ public class MockExamEntryApiService : IExamEntryApiService
             StreamJwt = "dev-stub-stream-jwt",
             TicketId = Guid.NewGuid().ToString("N"),
             ExpiresAt = DateTime.UtcNow.AddHours(2),
+            ScheduleEndAt = DateTime.UtcNow.AddMinutes(30),
         };
     }
 }

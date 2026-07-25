@@ -13,8 +13,10 @@ public class ExamPaper
     public string Title { get; set; } = string.Empty;
     public string Subject { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
+    public int DurationSeconds { get; set; }
     public int DurationMinutes { get; set; }
     public DateTime? ExamDate { get; set; }
+    public DateTime? ScheduleEndAt { get; set; }
     public string Status { get; set; } = string.Empty;
     public List<ExamPaperQuestion> PaperQuestions { get; set; } = [];
 }

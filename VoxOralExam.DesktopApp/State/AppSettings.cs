@@ -19,6 +19,10 @@ public class AppSettings
     public int CameraWidth { get; set; } = 640;
     public int CameraHeight { get; set; } = 480;
     public int CameraFps { get; set; } = 30;
+    public string StunUrls { get; set; } = "stun:stun.l.google.com:19302";
+    public string TurnUrl { get; set; } = "";
+    public string TurnUsername { get; set; } = "";
+    public string TurnCredential { get; set; } = "";
     public string LoginPlatform { get; set; } = "DESKTOP";
 
     // Length of the OTP the proctor's screen shows and the student types.

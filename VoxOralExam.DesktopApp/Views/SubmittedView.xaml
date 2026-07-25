@@ -1,7 +1,41 @@
 <UserControl x:Class="VoxOralExam.DesktopApp.Views.SubmittedView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
-    <Grid>
-
+    <Grid Width="520">
+        <Border Background="White"
+                Padding="32"
+                CornerRadius="20"
+                BorderBrush="#D1FAE5"
+                BorderThickness="1">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="24" ShadowDepth="2" Opacity="0.18" />
+            </Border.Effect>
+            <StackPanel>
+                <Border Width="68"
+                        Height="68"
+                        CornerRadius="34"
+                        Background="#DCFCE7"
+                        HorizontalAlignment="Center"
+                        Margin="0,0,0,18">
+                    <TextBlock Text="✓"
+                               FontSize="32"
+                               FontWeight="Bold"
+                               Foreground="#15803D"
+                               HorizontalAlignment="Center"
+                               VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Text="Đã nộp bài thành công"
+                           FontSize="28"
+                           FontWeight="SemiBold"
+                           Foreground="#0F172A"
+                           TextAlignment="Center"
+                           Margin="0,0,0,12" />
+                <TextBlock Text="{Binding EndScreenMessage}"
+                           FontSize="16"
+                           Foreground="#475569"
+                           TextAlignment="Center"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </Border>
     </Grid>
 </UserControl>

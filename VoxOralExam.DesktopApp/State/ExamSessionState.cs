@@ -17,7 +17,9 @@ public class ExamSessionState
     public Guid ExamPaperId { get; set; }
     public Guid ExamAttemptId { get; set; }
     public string ExamTitle { get; set; } = string.Empty;
+    public int DurationSeconds { get; set; } = 30 * 60;
     public int DurationMinutes { get; set; } = 30;
+    public DateTime? ScheduleEndAt { get; set; }
     public int QuestionIndex { get; set; }
     public List<Question> Questions { get; set; } = [];
     public Dictionary<Guid, Guid> AttemptAnswerIdsByQuestionId { get; set; } = [];
@@ -53,7 +55,13 @@ public class ExamSessionState
             ?? (examPaper.ExamAttemptId != Guid.Empty ? examPaper.ExamAttemptId : Guid.NewGuid());
         SessionId = ExamAttemptId.ToString();
         ExamTitle = examPaper.Title;
-        DurationMinutes = examPaper.DurationMinutes;
+        DurationSeconds = examPaper.DurationSeconds > 0
+            ? examPaper.DurationSeconds
+            : Math.Max(1, examPaper.DurationMinutes) * 60;
+        DurationMinutes = examPaper.DurationMinutes > 0
+            ? examPaper.DurationMinutes
+            : Math.Max(1, (int)Math.Ceiling(DurationSeconds / 60.0));
+        ScheduleEndAt = examPaper.ScheduleEndAt ?? EntryTicket?.ScheduleEndAt;
         QuestionIndex = 0;
         Questions = examPaper.PaperQuestions
             .OrderBy(item => item.OrderIndex)

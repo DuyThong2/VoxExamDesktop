@@ -55,6 +55,7 @@ public partial class RealtimeExamFlowService
         {
             _recorder.BeginTurnCapture();
         }
+        StartQuestionSpeechTimer();
         _prepInterruptTcs?.TrySetResult(true);
         _vadSpeechStartTcs?.TrySetResult(true);
         OnStudentSpeakingChanged?.Invoke(true);
@@ -68,6 +69,7 @@ public partial class RealtimeExamFlowService
         }
 
         _vadSpeechEndTcs?.TrySetResult(true);
+        StopQuestionSpeechTimer();
         OnStudentSpeakingChanged?.Invoke(false);
     }
 
@@ -75,6 +77,18 @@ public partial class RealtimeExamFlowService
     {
         LocalFileLogger.Info("exam_flow", "realtime_session_error", new { message });
         OnStatusChanged?.Invoke($"Loi realtime session: {message}");
+    }
+
+    private void HandleForceEnded(string reason)
+    {
+        _forceEndRequested = true;
+        _prepInterruptTcs?.TrySetResult(true);
+        CloseStudentSpeechWindow();
+        _avatarSpeaker.Stop();
+        OnAvatarSpeakingChanged?.Invoke(false);
+        LocalFileLogger.Info("exam_flow", "force_end_received", new { reason });
+        OnStatusChanged?.Invoke("Bài thi đã tạm dừng để xem xét. Vui lòng liên hệ giám thị/nhà trường.");
+        _runCts?.Cancel();
     }
 
     private void HandleSessionReconnecting()

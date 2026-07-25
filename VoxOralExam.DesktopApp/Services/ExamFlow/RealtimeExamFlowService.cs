@@ -43,6 +43,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
     private readonly MicAudioStreamer _micStreamer;
     private readonly IExamApiService _examApi;
     private readonly QuestionAssetPresentationCoordinator _assetPresentationCoordinator;
+    private readonly object _questionSpeechBudgetLock = new();
 
     private CancellationTokenSource? _runCts;
     private Task? _runTask;
@@ -53,8 +54,16 @@ public partial class RealtimeExamFlowService : IExamFlowService
     private TaskCompletionSource<bool>? _prepInterruptTcs;
     private bool _studentSpeechWindowOpen;
     private bool _isMicMuted;
+    private bool _stopRequested;
+    private bool _forceEndRequested;
+    private bool _submitNowRequested;
     private readonly List<Task> _pendingArchiveTasks = [];
     private Guid? _lastAnnouncedSectionId;
+    private TimeSpan _questionSpeechLimit = TimeSpan.Zero;
+    private TimeSpan _questionSpeechElapsed = TimeSpan.Zero;
+    private DateTime? _questionSpeechStartedAtUtc;
+    private TaskCompletionSource<bool>? _questionSpeechBudgetExceededTcs;
+    private Timer? _questionSpeechProgressTimer;
 
     public RealtimeExamFlowService(
         TurnAudioUploader turnAudioUploader,
@@ -83,9 +92,10 @@ public partial class RealtimeExamFlowService : IExamFlowService
     public event Action<ExamQuestionPrompt>? OnQuestionPresented;
     public event Action<string>? OnTranscriptAppended;
     public event Action<string>? OnStatusChanged;
-    public event Action? OnExamCompleted;
+    public event Action<bool>? OnExamEnded;
     public event Action<bool>? OnStudentSpeakingChanged;
     public event Action<bool>? OnAvatarSpeakingChanged;
+    public event Action<TimeSpan, TimeSpan>? OnQuestionSpeakingTimeChanged;
     public bool IsMicMuted => _recorder?.IsMuted ?? _isMicMuted;
 
     public Task StartAsync(CancellationToken ct)
@@ -96,6 +106,9 @@ public partial class RealtimeExamFlowService : IExamFlowService
         }
 
         LocalFileLogger.Info("exam_flow", "start_requested");
+        _stopRequested = false;
+        _forceEndRequested = false;
+        _submitNowRequested = false;
         _runCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _runTask = RunAsync(_runCts.Token);
         return Task.CompletedTask;
@@ -104,6 +117,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
     public async Task StopAsync()
     {
         LocalFileLogger.Info("exam_flow", "stop_requested");
+        _stopRequested = true;
         _runCts?.Cancel();
 
         if (_runTask is not null)
@@ -115,6 +129,29 @@ public partial class RealtimeExamFlowService : IExamFlowService
             catch (OperationCanceledException)
             {
                 LocalFileLogger.Info("exam_flow", "stop_cancelled");
+            }
+        }
+    }
+
+    // Học sinh bấm "Nộp bài" (xác nhận rồi mới gọi, xem ExamViewModel) hoặc hết giờ đếm ngược
+    // (StartCountdown gọi thẳng, không cần xác nhận) khi CHƯA trả lời hết câu hỏi -- khác
+    // StopAsync/force-end (INTERRUPTED): đây là 1 lần nộp bài có chủ đích/tự nhiên hết giờ, nên
+    // gửi SUBMITTED như nộp sạch, không phải INTERRUPTED.
+    public async Task SubmitNowAsync()
+    {
+        LocalFileLogger.Info("exam_flow", "submit_now_requested");
+        _submitNowRequested = true;
+        _runCts?.Cancel();
+
+        if (_runTask is not null)
+        {
+            try
+            {
+                await _runTask;
+            }
+            catch (OperationCanceledException)
+            {
+                LocalFileLogger.Info("exam_flow", "submit_now_cancelled");
             }
         }
     }
@@ -145,6 +182,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
         _sessionClient.OnVadSpeechEnd += HandleVadSpeechEnd;
         _sessionClient.OnAvatarUtteranceComplete += HandleAvatarUtteranceComplete;
         _sessionClient.OnSpeakRequested += HandleSpeakRequested;
+        _sessionClient.OnForceEnded += HandleForceEnded;
         _sessionClient.OnError += HandleSessionError;
         _sessionClient.OnReconnecting += HandleSessionReconnecting;
         _sessionClient.OnReconnected += HandleSessionReconnected;
@@ -179,7 +217,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
             await WaitForAvatarUtteranceCompletionAfterAsync(
                 triggerAsync: token => _sessionClient.SendExamEndAndWaitForAckAsync(token),
                 ct);
-            OnExamCompleted?.Invoke();
+            OnExamEnded?.Invoke(true);
             LocalFileLogger.Info("exam_flow", "run_completed");
 
             await WaitForPendingArchivesAsync();
@@ -187,19 +225,46 @@ public partial class RealtimeExamFlowService : IExamFlowService
         }
         catch (OperationCanceledException)
         {
-            LocalFileLogger.Info("exam_flow", "run_cancelled");
-            // Student exited / app was closed before finishing every question -- the exam is being
-            // force-cut-off, not naturally submitted. Still send whatever was answered to grading
-            // rather than leaving the session stuck at IN_PROGRESS forever (matches vox's
-            // IN_PROGRESS -> EXPIRED -> GRADING transition, which grades partial answers too).
-            await WaitForPendingArchivesAsync();
-            await SubmitSessionStatusAsync("EXPIRED");
+            LocalFileLogger.Info("exam_flow", "run_cancelled", new { _stopRequested, _forceEndRequested, _submitNowRequested });
+            if (_submitNowRequested)
+            {
+                // Hết giờ đếm ngược hoặc học sinh chủ động bấm "Nộp bài" giữa chừng (chưa trả
+                // lời hết câu hỏi) -- coi như nộp bài có chủ đích, không phải gián đoạn. ct gốc
+                // đã bị cancel nên dùng CancellationToken.None cho bước chào tạm biệt/ack, best
+                // effort: nếu avatar/session không phản hồi kịp cũng không được chặn việc nộp bài.
+                try
+                {
+                    await WaitForAvatarUtteranceCompletionAfterAsync(
+                        triggerAsync: token => _sessionClient.SendExamEndAndWaitForAckAsync(token),
+                        CancellationToken.None);
+                }
+                catch (Exception ex)
+                {
+                    LocalFileLogger.Error("exam_flow", "submit_now_farewell_failed", ex);
+                }
+                await WaitForPendingArchivesAsync();
+                await SubmitSessionStatusAsync("SUBMITTED");
+                OnExamEnded?.Invoke(true);
+            }
+            else
+            {
+                await WaitForPendingArchivesAsync();
+                await SubmitSessionStatusAsync("INTERRUPTED");
+                if (_forceEndRequested || !_stopRequested)
+                {
+                    OnExamEnded?.Invoke(false);
+                }
+            }
         }
         catch (Exception ex)
         {
             LocalFileLogger.Error("exam_flow", "run_failed", ex);
             await WaitForPendingArchivesAsync();
-            await SubmitSessionStatusAsync("EXPIRED");
+            await SubmitSessionStatusAsync("INTERRUPTED");
+            if (!_stopRequested)
+            {
+                OnExamEnded?.Invoke(false);
+            }
             throw;
         }
         finally
@@ -208,13 +273,16 @@ public partial class RealtimeExamFlowService : IExamFlowService
             _sessionClient.OnVadSpeechEnd -= HandleVadSpeechEnd;
             _sessionClient.OnAvatarUtteranceComplete -= HandleAvatarUtteranceComplete;
             _sessionClient.OnSpeakRequested -= HandleSpeakRequested;
+            _sessionClient.OnForceEnded -= HandleForceEnded;
             _sessionClient.OnError -= HandleSessionError;
             _sessionClient.OnReconnecting -= HandleSessionReconnecting;
             _sessionClient.OnReconnected -= HandleSessionReconnected;
             _avatarClient.OnReconnecting -= HandleAvatarReconnecting;
             _avatarClient.OnReconnected -= HandleAvatarReconnected;
             OnStudentSpeakingChanged?.Invoke(false);
+            OnAvatarSpeakingChanged?.Invoke(false);
             _micStreamer.Stop();
+            _avatarSpeaker.Stop();
             await recorder.StopAsync();
             _recorder = null;
             if (_settings.EnableAvatarWebRtc)
@@ -235,6 +303,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
         var sectionInstruction = GetSectionInstructionToAnnounce(question);
 
         CloseStudentSpeechWindow();
+        ResetQuestionSpeechBudget(question.MaxResponseSeconds);
         _assetPresentationCoordinator.Clear();
         var questionContext = BuildQuestionContext(question);
 
@@ -317,6 +386,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
                 assessmentTurnCount == 0 ? _settings.InitialSilenceTimeoutSeconds : _settings.SilenceTimeoutAfterRepeatSeconds));
             var overallTimeout = TimeSpan.FromSeconds(Math.Max(15, _settings.QuestionTurnTimeoutSeconds));
             var gracePeriod = TimeSpan.FromSeconds(Math.Max(1, _settings.PostSpeechSilenceGracePeriodSeconds));
+            var turnSpokenSecondsAtStart = GetQuestionSpokenSeconds();
 
             if (!_studentSpeechWindowOpen)
             {
@@ -325,6 +395,11 @@ public partial class RealtimeExamFlowService : IExamFlowService
                     prompt.QuestionNumber,
                     turnOrder
                 });
+                break;
+            }
+            if (IsQuestionSpeechBudgetExceeded())
+            {
+                OnStatusChanged?.Invoke($"Da het thoi gian noi cua cau {prompt.QuestionNumber}. Chuyen sang cau tiep theo.");
                 break;
             }
 
@@ -338,16 +413,19 @@ public partial class RealtimeExamFlowService : IExamFlowService
             var spoke = turnOrder == 1 && _recorder is not null && _recorder.IsTurnActive
                 ? true
                 : await WaitForSpeechStartAsync(initialTimeout, ct);
+            var speechBudgetExceeded = false;
             if (spoke)
             {
                 OnStatusChanged?.Invoke("Hoc sinh dang noi...");
-                await WaitForSpeechEndWithGraceAsync(overallTimeout, gracePeriod, ct);
-                OnStatusChanged?.Invoke("Hoc sinh da dung noi, dang xu ly...");
+                speechBudgetExceeded = await WaitForSpeechEndWithGraceAsync(overallTimeout, gracePeriod, ct);
+                OnStatusChanged?.Invoke(speechBudgetExceeded
+                    ? "Da het thoi gian noi cua cau hoi, dang luu cau tra loi..."
+                    : "Hoc sinh da dung noi, dang xu ly...");
             }
 
             CloseStudentSpeechWindow();
             var pcmBytes = _recorder!.GetTurnBufferAndReset();
-            var turnDurationSeconds = _recorder.LastTurnDurationSeconds;
+            var turnDurationSeconds = Math.Round(Math.Max(0, GetQuestionSpokenSeconds() - turnSpokenSecondsAtStart), 2);
             if (pcmBytes.Length > 0)
             {
                 DispatchArchiveTurn(question, attemptAnswerId, paperItemId, turnOrder, currentPromptText, turnDurationSeconds, pcmBytes, ct);
@@ -356,7 +434,8 @@ public partial class RealtimeExamFlowService : IExamFlowService
             // Assumes worst case (this turn counts toward the budget, i.e. isn't a
             // clarification) since we don't know Python's decision.Reason yet -- conservative,
             // but the alternative (finding out too late) is exactly the bug this prevents.
-            var isLastAllowedTurn = assessmentTurnCount + 1 >= maxTurnsPerQuestion;
+            speechBudgetExceeded = speechBudgetExceeded || IsQuestionSpeechBudgetExceeded();
+            var isLastAllowedTurn = speechBudgetExceeded || assessmentTurnCount + 1 >= maxTurnsPerQuestion;
             RealtimeDecision decision;
             bool avatarSpokeAfterDecision;
             try
@@ -402,7 +481,11 @@ public partial class RealtimeExamFlowService : IExamFlowService
                 assessmentTurnCount++;
             }
 
-            questionDone = !decision.ShouldContinue || assessmentTurnCount >= maxTurnsPerQuestion;
+            questionDone = speechBudgetExceeded || !decision.ShouldContinue || assessmentTurnCount >= maxTurnsPerQuestion;
+            if (speechBudgetExceeded)
+            {
+                OnStatusChanged?.Invoke($"Cau {prompt.QuestionNumber} da vuot gioi han {question.MaxResponseSeconds} giay noi. Tu dong chuyen sang cau tiep theo.");
+            }
             if (!questionDone && avatarSpokeAfterDecision)
             {
                 OpenStudentSpeechWindow();
@@ -421,6 +504,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
 
         CloseStudentSpeechWindow();
         _assetPresentationCoordinator.Clear();
+        DisposeQuestionSpeechBudget();
     }
 
     private string? GetSectionInstructionToAnnounce(Question question)
@@ -679,7 +763,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
         }
     }
 
-    private async Task WaitForSpeechEndWithGraceAsync(TimeSpan overallTimeout, TimeSpan gracePeriod, CancellationToken ct)
+    private async Task<bool> WaitForSpeechEndWithGraceAsync(TimeSpan overallTimeout, TimeSpan gracePeriod, CancellationToken ct)
     {
         var deadline = DateTime.UtcNow + overallTimeout;
 
@@ -688,26 +772,34 @@ public partial class RealtimeExamFlowService : IExamFlowService
             var remaining = deadline - DateTime.UtcNow;
             if (remaining <= TimeSpan.Zero)
             {
-                return;
+                return false;
             }
 
-            var endedNaturally = await WaitForSignalAsync(tcs => _vadSpeechEndTcs = tcs, remaining, ct);
-            if (!endedNaturally)
+            var waitResult = await WaitForSpeechEndOrBudgetAsync(remaining, ct);
+            if (waitResult == SpeechWaitResult.BudgetExceeded)
             {
-                return;
+                return true;
+            }
+            if (waitResult != SpeechWaitResult.Signal)
+            {
+                return false;
+            }
+            if (IsQuestionSpeechBudgetExceeded())
+            {
+                return true;
             }
 
             remaining = deadline - DateTime.UtcNow;
             var graceWindow = remaining < gracePeriod ? remaining : gracePeriod;
             if (graceWindow <= TimeSpan.Zero)
             {
-                return;
+                return false;
             }
 
             var resumed = await WaitForSignalAsync(tcs => _vadSpeechStartTcs = tcs, graceWindow, ct);
             if (!resumed)
             {
-                return;
+                return false;
             }
             // Resumed within the grace period -- loop back and wait for the next speech_end.
         }
@@ -770,8 +862,107 @@ public partial class RealtimeExamFlowService : IExamFlowService
     private void CloseStudentSpeechWindow()
     {
         _studentSpeechWindowOpen = false;
+        StopQuestionSpeechTimer();
         OnStudentSpeakingChanged?.Invoke(false);
     }
+
+    private void ResetQuestionSpeechBudget(int maxResponseSeconds)
+    {
+        lock (_questionSpeechBudgetLock)
+        {
+            _questionSpeechLimit = TimeSpan.FromSeconds(Math.Max(0, maxResponseSeconds));
+            _questionSpeechElapsed = TimeSpan.Zero;
+            _questionSpeechStartedAtUtc = null;
+            _questionSpeechBudgetExceededTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        _questionSpeechProgressTimer?.Dispose();
+        _questionSpeechProgressTimer = new Timer(_ => NotifyQuestionSpeakingTimeChanged(), null, TimeSpan.Zero, TimeSpan.FromMilliseconds(250));
+    }
+
+    private void DisposeQuestionSpeechBudget()
+    {
+        StopQuestionSpeechTimer();
+        _questionSpeechProgressTimer?.Dispose();
+        _questionSpeechProgressTimer = null;
+        NotifyQuestionSpeakingTimeChanged();
+    }
+
+    private void StartQuestionSpeechTimer()
+    {
+        lock (_questionSpeechBudgetLock)
+        {
+            if (_questionSpeechStartedAtUtc is null)
+            {
+                _questionSpeechStartedAtUtc = DateTime.UtcNow;
+            }
+        }
+
+        NotifyQuestionSpeakingTimeChanged();
+    }
+
+    private void StopQuestionSpeechTimer()
+    {
+        lock (_questionSpeechBudgetLock)
+        {
+            if (_questionSpeechStartedAtUtc is DateTime startedAt)
+            {
+                _questionSpeechElapsed += DateTime.UtcNow - startedAt;
+                _questionSpeechStartedAtUtc = null;
+            }
+        }
+
+        NotifyQuestionSpeakingTimeChanged();
+    }
+
+    private double GetQuestionSpokenSeconds()
+    {
+        lock (_questionSpeechBudgetLock)
+        {
+            return GetQuestionSpokenTimeLocked(DateTime.UtcNow).TotalSeconds;
+        }
+    }
+
+    private bool IsQuestionSpeechBudgetExceeded()
+    {
+        lock (_questionSpeechBudgetLock)
+        {
+            return IsQuestionSpeechBudgetExceededLocked(DateTime.UtcNow);
+        }
+    }
+
+    private void NotifyQuestionSpeakingTimeChanged()
+    {
+        TimeSpan elapsed;
+        TimeSpan limit;
+        TaskCompletionSource<bool>? budgetExceededTcs = null;
+        lock (_questionSpeechBudgetLock)
+        {
+            var now = DateTime.UtcNow;
+            elapsed = GetQuestionSpokenTimeLocked(now);
+            limit = _questionSpeechLimit;
+            if (IsQuestionSpeechBudgetExceededLocked(now))
+            {
+                budgetExceededTcs = _questionSpeechBudgetExceededTcs;
+            }
+        }
+
+        budgetExceededTcs?.TrySetResult(true);
+        OnQuestionSpeakingTimeChanged?.Invoke(elapsed, limit);
+    }
+
+    private TimeSpan GetQuestionSpokenTimeLocked(DateTime now)
+    {
+        var elapsed = _questionSpeechElapsed;
+        if (_questionSpeechStartedAtUtc is DateTime startedAt)
+        {
+            elapsed += now - startedAt;
+        }
+        return elapsed < TimeSpan.Zero ? TimeSpan.Zero : elapsed;
+    }
+
+    private bool IsQuestionSpeechBudgetExceededLocked(DateTime now) =>
+        _questionSpeechLimit > TimeSpan.Zero && GetQuestionSpokenTimeLocked(now) >= _questionSpeechLimit;
 
     private static async Task<bool> WaitForSignalAsync(Action<TaskCompletionSource<bool>> register, TimeSpan timeout, CancellationToken ct)
     {
@@ -781,6 +972,46 @@ public partial class RealtimeExamFlowService : IExamFlowService
         using var reg = cts.Token.Register(() => tcs.TrySetResult(false));
         cts.CancelAfter(timeout);
         return await tcs.Task;
+    }
+
+    private async Task<SpeechWaitResult> WaitForSpeechEndOrBudgetAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        if (IsQuestionSpeechBudgetExceeded())
+        {
+            return SpeechWaitResult.BudgetExceeded;
+        }
+
+        var signalTcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _vadSpeechEndTcs = signalTcs;
+        Task budgetTask;
+        lock (_questionSpeechBudgetLock)
+        {
+            budgetTask = _questionSpeechBudgetExceededTcs?.Task ?? Task.Delay(Timeout.InfiniteTimeSpan, ct);
+        }
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        var timeoutTask = Task.Delay(timeout, cts.Token);
+        try
+        {
+            var completed = await Task.WhenAny(signalTcs.Task, budgetTask, timeoutTask);
+            if (completed == budgetTask)
+            {
+                return SpeechWaitResult.BudgetExceeded;
+            }
+            if (completed == signalTcs.Task && await signalTcs.Task)
+            {
+                return SpeechWaitResult.Signal;
+            }
+            return SpeechWaitResult.Timeout;
+        }
+        finally
+        {
+            cts.Cancel();
+            if (ReferenceEquals(_vadSpeechEndTcs, signalTcs))
+            {
+                _vadSpeechEndTcs = null;
+            }
+        }
     }
 
     private static async Task<bool> WaitForStepOrInterruptAsync(Task stepTask, Task interruptTask)
@@ -831,6 +1062,8 @@ public partial class RealtimeExamFlowService : IExamFlowService
             QuestionId = question.Id,
             InstructionText = question.InstructionText,
             QuestionText = question.QuestionText,
+            MinResponseSeconds = question.MinResponseSeconds,
+            MaxResponseSeconds = question.MaxResponseSeconds,
             QuestionNumber = _sessionState.QuestionIndex + 1,
             TotalQuestions = _sessionState.Questions.Count
         };
@@ -939,4 +1172,11 @@ public partial class RealtimeExamFlowService : IExamFlowService
 
     private static string NormalizeDifficultyLevel(string? difficultyLevel) =>
         string.IsNullOrWhiteSpace(difficultyLevel) ? "medium" : difficultyLevel.Trim().ToLowerInvariant();
+}
+
+internal enum SpeechWaitResult
+{
+    Signal,
+    Timeout,
+    BudgetExceeded
 }

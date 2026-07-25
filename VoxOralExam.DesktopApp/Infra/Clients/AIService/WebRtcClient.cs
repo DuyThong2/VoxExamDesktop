@@ -6,6 +6,7 @@ using OpenCvSharp;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
 using Vpx.Net;
+using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.Infra.Clients.AIService;
 
@@ -15,6 +16,10 @@ namespace VoxOralExam.DesktopApp.Infra.Clients.AIService;
 public class WebRtcClient : IDisposable
 {
     private readonly string _pythonBaseUrl;
+    private readonly string _stunUrls;
+    private readonly string _turnUrl;
+    private readonly string _turnUsername;
+    private readonly string _turnCredential;
     private readonly HttpClient _http;
     private RTCPeerConnection? _peerConnection;
     private VP8Codec? _vp8Encoder;
@@ -33,10 +38,14 @@ public class WebRtcClient : IDisposable
     public bool IsConnected => _isConnected;
     public string? SessionId => _sessionId;
 
-    public WebRtcClient(IHttpClientFactory httpClientFactory, string pythonBaseUrl)
+    public WebRtcClient(IHttpClientFactory httpClientFactory, string pythonBaseUrl, AppSettings settings)
     {
         _http = httpClientFactory.CreateClient("WebRtcClient");
         _pythonBaseUrl = pythonBaseUrl.TrimEnd('/');
+        _stunUrls = settings.StunUrls;
+        _turnUrl = settings.TurnUrl;
+        _turnUsername = settings.TurnUsername;
+        _turnCredential = settings.TurnCredential;
     }
 
     public async Task ConnectAsync(string examAttemptId)
@@ -48,7 +57,7 @@ public class WebRtcClient : IDisposable
 
         _cts = new CancellationTokenSource();
         _vp8Encoder = new VP8Codec();
-        _peerConnection = new RTCPeerConnection(null);
+        _peerConnection = new RTCPeerConnection(BuildRtcConfiguration());
 
         _peerConnection.onconnectionstatechange += state =>
         {
@@ -76,10 +85,21 @@ public class WebRtcClient : IDisposable
         };
 
         var offer = _peerConnection.createOffer();
-        System.Diagnostics.Debug.WriteLine($"[WebRTC] SDP Offer:\n{offer.sdp}");
         await _peerConnection.setLocalDescription(offer);
 
-        var (sessionId, answerSdp) = await PostOfferAsync(offer.sdp, offer.type.ToString(), examAttemptId);
+        // createOffer()'s returned offer.sdp is a SNAPSHOT taken before ICE gathering runs --
+        // it only ever contains the host candidate. STUN/TURN candidates resolve asynchronously
+        // AFTER setLocalDescription (that's what triggers gathering), so sending offer.sdp here
+        // (as the old code did) meant the remote peer only ever learned about our raw LAN IP,
+        // never a reachable STUN/TURN candidate -- confirmed for real: agents-side logs always
+        // showed the remote candidate as a private 192.168.x.x address, even once agents' own
+        // TURN allocation was working correctly. Must wait for iceGatheringState == complete,
+        // then read the up-to-date SDP off localDescription (not the stale offer.sdp).
+        await WaitForIceGatheringCompleteAsync();
+        var fullOfferSdp = _peerConnection.localDescription.sdp.ToString();
+        System.Diagnostics.Debug.WriteLine($"[WebRTC] SDP Offer (post-gathering):\n{fullOfferSdp}");
+
+        var (sessionId, answerSdp) = await PostOfferAsync(fullOfferSdp, offer.type.ToString(), examAttemptId);
         _sessionId = sessionId;
 
         var answerInit = new RTCSessionDescriptionInit
@@ -90,6 +110,72 @@ public class WebRtcClient : IDisposable
         _peerConnection.setRemoteDescription(answerInit);
 
         _ = ListenSseAsync(_cts.Token);
+    }
+
+    // Timeout is a safety net, not the expected path -- normal gathering (STUN/TURN both
+    // reachable) completes in well under 1s. If it doesn't complete, proceed with whatever
+    // candidates gathered so far rather than hanging the exam flow forever.
+    private static readonly TimeSpan IceGatheringTimeout = TimeSpan.FromSeconds(5);
+
+    private async Task WaitForIceGatheringCompleteAsync()
+    {
+        if (_peerConnection == null || _peerConnection.iceGatheringState == RTCIceGatheringState.complete)
+        {
+            return;
+        }
+
+        var tcs = new TaskCompletionSource();
+        void OnGatheringStateChange(RTCIceGatheringState state)
+        {
+            if (state == RTCIceGatheringState.complete)
+            {
+                tcs.TrySetResult();
+            }
+        }
+
+        _peerConnection.onicegatheringstatechange += OnGatheringStateChange;
+        try
+        {
+            // Only unsubscribe once the wait is actually over (either gathering genuinely
+            // completed, or the timeout fired) -- unsubscribing any earlier would remove the
+            // handler before it ever gets a chance to fire.
+            await Task.WhenAny(tcs.Task, Task.Delay(IceGatheringTimeout));
+        }
+        finally
+        {
+            _peerConnection.onicegatheringstatechange -= OnGatheringStateChange;
+        }
+    }
+
+    private RTCConfiguration BuildRtcConfiguration()
+    {
+        var iceServers = new List<RTCIceServer>();
+        foreach (var url in _stunUrls.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmedUrl = url.Trim();
+            if (trimmedUrl.Length > 0)
+            {
+                iceServers.Add(new RTCIceServer { urls = trimmedUrl });
+            }
+        }
+
+        if (iceServers.Count == 0)
+        {
+            iceServers.Add(new RTCIceServer { urls = "stun:stun.l.google.com:19302" });
+        }
+
+        var turnUrl = _turnUrl.Trim();
+        if (!string.IsNullOrEmpty(turnUrl))
+        {
+            iceServers.Add(new RTCIceServer
+            {
+                urls = turnUrl,
+                username = _turnUsername,
+                credential = _turnCredential
+            });
+        }
+
+        return new RTCConfiguration { iceServers = iceServers };
     }
 
     private int _frameCount;

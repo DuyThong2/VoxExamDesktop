@@ -38,6 +38,12 @@ public partial class App : Application
         TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
 
         DotEnvLoader.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".env"));
+        // .env.local (gitignored, optional) loads on top and wins on any key it sets -- lets
+        // local dev point JAVA_BASE_URL/PYTHON_BASE_URL/etc at localhost without ever touching
+        // the shared .env (which stays pointed at the live deployment), so switching between
+        // "test against prod" and "run everything local" never requires editing .env back and
+        // forth.
+        DotEnvLoader.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".env.local"));
 
         _configuration = new ConfigurationBuilder()
             .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
@@ -149,7 +155,8 @@ public partial class App : Application
         services.AddSingleton(sp =>
             new WebRtcClient(
                 sp.GetRequiredService<IHttpClientFactory>(),
-                settings.PythonBaseUrl));
+                settings.PythonBaseUrl,
+                settings));
 
         services.AddSingleton(_ => new CameraService(settings));
         services.AddSingleton<ScreenProctoringService>();
