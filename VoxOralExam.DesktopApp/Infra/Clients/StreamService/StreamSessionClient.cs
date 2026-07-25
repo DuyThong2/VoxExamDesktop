@@ -11,6 +11,16 @@ public sealed record StreamUploadSession(
     string UploadToken
 );
 
+public sealed record SegmentAuditGap(long FromSeq, long ToSeq, long MissingSecs);
+
+public sealed record SegmentAudit(
+    string StreamId,
+    int TotalSegments,
+    long RecordedDurationSecs,
+    bool HasGaps,
+    IReadOnlyList<SegmentAuditGap> Gaps
+);
+
 public sealed class StreamSessionClient
 {
     private readonly HttpClient _http;
@@ -50,5 +60,21 @@ public sealed class StreamSessionClient
 
         using var response = await _http.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();
+    }
+
+    public async Task<SegmentAudit> AuditAsync(string streamId, string uploadToken, CancellationToken ct)
+    {
+        using var request = new HttpRequestMessage(
+            HttpMethod.Get,
+            $"/stream/sessions/{Uri.EscapeDataString(streamId)}/audit"
+        );
+
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", uploadToken);
+
+        using var response = await _http.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+
+        return await response.Content.ReadFromJsonAsync<SegmentAudit>(cancellationToken: ct)
+            ?? throw new InvalidOperationException("Streaming service returned an empty audit.");
     }
 }

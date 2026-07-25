@@ -482,6 +482,8 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                     continue;
                 }
 
+                await AuditBeforeCompleteAsync(pair.Key, streamId, pair.Value.UploadToken, cancellationToken);
+
                 try
                 {
                     await _sessionClient.CompleteAsync(
@@ -547,6 +549,43 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         _context = null;
         _uploadEnabledForAttempt = false;
         IsRecording = false;
+    }
+
+    /// <summary>
+    /// Cross-checks vox-streaming's own segment coverage right before /complete, instead of only
+    /// finding out about gaps minutes later from the async assembly event. Purely informational:
+    /// bounded by its own short timeout so a slow/unreachable server never delays or skips the
+    /// /complete call below, and any failure here is swallowed -- this is a best-effort early
+    /// warning, not a gate.
+    /// </summary>
+    private async Task AuditBeforeCompleteAsync(
+        RecordingStreamType streamType,
+        string streamId,
+        string uploadToken,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            using var auditCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            auditCts.CancelAfter(TimeSpan.FromSeconds(_settings.RecordingAuditTimeoutSeconds));
+            var audit = await _sessionClient.AuditAsync(streamId, uploadToken, auditCts.Token);
+
+            if (audit.HasGaps)
+            {
+                LocalFileLogger.Info(
+                    "recording",
+                    "segment_audit_gaps_detected",
+                    new { streamId, streamType, audit.TotalSegments, gapCount = audit.Gaps.Count });
+                PublishStatus(
+                    "recording_incomplete",
+                    $"The {streamType} recording may be missing some segments (server-side audit found gaps).",
+                    isDegraded: true);
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("recording", "segment_audit_failed", ex, new { streamId, streamType });
+        }
     }
 
     private void PublishStatus(string code, string message, bool isDegraded = false)

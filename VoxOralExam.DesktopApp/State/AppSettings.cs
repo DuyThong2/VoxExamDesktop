@@ -12,6 +12,7 @@ public class AppSettings
     public int RecordingSegmentSeconds { get; set; } = 10;
     public int RecordingUploadTimeoutSeconds { get; set; } = 30;
     public int RecordingFinalDrainSeconds { get; set; } = 20;
+    public int RecordingAuditTimeoutSeconds { get; set; } = 3;
     public int ScreenRecordingFps { get; set; } = 30;
     public int ScreenRecordingBitrate { get; set; } = 4_000_000;
     public int CameraRecordingBitrate { get; set; } = 2_000_000;
