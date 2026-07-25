@@ -25,7 +25,7 @@ public class StreamingDemoViewModel : BaseViewModel
     private readonly CameraService _camera;
 
     private string _scheduleId = Guid.NewGuid().ToString("D");
-    private string _userId = "student-1";
+    private string _userId = "02db5954-120c-4ad2-a280-9f91c3bc03f3";
     private bool _includeCamera = true;
     private bool _includeScreen = true;
     private bool _isBusy;
@@ -133,7 +133,7 @@ public class StreamingDemoViewModel : BaseViewModel
             // (different recording bytes) and getting rejected with "segment sequence already
             // contains different content". This screen is for repeated ad-hoc testing, not resume
             // testing, so always mint a new session identity instead.
-            var sessionId = $"{scheduleId}:{userId}:{Guid.NewGuid():N}";
+            var sessionId = Guid.NewGuid().ToString();
             var wireStreamTypes = streamTypes
                 .Select(t => t == RecordingStreamType.Camera ? "camera" : "screen")
                 .ToArray();

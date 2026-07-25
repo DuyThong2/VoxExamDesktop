@@ -121,9 +121,18 @@ public sealed class AudioMixer : IDisposable
 
     public void Dispose()
     {
-        using var drained = new ManualResetEvent(false);
-        _timer?.Dispose(drained);
-        drained.WaitOne(TimeSpan.FromSeconds(1));
+        var timer = _timer;
         _timer = null;
+        // Nothing signals `drained` when there is no timer to dispose, so waiting on it would just
+        // burn the full timeout. Reachable now that a mixer can be torn down without ever having
+        // been started (a caller whose audio device failed to open), and on a second Dispose.
+        if (timer is null)
+        {
+            return;
+        }
+
+        using var drained = new ManualResetEvent(false);
+        timer.Dispose(drained);
+        drained.WaitOne(TimeSpan.FromSeconds(1));
     }
 }

@@ -21,6 +21,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
     private readonly ScreenSegmentRecorder _screenRecorder;
     private readonly CameraSegmentRecorder _cameraRecorder;
     private readonly CameraService _camera;
+    private readonly LiveMonitorStreamService _liveMonitor;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly Dictionary<RecordingStreamType, StreamUploadSession> _uploadSessions = [];
     private readonly HashSet<RecordingStreamType> _startedStreams = [];
@@ -63,7 +64,8 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         RecordingClock clock,
         ScreenSegmentRecorder screenRecorder,
         CameraSegmentRecorder cameraRecorder,
-        CameraService camera)
+        CameraService camera,
+        LiveMonitorStreamService liveMonitor)
     {
         _settings = settings;
         _sessionState = sessionState;
@@ -74,6 +76,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         _screenRecorder = screenRecorder;
         _cameraRecorder = cameraRecorder;
         _camera = camera;
+        _liveMonitor = liveMonitor;
     }
 
     public async Task StartAsync(
@@ -162,6 +165,19 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
             {
                 await StopCoreAsync(RecordingStopReason.CaptureFailure, CancellationToken.None);
                 throw new InvalidOperationException("No local recording source could be started.");
+            }
+
+            // Best-effort, independent of local recording: a failure to connect/stream live must
+            // never roll back or block the local recording + segment upload above, which is the
+            // durable evidence path. LiveMonitorStreamService itself no-ops when
+            // EnableLiveMonitorStream is off.
+            try
+            {
+                await _liveMonitor.StartAsync(context, cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                LocalFileLogger.Error("recording", "live_monitor_start_failed", ex);
             }
 
             IsRecording = true;
@@ -412,6 +428,16 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
 
         _camera.OnCapturedFrame -= OnCameraFrame;
         await StopAudioCaptureAsync();
+
+        try
+        {
+            await _liveMonitor.StopAsync();
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("recording", "live_monitor_stop_failed", ex);
+        }
+
         var recordingFailed = false;
 
         if (_startedStreams.Contains(RecordingStreamType.Screen))

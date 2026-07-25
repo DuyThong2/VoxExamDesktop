@@ -8,6 +8,19 @@ public class AppSettings
     public string StreamingBaseUrl { get; set; } = "http://localhost:8082";
     public bool EnableLocalRecording { get; set; } = true;
     public bool EnableSegmentUpload { get; set; } = true;
+
+    // Live WebRTC view for the monitor UI (separate from local recording/segment upload above).
+    // Off by default: needs native FFmpeg shared libraries (avcodec/avutil/swscale/...) alongside
+    // the app's exe for SIPSorceryMedia.FFmpeg's H.264 encoder to actually work at runtime -- these
+    // are not bundled by the NuGet package and are not yet part of this project's deployment.
+    public bool EnableLiveMonitorStream { get; set; } = true;
+
+    // vox-streaming's /ws/stream upgrader rejects the WebSocket handshake with 403 unless the
+    // request's Origin header is in its own ALLOWED_ORIGINS (default http://localhost:5173, the
+    // browser demo's nginx-proxied origin) -- .NET's ClientWebSocket sends no Origin header at all
+    // by default, unlike a browser, so MonitorStreamClient sets this one explicitly. Must match
+    // whatever ALLOWED_ORIGINS the target vox-streaming instance is actually configured with.
+    public string MonitorStreamOrigin { get; set; } = "http://localhost:5173";
     public bool RequireRecording { get; set; } = true;
     public int RecordingSegmentSeconds { get; set; } = 10;
     public int RecordingUploadTimeoutSeconds { get; set; } = 30;

@@ -229,6 +229,7 @@ public partial class App : Application
         services.AddSingleton<SegmentUploadWorker>();
         services.AddSingleton<ScreenSegmentRecorder>();
         services.AddSingleton<CameraSegmentRecorder>();
+        services.AddSingleton<LiveMonitorStreamService>();
         services.AddSingleton<ExamRecordingService>();
         services.AddSingleton<IExamRecordingService>(
             sp => sp.GetRequiredService<ExamRecordingService>());

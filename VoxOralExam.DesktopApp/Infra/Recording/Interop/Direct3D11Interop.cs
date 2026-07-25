@@ -55,6 +55,50 @@ internal static class Direct3D11Interop
         }
     }
 
+    /// <summary>
+    /// Reads a GPU texture back to CPU memory as tightly-packed BGRA bytes (4 bytes/pixel, no row
+    /// padding) -- staging textures commonly have a RowPitch larger than width*4 for driver
+    /// alignment, so this copies row by row rather than one contiguous block.
+    /// </summary>
+    public static unsafe byte[] ReadBackBgra(
+        ID3D11Device device,
+        object contextLock,
+        ID3D11Texture2D texture,
+        int width,
+        int height)
+    {
+        var description = texture.Description;
+        description.Usage = ResourceUsage.Staging;
+        description.BindFlags = BindFlags.None;
+        description.CPUAccessFlags = CpuAccessFlags.Read;
+        description.MiscFlags = ResourceOptionFlags.None;
+
+        var buffer = new byte[width * height * 4];
+        using var staging = device.CreateTexture2D(description);
+
+        lock (contextLock)
+        {
+            device.ImmediateContext.CopyResource(staging, texture);
+            var mapped = device.ImmediateContext.Map(staging, 0, MapMode.Read, Vortice.Direct3D11.MapFlags.None);
+            try
+            {
+                var rowBytes = width * 4;
+                var source = (byte*)mapped.DataPointer;
+                for (var y = 0; y < height; y++)
+                {
+                    new ReadOnlySpan<byte>(source + (long)y * mapped.RowPitch, rowBytes)
+                        .CopyTo(buffer.AsSpan(y * rowBytes, rowBytes));
+                }
+            }
+            finally
+            {
+                device.ImmediateContext.Unmap(staging, 0);
+            }
+        }
+
+        return buffer;
+    }
+
     public static ID3D11Texture2D GetTexture2D(IDirect3DSurface surface)
     {
         var winrtObject = (IWinRTObject)surface;

@@ -11,6 +11,7 @@
 
   <ItemGroup>
     <PackageReference Include="CommunityToolkit.Mvvm" Version="8.4.2" />
+    <PackageReference Include="Concentus" Version="2.2.2" />
     <PackageReference Include="Microsoft.CognitiveServices.Speech" Version="1.44.0" />
     <PackageReference Include="Microsoft.Extensions.Configuration.Json" Version="10.0.8" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="10.0.8" />
@@ -49,6 +50,21 @@
          ".env" so DotEnvLoader.Load(BaseDirectory + ".env") finds it unchanged. -->
     <None Include="..\.env" Condition="Exists('..\.env')" Link=".env">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </None>
+  </ItemGroup>
+
+  <!-- Native FFmpeg 8.1.x shared-build DLLs (avcodec/avformat/avutil/swscale/swresample/etc.) that
+       SIPSorceryMedia.FFmpeg's FFmpegVideoEncoder needs at runtime; not bundled by the NuGet
+       package (see FFmpeg.AutoGen's own README: "on Windows use ... obtain FFmpeg" separately).
+       Must match FFmpeg.AutoGen's version exactly (8.1.0 here, so FFmpeg 8.1.x, per its semver
+       convention) or native calls fail to resolve. Get the Windows x64 "shared" build (not
+       "static"/"essentials", which has no individual .dll files) from gyan.dev/ffmpeg/builds,
+       FFmpeg.AutoGen's own documented Windows source, and drop bin\*.dll here.
+       Condition keeps a fresh clone buildable before anyone has populated this folder. -->
+  <ItemGroup>
+    <None Include="FFmpeg\*.dll" Condition="Exists('FFmpeg')">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <Link>ffmpeg\%(Filename)%(Extension)</Link>
     </None>
   </ItemGroup>
 
