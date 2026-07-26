@@ -15,5 +15,7 @@ public interface IExamApiService
     Task<ExamPaper> GetExamPaperAsync(string? examId, CancellationToken ct = default);
 
     Task UpdateSessionStatusAsync(Guid sessionId, string status, CancellationToken ct = default);
+
+    Task UpdateRemainingTimeAsync(Guid sessionId, int remainingSeconds, CancellationToken ct = default);
 }
 

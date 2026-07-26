@@ -92,6 +92,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
     public event Action<ExamQuestionPrompt>? OnQuestionPresented;
     public event Action<string>? OnTranscriptAppended;
     public event Action<string>? OnStatusChanged;
+    public event Action? OnSessionReady;
     public event Action<bool>? OnExamEnded;
     public event Action<bool>? OnStudentSpeakingChanged;
     public event Action<bool>? OnAvatarSpeakingChanged;
@@ -203,10 +204,19 @@ public partial class RealtimeExamFlowService : IExamFlowService
                 await _avatarClient.ConnectAsync(_sessionState.ExamAttemptId, ct);
             }
 
+            // Ca thi va avatar (neu bat) da ket noi xong -- day la moc "AI da san sang" that
+            // su, khac voi luc ExamViewModel duoc tao (ngay sau khi vao ve/login), truoc do
+            // dong ho dem nguoc khong duoc phep chay vi hoc sinh chua the tuong tac voi AI.
+            OnSessionReady?.Invoke();
+
             _micStreamer.Start(recorder, _sessionClient);
             _lastAnnouncedSectionId = null;
 
-            for (_sessionState.QuestionIndex = 0; _sessionState.QuestionIndex < _sessionState.Questions.Count; _sessionState.QuestionIndex++)
+            // KHONG gan lai QuestionIndex = 0 o day -- ExamSessionBootstrapService da resume
+            // dung vi tri (qua ResumeQuestionIndexIfNeededAsync) truoc khi RunAsync duoc goi.
+            // LoadExamPaper() da tu dat QuestionIndex = 0 cho truong hop attempt hoan toan moi,
+            // nen vong lap chi can tiep tuc tu gia tri hien co, khong duoc ghi de no.
+            for (; _sessionState.QuestionIndex < _sessionState.Questions.Count; _sessionState.QuestionIndex++)
             {
                 ct.ThrowIfCancellationRequested();
                 var prompt = PresentCurrentQuestion();
@@ -301,78 +311,124 @@ public partial class RealtimeExamFlowService : IExamFlowService
         var paperItemId = _sessionState.PaperItemIdsByQuestionId[question.Id];
         var maxTurnsPerQuestion = Math.Max(1, _settings.MaxTurnsPerQuestion);
         var sectionInstruction = GetSectionInstructionToAnnounce(question);
+        var resumeTurnOrder = _sessionState.ResumeTurnOrder;
+        var resumeActivePromptText = _sessionState.ResumeActivePromptText;
+        var isResumingFollowUp = resumeTurnOrder is > 1
+            && !string.IsNullOrWhiteSpace(resumeActivePromptText);
+        if (resumeTurnOrder is not null)
+        {
+            // Bootstrap resume state applies to this question only.
+            _sessionState.ResumeTurnOrder = null;
+            _sessionState.ResumeActivePromptText = null;
+        }
 
         CloseStudentSpeechWindow();
         ResetQuestionSpeechBudget(question.MaxResponseSeconds);
         _assetPresentationCoordinator.Clear();
         var questionContext = BuildQuestionContext(question);
 
-        // 1) Section lead-in alone (only speaks when this question starts a new section -- see
-        // GetSectionInstructionToAnnounce), then a deliberate pause before moving on, so it reads
-        // as its own beat rather than running straight into the question's own instruction.
-        await WaitForAvatarUtteranceCompletionAfterAsync(
-            triggerAsync: token => _sessionClient.SendQuestionStartAsync(
-                attemptAnswerId,
-                paperItemId,
-                questionContext,
-                language: "en-US",
-                promptText: null,
-                sectionInstruction: sectionInstruction,
-                ct: token),
-            ct);
-        if (!string.IsNullOrWhiteSpace(sectionInstruction))
-        {
-            await Task.Delay(TimeSpan.FromSeconds(2), ct);
-        }
-
-        // 2) Read the question's own instruction (if any) while showing its asset at the same
-        // time (if any) -- concurrent, not sequential, so the student sees the passage/image while
-        // being told what to do with it. The asset stays up for at least PreparationTimeSeconds
-        // regardless of how long the instruction takes to read.
         bool avatarSpokeForQuestion;
-        var hasInstruction = !string.IsNullOrWhiteSpace(question.InstructionText);
-        if (hasInstruction || question.Asset is not null)
+        int turnOrder;
+        string currentPromptText;
+        if (isResumingFollowUp)
         {
-            var instructionSpokenTask = hasInstruction
-                ? WaitForAvatarUtteranceCompletionAfterAsync(
-                    triggerAsync: token => _sessionClient.SendPresentQuestionAsync(question.InstructionText, token),
-                    ct)
-                : Task.FromResult(true);
-            if (question.Asset is not null)
+            // Recreate Python's active question session and hydrate its archive without
+            // replaying the section lead-in, instruction, asset, preparation, or main prompt.
+            await WaitForAvatarUtteranceCompletionAfterAsync(
+                triggerAsync: token => _sessionClient.SendQuestionStartAsync(
+                    attemptAnswerId,
+                    paperItemId,
+                    questionContext,
+                    language: "en-US",
+                    promptText: null,
+                    sectionInstruction: null,
+                    ct: token),
+                ct);
+
+            turnOrder = resumeTurnOrder!.Value;
+            currentPromptText = resumeActivePromptText!.Trim();
+            _sessionClient.SetResumeCheckpoint(attemptAnswerId, turnOrder - 1);
+            avatarSpokeForQuestion = await WaitForAvatarUtteranceCompletionAfterAsync(
+                triggerAsync: token => _sessionClient.SendPresentQuestionAsync(currentPromptText, token),
+                ct);
+            if (avatarSpokeForQuestion)
             {
-                OnStatusChanged?.Invoke("Dang hien tai nguyen cau hoi...");
-                var presentAssetTask = _assetPresentationCoordinator.PresentAsync(question.Asset, question.PreparationTimeSeconds, ct);
-                await Task.WhenAll(instructionSpokenTask, presentAssetTask);
+                OpenStudentSpeechWindow();
             }
-            avatarSpokeForQuestion = await instructionSpokenTask;
-        }
-
-        // 3) Ask the actual question -- the student is expected to answer right away afterwards.
-        avatarSpokeForQuestion = await WaitForAvatarUtteranceCompletionAfterAsync(
-            triggerAsync: token => _sessionClient.SendPresentQuestionAsync(prompt.QuestionText, token),
-            ct);
-
-        if (avatarSpokeForQuestion)
-        {
-            // Arm the mic/recorder BEFORE the preparation announcement below, not after -- if the
-            // student starts answering early (while that announcement is still playing),
-            // HandleVadSpeechStart gates only on _studentSpeechWindowOpen and will call
-            // _recorder.BeginTurnCapture() regardless of whether WaitForSpeechStartAsync has been
-            // called yet, so their audio is captured instead of lost. See the turn-1 check right
-            // before WaitForSpeechStartAsync below, and AnnouncePreparationAndRecordingAsync's own
-            // doc comment, for the other half of this.
-            OpenStudentSpeechWindow();
-            await AnnouncePreparationAndRecordingAsync(question, ct);
+            else
+            {
+                OnStatusChanged?.Invoke("AI chưa xác nhận đọc xong follow-up. Tạm thời chưa mở lượt trả lời của học sinh.");
+            }
         }
         else
         {
-            OnStatusChanged?.Invoke("AI chua xac nhan doc xong cau hoi. Tam thoi chua mo luot tra loi cua hoc sinh.");
+            // 1) Section lead-in alone (only speaks when this question starts a new section -- see
+            // GetSectionInstructionToAnnounce), then a deliberate pause before moving on, so it reads
+            // as its own beat rather than running straight into the question's own instruction.
+            await WaitForAvatarUtteranceCompletionAfterAsync(
+                triggerAsync: token => _sessionClient.SendQuestionStartAsync(
+                    attemptAnswerId,
+                    paperItemId,
+                    questionContext,
+                    language: "en-US",
+                    promptText: null,
+                    sectionInstruction: sectionInstruction,
+                    ct: token),
+                ct);
+            if (!string.IsNullOrWhiteSpace(sectionInstruction))
+            {
+                await Task.Delay(TimeSpan.FromSeconds(2), ct);
+            }
+
+            // 2) Read the question's own instruction (if any) while showing its asset at the same
+            // time (if any) -- concurrent, not sequential, so the student sees the passage/image while
+            // being told what to do with it. The asset stays up for at least PreparationTimeSeconds
+            // regardless of how long the instruction takes to read.
+            var hasInstruction = !string.IsNullOrWhiteSpace(question.InstructionText);
+            if (hasInstruction || question.Asset is not null)
+            {
+                var instructionSpokenTask = hasInstruction
+                    ? WaitForAvatarUtteranceCompletionAfterAsync(
+                        triggerAsync: token => _sessionClient.SendPresentQuestionAsync(question.InstructionText, token),
+                        ct)
+                    : Task.FromResult(true);
+                if (question.Asset is not null)
+                {
+                    OnStatusChanged?.Invoke("Dang hien tai nguyen cau hoi...");
+                    var presentAssetTask = _assetPresentationCoordinator.PresentAsync(question.Asset, question.PreparationTimeSeconds, ct);
+                    await Task.WhenAll(instructionSpokenTask, presentAssetTask);
+                }
+                avatarSpokeForQuestion = await instructionSpokenTask;
+            }
+
+            // 3) Ask the actual question -- the student is expected to answer right away afterwards.
+            avatarSpokeForQuestion = await WaitForAvatarUtteranceCompletionAfterAsync(
+                triggerAsync: token => _sessionClient.SendPresentQuestionAsync(prompt.QuestionText, token),
+                ct);
+
+            if (avatarSpokeForQuestion)
+            {
+                // Arm the mic/recorder BEFORE the preparation announcement below, not after -- if the
+                // student starts answering early (while that announcement is still playing),
+                // HandleVadSpeechStart gates only on _studentSpeechWindowOpen and will call
+                // _recorder.BeginTurnCapture() regardless of whether WaitForSpeechStartAsync has been
+                // called yet, so their audio is captured instead of lost. See the turn-1 check right
+                // before WaitForSpeechStartAsync below, and AnnouncePreparationAndRecordingAsync's own
+                // doc comment, for the other half of this.
+                OpenStudentSpeechWindow();
+                await AnnouncePreparationAndRecordingAsync(question, ct);
+            }
+            else
+            {
+                OnStatusChanged?.Invoke("AI chua xac nhan doc xong cau hoi. Tam thoi chua mo luot tra loi cua hoc sinh.");
+            }
+
+            turnOrder = 1;
+            currentPromptText = prompt.QuestionText;
         }
 
-        var turnOrder = 1;
-        var assessmentTurnCount = 0;
-        var questionDone = false;
-        var currentPromptText = prompt.QuestionText;
+        var assessmentTurnCount = isResumingFollowUp ? Math.Max(0, turnOrder - 1) : 0;
+        var questionDone = assessmentTurnCount >= maxTurnsPerQuestion;
 
         while (!questionDone)
         {
@@ -416,11 +472,11 @@ public partial class RealtimeExamFlowService : IExamFlowService
             var speechBudgetExceeded = false;
             if (spoke)
             {
-                OnStatusChanged?.Invoke("Hoc sinh dang noi...");
+                OnStatusChanged?.Invoke("Học sinh đang nói...");
                 speechBudgetExceeded = await WaitForSpeechEndWithGraceAsync(overallTimeout, gracePeriod, ct);
                 OnStatusChanged?.Invoke(speechBudgetExceeded
-                    ? "Da het thoi gian noi cua cau hoi, dang luu cau tra loi..."
-                    : "Hoc sinh da dung noi, dang xu ly...");
+                    ? "Đã hết thời gian nói của câu hỏi, đang lưu câu trả lời..."
+                    : "Học sinh đã dừng nói, đang xử lý...");
             }
 
             CloseStudentSpeechWindow();
@@ -484,7 +540,7 @@ public partial class RealtimeExamFlowService : IExamFlowService
             questionDone = speechBudgetExceeded || !decision.ShouldContinue || assessmentTurnCount >= maxTurnsPerQuestion;
             if (speechBudgetExceeded)
             {
-                OnStatusChanged?.Invoke($"Cau {prompt.QuestionNumber} da vuot gioi han {question.MaxResponseSeconds} giay noi. Tu dong chuyen sang cau tiep theo.");
+                OnStatusChanged?.Invoke($"Câu {prompt.QuestionNumber} đã vượt giới hạn {question.MaxResponseSeconds} giây nói. Tự động chuyển sang câu tiếp theo.");
             }
             if (!questionDone && avatarSpokeAfterDecision)
             {
@@ -492,14 +548,14 @@ public partial class RealtimeExamFlowService : IExamFlowService
             }
             else if (!questionDone)
             {
-                OnStatusChanged?.Invoke("AI chua xac nhan doc xong follow-up. Tam thoi chua mo luot tra loi cua hoc sinh.");
+                OnStatusChanged?.Invoke("AI chưa xác nhận đọc xong follow-up. tạm thời chưa mở lượt trả lời của học sinh.");
             }
             turnOrder++;
         }
 
         if (!questionDone)
         {
-            OnStatusChanged?.Invoke($"Da dat gioi han {maxTurnsPerQuestion} luot danh gia cho cau {prompt.QuestionNumber}. Chuyen sang cau tiep theo.");
+            OnStatusChanged?.Invoke($"Đã đạt giới hạn {maxTurnsPerQuestion} lượt đánh giá cho câu {prompt.QuestionNumber}. Chuyển sang câu tiếp theo.");
         }
 
         CloseStudentSpeechWindow();

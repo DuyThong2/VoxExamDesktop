@@ -54,6 +54,18 @@ public class ExamApiService : IExamApiService
         await SendAsync<object>(request, ct);
     }
 
+    public async Task UpdateRemainingTimeAsync(
+        Guid sessionId,
+        int remainingSeconds,
+        CancellationToken ct = default)
+    {
+        using var request = BuildRequest(
+            HttpMethod.Patch,
+            $"/api/v1/exam-sessions/{sessionId:D}/remaining-time");
+        request.Content = JsonContent.Create(new { remainingSeconds });
+        await SendAsync<object>(request, ct);
+    }
+
     private HttpRequestMessage BuildRequest(HttpMethod method, string path)
     {
         var uri = $"{_settings.JavaBaseUrl.TrimEnd('/')}{path}";

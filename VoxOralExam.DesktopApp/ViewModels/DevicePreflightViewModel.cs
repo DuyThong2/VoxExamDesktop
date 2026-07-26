@@ -25,7 +25,7 @@ public class DevicePreflightViewModel : BaseViewModel
     private readonly AppSettings _settings;
     private readonly ExamSessionState _sessionState;
 
-    private string _deviceTestStatus = "ChÆ°a kiá»ƒm tra thiáº¿t bá»‹";
+    private string _deviceTestStatus = "kiểm tra thiết bị";
     private bool _isMicTesting;
     private bool _isCameraTesting;
     private double _microphoneLevel;
@@ -148,8 +148,8 @@ public class DevicePreflightViewModel : BaseViewModel
             ?? AudioInputDevices.FirstOrDefault();
 
         DeviceTestStatus = AudioInputDevices.Count == 0
-            ? "KhÃ´ng tÃ¬m tháº¥y microphone nÃ o"
-            : $"Sáºµn sÃ ng vá»›i mic: {SelectedAudioInput?.DisplayName}";
+            ? "không tìm thấy microphone nào"
+            : $"Sẵn sàng với mic: {SelectedAudioInput?.DisplayName}";
         LocalFileLogger.Info("device_test", "audio_input_devices_loaded", new
         {
             count = AudioInputDevices.Count,
@@ -183,7 +183,7 @@ public class DevicePreflightViewModel : BaseViewModel
     {
         if (SelectedAudioOutput is null)
         {
-            DeviceTestStatus = "HÃ£y chá»n loa/tai nghe trÆ°á»›c khi test";
+            DeviceTestStatus = "Hãy chọn loa/tai nghe trước khi test";
             LocalFileLogger.Info("device_test", "play_test_sound_skipped_no_device");
             return;
         }
@@ -195,7 +195,7 @@ public class DevicePreflightViewModel : BaseViewModel
             _outputTestPlayer = new WaveOutEvent { DeviceNumber = SelectedAudioOutput.DeviceIndex };
             _outputTestPlayer.Init(tone.ToWaveProvider());
             _outputTestPlayer.Play();
-            DeviceTestStatus = $"ÄÃ£ phÃ¡t Ã¢m thanh test ra: {SelectedAudioOutput.DisplayName}";
+            DeviceTestStatus = $"Đã phát âm thanh test ra: {SelectedAudioOutput.DisplayName}";
             LocalFileLogger.Info("device_test", "play_test_sound", new
             {
                 SelectedAudioOutput.DeviceIndex,
@@ -223,7 +223,7 @@ public class DevicePreflightViewModel : BaseViewModel
         }
         catch (Exception ex)
         {
-            DeviceTestStatus = $"Lá»—i phÃ¡t test Ã¢m thanh: {ex.Message}";
+            DeviceTestStatus = $"lỗi phát âm thanh test: {ex.Message}";
             LocalFileLogger.Error("device_test", "play_test_sound_failed", ex);
         }
     }
@@ -243,7 +243,7 @@ public class DevicePreflightViewModel : BaseViewModel
     {
         if (SelectedAudioInput is null)
         {
-            DeviceTestStatus = "HÃ£y chá»n microphone trÆ°á»›c khi test";
+            DeviceTestStatus = "Hãy chọn microphone trước khi test";
             LocalFileLogger.Info("device_test", "start_mic_test_skipped_no_device");
             return;
         }

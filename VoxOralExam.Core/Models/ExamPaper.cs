@@ -17,6 +17,16 @@ public class ExamPaper
     public int DurationMinutes { get; set; }
     public DateTime? ExamDate { get; set; }
     public DateTime? ScheduleEndAt { get; set; }
+    /// <summary>
+    /// When this attempt's session started server-side. Kept as session metadata;
+    /// the countdown resumes from RemainingSeconds instead of a fixed deadline.
+    /// </summary>
+    public DateTime? StartedAt { get; set; }
+    /// <summary>
+    /// Server checkpoint of the countdown. Null means this attempt has never
+    /// checkpointed and should start from DurationSeconds.
+    /// </summary>
+    public int? RemainingSeconds { get; set; }
     public string Status { get; set; } = string.Empty;
     public List<ExamPaperQuestion> PaperQuestions { get; set; } = [];
 }

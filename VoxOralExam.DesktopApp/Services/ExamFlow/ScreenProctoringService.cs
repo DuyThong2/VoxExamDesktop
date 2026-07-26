@@ -39,18 +39,18 @@ public class ScreenProctoringService : IProctoringService, IDisposable
 
         _webRtc.OnProctoringEvent += HandleSseEvent;
 
-        OnStatusChanged?.Invoke("Dang ket noi WebRTC...");
+        OnStatusChanged?.Invoke("Đang kết nối WebRTC...");
         var examAttemptId = _sessionState.ExamAttemptId != Guid.Empty
             ? _sessionState.ExamAttemptId.ToString("D")
             : _sessionState.SessionId;
         await _webRtc.ConnectAsync(examAttemptId);
 
-        OnStatusChanged?.Invoke("Dang khoi dong camera...");
+        OnStatusChanged?.Invoke("Đang khởi động camera...");
         _camera.OnRawFrame += OnCameraRawFrame;
         await _camera.StartAsync();
 
         _isStarted = true;
-        OnStatusChanged?.Invoke("Proctoring dang hoat dong");
+        OnStatusChanged?.Invoke("Proctoring đang hoạt động");
     }
 
     public async Task StopAsync()
@@ -70,7 +70,7 @@ public class ScreenProctoringService : IProctoringService, IDisposable
             await _webRtc.DisconnectAsync();
 
             _isStarted = false;
-            OnStatusChanged?.Invoke("Proctoring da dung");
+            OnStatusChanged?.Invoke("Proctoring đã dừng");
         }
         finally
         {

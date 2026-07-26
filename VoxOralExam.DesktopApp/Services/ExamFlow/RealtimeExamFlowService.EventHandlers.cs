@@ -97,7 +97,7 @@ public partial class RealtimeExamFlowService
         // keeps retrying indefinitely in the background after this (see
         // RealtimeSessionClient.LongOutageRetryInterval), so this is "still trying", not fatal.
         LocalFileLogger.Info("exam_flow", "realtime_session_reconnecting", null);
-        OnStatusChanged?.Invoke("Mat ket noi realtime session (co the do mat mang). Dang tiep tuc thu ket noi lai...");
+        OnStatusChanged?.Invoke("Mất kết nối realtime session (có thể do mất mạng). Đang tiếp tục thử kết nối lại...");
     }
 
     private void HandleSessionReconnected(int lastArchivedTurnOrder)
@@ -106,7 +106,7 @@ public partial class RealtimeExamFlowService
         // service's own in-flight turnOrder is at least visible. Does not (yet) skip/replay
         // turns to force agreement -- see the class doc's Phase 6 gap note.
         LocalFileLogger.Info("exam_flow", "realtime_session_reconnected", new { lastArchivedTurnOrder });
-        OnStatusChanged?.Invoke("Da ket noi lai realtime session.");
+        OnStatusChanged?.Invoke("Đã kết nối lại realtime session.");
     }
 
     private void HandleAvatarReconnecting()
@@ -114,12 +114,12 @@ public partial class RealtimeExamFlowService
         // Mirrors HandleSessionReconnecting -- see AvatarWebRtcClient.OnReconnecting's doc
         // comment for why this isn't fatal either.
         LocalFileLogger.Info("exam_flow", "avatar_reconnecting", null);
-        OnStatusChanged?.Invoke("Mat ket noi avatar (co the do mat mang). Dang tiep tuc thu ket noi lai...");
+        OnStatusChanged?.Invoke("Mất kết nối avatar (có thể do mất mạng). Đang tiếp tục thử kết nối lại...");
     }
 
     private void HandleAvatarReconnected()
     {
         LocalFileLogger.Info("exam_flow", "avatar_reconnected", null);
-        OnStatusChanged?.Invoke("Da ket noi lai avatar.");
+        OnStatusChanged?.Invoke("Đã kết nối lại avatar.");
     }
 }

@@ -7,6 +7,7 @@ public interface IExamFlowService
     event Action<ExamQuestionPrompt>? OnQuestionPresented;
     event Action<string>? OnTranscriptAppended;
     event Action<string>? OnStatusChanged;
+    event Action? OnSessionReady;
     event Action<bool>? OnExamEnded;
     event Action<bool>? OnStudentSpeakingChanged;
     event Action<bool>? OnAvatarSpeakingChanged;

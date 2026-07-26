@@ -8,6 +8,7 @@ using VoxOralExam.Core.Models.Dtos;
 using VoxOralExam.Core.Interfaces;
 using VoxOralExam.DesktopApp.Infra.Clients.AIService;
 using VoxOralExam.DesktopApp.Infra.Devices;
+using VoxOralExam.DesktopApp.Services;
 using VoxOralExam.DesktopApp.Services.DomainService;
 using VoxOralExam.DesktopApp.Services.ExamFlow;
 using VoxOralExam.DesktopApp.State;
@@ -39,8 +40,9 @@ public class ExamViewModel : BaseViewModel
     private bool _initialized;
 
     private DispatcherTimer? _countdownTimer;
-    private TimeSpan _remainingTime;
-    private DateTime? _fallbackCountdownDeadline;
+    private int _remainingSecondsLocal;
+    private DateTime _lastCheckpointAt;
+    private bool _checkpointInFlight;
     private BitmapImage? _cameraPreview;
     private BitmapImage? _avatarVideoFrame;
     private bool _isAvatarSpeaking;
@@ -79,6 +81,7 @@ public class ExamViewModel : BaseViewModel
         _examFlow.OnQuestionPresented += HandleQuestionPresented;
         _examFlow.OnTranscriptAppended += HandleTranscriptAppended;
         _examFlow.OnStatusChanged += HandleExamStatusChanged;
+        _examFlow.OnSessionReady += HandleSessionReady;
         _examFlow.OnExamEnded += HandleExamEnded;
         _examFlow.OnStudentSpeakingChanged += HandleStudentSpeakingChanged;
         _examFlow.OnAvatarSpeakingChanged += HandleAvatarSpeakingChanged;
@@ -88,8 +91,6 @@ public class ExamViewModel : BaseViewModel
         _isMicMuted = _examFlow.IsMicMuted;
         ToggleMuteCommand = new RelayCommand(ToggleMute);
         SubmitNowCommand = new RelayCommand(SubmitNowClicked);
-
-        StartCountdown();
     }
 
     public string StudentName
@@ -207,8 +208,8 @@ public class ExamViewModel : BaseViewModel
         }
     }
 
-    public string MuteButtonText => IsMicMuted ? "Bat mic" : "Tat mic";
-    public string MicStatusText => IsMicMuted ? "Mic dang tat" : "Mic dang bat";
+    public string MuteButtonText => IsMicMuted ? "Bật mic" : "Tắt mic";
+    public string MicStatusText => IsMicMuted ? "Mic đang tắt" : "Mic đang bật";
 
     public bool ShowSubmittedOverlay
     {
@@ -333,6 +334,7 @@ public class ExamViewModel : BaseViewModel
             _examFlow.OnQuestionPresented -= HandleQuestionPresented;
             _examFlow.OnTranscriptAppended -= HandleTranscriptAppended;
             _examFlow.OnStatusChanged -= HandleExamStatusChanged;
+            _examFlow.OnSessionReady -= HandleSessionReady;
             _examFlow.OnExamEnded -= HandleExamEnded;
             _examFlow.OnStudentSpeakingChanged -= HandleStudentSpeakingChanged;
             _examFlow.OnAvatarSpeakingChanged -= HandleAvatarSpeakingChanged;
@@ -438,12 +440,22 @@ public class ExamViewModel : BaseViewModel
         AddLog($"[{evt.Type}] {evt.Message}", LogType.Warning);
     }
 
+    // Ca thi + avatar (neu bat) da ket noi xong -- day la lan dau tien, va la lan duy nhat,
+    // dong ho dem nguoc duoc phep bat dau chay. Truoc do (constructor chay ngay sau khi
+    // vao man hinh thi/login) hoc sinh chua the tuong tac voi AI, khong duoc tinh vao gio lam bai.
+    private void HandleSessionReady()
+    {
+        Application.Current.Dispatcher.Invoke(StartCountdown);
+    }
+
     private void StartCountdown()
     {
         _countdownTimer?.Stop();
-        _fallbackCountdownDeadline = _sessionState.ScheduleEndAt is null
-            ? DateTime.Now.AddSeconds(_sessionState.DurationSeconds > 0 ? _sessionState.DurationSeconds : 30 * 60)
-            : null;
+        _remainingSecondsLocal = Math.Max(
+            0,
+            _sessionState.RemainingSeconds
+                ?? (_sessionState.DurationSeconds > 0 ? _sessionState.DurationSeconds : 30 * 60));
+        _lastCheckpointAt = DateTime.UtcNow;
         RefreshRemainingTime();
 
         _countdownTimer = new DispatcherTimer
@@ -452,12 +464,27 @@ public class ExamViewModel : BaseViewModel
         };
         _countdownTimer.Tick += (_, _) =>
         {
+            // Khong tru giay khi avatar dang noi (cau hoi, huong dan, thong bao chuan bi,
+            // follow-up...) -- IsAvatarSpeaking duoc cap nhat qua HandleAvatarSpeakingChanged,
+            // bao trum dung moi lan _avatarSpeaker.SpeakAsync chay (xem
+            // RealtimeExamFlowService.EventHandlers.cs). Van tru binh thuong trong luc hoc sinh
+            // chuan bi (im lang) va luc hoc sinh dang tra loi.
+            if (_remainingSecondsLocal > 0 && !IsAvatarSpeaking)
+            {
+                _remainingSecondsLocal--;
+            }
             RefreshRemainingTime();
 
-            if (_remainingTime.TotalSeconds <= 0)
+            if (DateTime.UtcNow - _lastCheckpointAt >= TimeSpan.FromSeconds(10))
+            {
+                _lastCheckpointAt = DateTime.UtcNow;
+                _ = CheckpointRemainingTimeBestEffortAsync();
+            }
+
+            if (_remainingSecondsLocal <= 0)
             {
                 _countdownTimer.Stop();
-                AddLog("Het thoi gian lam bai, tu dong nop bai", LogType.Warning);
+                AddLog("Hết giờ làm bài, tự động nộp bài", LogType.Warning);
                 // Hết giờ đếm ngược -- tự động nộp bài luôn, không chờ học sinh tự bấm (dù có
                 // trả lời hết câu hỏi hay chưa). Không cần confirm() vì đây là hệ thống tự làm,
                 // không phải hành động của học sinh.
@@ -469,11 +496,43 @@ public class ExamViewModel : BaseViewModel
 
     private void RefreshRemainingTime()
     {
-        var targetTime = _sessionState.ScheduleEndAt ?? _fallbackCountdownDeadline ?? DateTime.Now.AddMinutes(30);
-        _remainingTime = targetTime - DateTime.Now;
-        TimeRemaining = _remainingTime.TotalSeconds <= 0
+        var remaining = TimeSpan.FromSeconds(Math.Max(0, _remainingSecondsLocal));
+        TimeRemaining = _remainingSecondsLocal <= 0
             ? "Het gio!"
-            : _remainingTime.ToString(@"hh\:mm\:ss");
+            : remaining.ToString(@"hh\:mm\:ss");
+    }
+
+    private async Task CheckpointRemainingTimeBestEffortAsync()
+    {
+        if (_checkpointInFlight || _sessionState.ExamAttemptId == Guid.Empty)
+        {
+            return;
+        }
+
+        _checkpointInFlight = true;
+        try
+        {
+            await _examApi.UpdateRemainingTimeAsync(
+                _sessionState.ExamAttemptId,
+                Math.Max(0, _remainingSecondsLocal),
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error(
+                "exam_timer",
+                "remaining_time_checkpoint_failed",
+                ex,
+                new
+                {
+                    sessionId = _sessionState.ExamAttemptId,
+                    remainingSeconds = _remainingSecondsLocal
+                });
+        }
+        finally
+        {
+            _checkpointInFlight = false;
+        }
     }
 
     private void SubmitNowClicked()
@@ -484,8 +543,8 @@ public class ExamViewModel : BaseViewModel
         }
 
         var confirmed = MessageBox.Show(
-            "Ban chac chan muon nop bai ngay bay gio? Cac cau hoi chua tra loi se duoc tinh la chua tra loi va khong the lam lai.",
-            "Xac nhan nop bai",
+            "ạn chắc chắn muốn nộp bài ngay bây giờ? Các câu hỏi chưa trả lời sẽ được tính là chưa trả lời và không thể làm lại.",
+            "Xác nhận nộp bài",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning) == MessageBoxResult.Yes;
         if (!confirmed)
@@ -493,7 +552,7 @@ public class ExamViewModel : BaseViewModel
             return;
         }
 
-        AddLog("Hoc sinh chu dong nop bai truoc khi het gio", LogType.Info);
+        AddLog("Học sinh chủ động nộp bài trước khi hết giờ", LogType.Info);
         TriggerSubmitNow();
     }
 
@@ -541,7 +600,7 @@ public class ExamViewModel : BaseViewModel
         {
             if (!string.IsNullOrWhiteSpace(reason))
             {
-                AddLog($"Khong the phat media asset: {reason}", LogType.Warning);
+                AddLog($"không thể phát media asset: {reason}", LogType.Warning);
             }
         });
         _assetPresentationCoordinator.CompleteMediaPlayback();
@@ -572,7 +631,7 @@ public class ExamViewModel : BaseViewModel
             ShowErrorOverlay = !succeeded;
             if (succeeded)
             {
-                AiStatus = "Da hoan thanh bai thi";
+                AiStatus = "Đã hoàn thành bài thi";
                 EndScreenMessage = "Bài thi đã được nộp thành công. Hệ thống sẽ đóng sau ít giây nữa.";
                 AddLog("Bài thi vấn đáp đã hoàn thành", LogType.Success);
             }
@@ -662,7 +721,7 @@ public class ExamViewModel : BaseViewModel
         var nextState = !IsMicMuted;
         _examFlow.SetMicMuted(nextState);
         IsMicMuted = _examFlow.IsMicMuted;
-        AddLog(IsMicMuted ? "Da tat mic cua hoc sinh" : "Da bat lai mic cua hoc sinh", LogType.Info);
+        AddLog(IsMicMuted ? "Đã tắt mic của học sinh" : "Đã bật lại mic của học sinh", LogType.Info);
     }
 
     private static string FormatResponseWindow(int minResponseSeconds, int maxResponseSeconds)

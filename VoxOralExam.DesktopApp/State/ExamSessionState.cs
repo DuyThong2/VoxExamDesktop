@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using VoxOralExam.Core.Context;
 using VoxOralExam.Core.Models;
 
@@ -20,6 +21,14 @@ public class ExamSessionState
     public int DurationSeconds { get; set; } = 30 * 60;
     public int DurationMinutes { get; set; } = 30;
     public DateTime? ScheduleEndAt { get; set; }
+    /// <summary>
+    /// Attempt's real start time from the server. The countdown itself is restored from
+    /// RemainingSeconds so offline time is not deducted.
+    /// </summary>
+    public DateTime? StartedAt { get; set; }
+    public int? RemainingSeconds { get; set; }
+    public int? ResumeTurnOrder { get; set; }
+    public string? ResumeActivePromptText { get; set; }
     public int QuestionIndex { get; set; }
     public List<Question> Questions { get; set; } = [];
     public Dictionary<Guid, Guid> AttemptAnswerIdsByQuestionId { get; set; } = [];
@@ -62,6 +71,10 @@ public class ExamSessionState
             ? examPaper.DurationMinutes
             : Math.Max(1, (int)Math.Ceiling(DurationSeconds / 60.0));
         ScheduleEndAt = examPaper.ScheduleEndAt ?? EntryTicket?.ScheduleEndAt;
+        StartedAt = examPaper.StartedAt;
+        RemainingSeconds = examPaper.RemainingSeconds;
+        ResumeTurnOrder = null;
+        ResumeActivePromptText = null;
         QuestionIndex = 0;
         Questions = examPaper.PaperQuestions
             .OrderBy(item => item.OrderIndex)
@@ -76,11 +89,29 @@ public class ExamSessionState
         AttemptAnswerIdsByQuestionId = examPaper.PaperQuestions
             .ToDictionary(
                 item => item.Question.Id,
-                item => item.AttemptAnswerId != Guid.Empty ? item.AttemptAnswerId : Guid.NewGuid());
+                item => item.AttemptAnswerId != Guid.Empty
+                    ? item.AttemptAnswerId
+                    : CreateDeterministicAnswerId(
+                        ExamAttemptId,
+                        item.Id != Guid.Empty ? item.Id : item.Question.Id));
         PaperItemIdsByQuestionId = examPaper.PaperQuestions
             .ToDictionary(item => item.Question.Id, item => item.Id);
         EvaluationGuidesByQuestionId = examPaper.PaperQuestions
             .Where(item => item.EvaluationGuide is not null)
             .ToDictionary(item => item.Question.Id, item => item.EvaluationGuide!);
+    }
+
+    private static Guid CreateDeterministicAnswerId(Guid attemptId, Guid paperItemId)
+    {
+        Span<byte> source = stackalloc byte[32];
+        attemptId.TryWriteBytes(source[..16]);
+        paperItemId.TryWriteBytes(source[16..]);
+
+        Span<byte> hash = stackalloc byte[32];
+        SHA256.HashData(source, hash);
+        Span<byte> guidBytes = hash[..16];
+        guidBytes[7] = (byte)((guidBytes[7] & 0x0F) | 0x50);
+        guidBytes[8] = (byte)((guidBytes[8] & 0x3F) | 0x80);
+        return new Guid(guidBytes);
     }
 }
