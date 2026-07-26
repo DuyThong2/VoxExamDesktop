@@ -111,16 +111,27 @@ public sealed class LocalSegmentStore
 
     public void EnsureFreeSpace(long requiredBytes)
     {
-        Directory.CreateDirectory(BaseDirectory);
-        var root = Path.GetPathRoot(Path.GetFullPath(BaseDirectory))
-            ?? throw new InvalidOperationException("Cannot resolve the recording drive.");
-        var drive = new DriveInfo(root);
-        if (drive.AvailableFreeSpace < requiredBytes)
+        var available = AvailableFreeSpace();
+        if (available < requiredBytes)
         {
             throw new IOException(
                 $"Not enough free space for recording. Required {requiredBytes} bytes, " +
-                $"available {drive.AvailableFreeSpace} bytes.");
+                $"available {available} bytes.");
         }
+    }
+
+    /// <summary>
+    /// Free space on the recording drive right now. Separate from <see cref="EnsureFreeSpace"/>
+    /// because the check that matters is not the one at the start: an attempt only needs a couple of
+    /// gigabytes free to begin, but two streams at their configured bitrates write roughly that much
+    /// every hour, and an attempt whose segments cannot be uploaded keeps every one of them on disk.
+    /// </summary>
+    public long AvailableFreeSpace()
+    {
+        Directory.CreateDirectory(BaseDirectory);
+        var root = Path.GetPathRoot(Path.GetFullPath(BaseDirectory))
+            ?? throw new InvalidOperationException("Cannot resolve the recording drive.");
+        return new DriveInfo(root).AvailableFreeSpace;
     }
 
     public string CreatePartialPath(
@@ -148,6 +159,7 @@ public sealed class LocalSegmentStore
         string partialPath,
         DateTimeOffset startedAt,
         DateTimeOffset endedAt,
+        long framesWritten = 0,
         CancellationToken ct = default)
     {
         await _gate.WaitAsync(ct);
@@ -187,6 +199,8 @@ public sealed class LocalSegmentStore
                 StartedAt = startedAt,
                 EndedAt = endedAt,
                 Sha256 = hash,
+                SizeBytes = size,
+                FramesWritten = framesWritten,
                 State = SegmentUploadState.Pending
             });
 
@@ -200,7 +214,8 @@ public sealed class LocalSegmentStore
                 startedAt,
                 endedAt,
                 size,
-                hash);
+                hash,
+                framesWritten);
         }
         finally
         {
@@ -249,6 +264,114 @@ public sealed class LocalSegmentStore
         CancellationToken ct) =>
         UpdateStateAsync(segment, SegmentUploadState.Failed, error, ct);
 
+    /// <summary>
+    /// Records that the server refused this segment because it already holds different bytes under
+    /// the same sequence number. Terminal -- see SegmentUploadState.Conflicted.
+    ///
+    /// The local file is deliberately left on disk rather than deleted the way an acknowledged one
+    /// is: it is the only copy of the diverging bytes, and it is the evidence anyone investigating
+    /// the disagreement will need.
+    /// </summary>
+    public Task MarkConflictedAsync(
+        CompletedSegment segment,
+        string reason,
+        CancellationToken ct) =>
+        UpdateStateAsync(segment, SegmentUploadState.Conflicted, reason, ct);
+
+    /// <summary>
+    /// Persists the credentials this attempt's streams were opened with, so a run that never gets
+    /// to finish leaves behind everything a later one needs to pick up where it stopped. Replaces
+    /// any earlier record for the same stream, which is what makes a refreshed credential land here
+    /// rather than alongside the stale one.
+    /// </summary>
+    public async Task SaveUploadSessionsAsync(
+        IReadOnlyCollection<StoredUploadSession> sessions,
+        CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (_manifest is null)
+            {
+                return;
+            }
+
+            foreach (var session in sessions)
+            {
+                _manifest.UploadSessions.RemoveAll(existing =>
+                    string.Equals(existing.StreamId, session.StreamId, StringComparison.Ordinal));
+                _manifest.UploadSessions.Add(session);
+            }
+
+            await SaveManifestUnsafeAsync(ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Records that /complete succeeded for this stream, so a later run does not try to finish an
+    /// already finalized one (vox-streaming answers that 409, and the stream is done regardless).
+    /// </summary>
+    public async Task MarkUploadSessionCompletedAsync(string streamId, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var session = _manifest?.UploadSessions.FirstOrDefault(candidate =>
+                string.Equals(candidate.StreamId, streamId, StringComparison.Ordinal));
+            if (session is null || session.Completed)
+            {
+                return;
+            }
+
+            session.Completed = true;
+            await SaveManifestUnsafeAsync(ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Everything this device has captured for a stream, uploaded or not.
+    ///
+    /// Read from the manifest rather than from what has been acknowledged, because that is the whole
+    /// point: the server can already see what arrived, and what it cannot see -- and cannot infer
+    /// once this process dies -- is what was supposed to arrive.
+    /// </summary>
+    public async Task<IReadOnlyList<DeclaredSegment>> GetDeclaredSegmentsAsync(
+        string streamId,
+        CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (_manifest is null)
+            {
+                return [];
+            }
+
+            return [.. _manifest.Segments
+                .Where(segment => string.Equals(segment.StreamId, streamId, StringComparison.Ordinal))
+                .OrderBy(segment => segment.Sequence)
+                .Select(segment => new DeclaredSegment(
+                    segment.Sequence,
+                    segment.StartedAt,
+                    segment.EndedAt,
+                    segment.Sha256,
+                    segment.SizeBytes,
+                    segment.FramesWritten))];
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task<int> GetOutstandingCountAsync(IReadOnlySet<string> streamIds, CancellationToken ct)
     {
         await _gate.WaitAsync(ct);
@@ -258,9 +381,12 @@ public sealed class LocalSegmentStore
             {
                 return 0;
             }
+            // Conflicted counts as settled, not outstanding: the server already has a segment for
+            // that sequence, no retry can ever change the answer, and counting it would block
+            // /complete for this stream permanently. See SegmentUploadState.Conflicted.
             return _manifest.Segments.Count(segment =>
                 streamIds.Contains(segment.StreamId) &&
-                segment.State != SegmentUploadState.Acknowledged &&
+                segment.State is not (SegmentUploadState.Acknowledged or SegmentUploadState.Conflicted) &&
                 File.Exists(Path.GetFullPath(Path.Combine(_attemptDirectory, segment.RelativePath))));
         }
         finally
@@ -340,7 +466,8 @@ public sealed class LocalSegmentStore
             stored.StartedAt,
             stored.EndedAt,
             size,
-            stored.Sha256);
+            stored.Sha256,
+            stored.FramesWritten);
     }
 
     private static string ToWireValue(RecordingStreamType streamType) =>

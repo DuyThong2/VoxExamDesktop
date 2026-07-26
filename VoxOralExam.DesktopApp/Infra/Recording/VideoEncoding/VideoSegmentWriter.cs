@@ -31,6 +31,15 @@ internal sealed class VideoSegmentWriter : IDisposable
 
     public bool SupportsAudio => _audioStreamIndex is not null;
 
+    /// <summary>
+    /// Video frames actually written to this segment. Compared against the segment's duration times
+    /// its nominal frame rate, this is a direct measure of whether the interval was really captured,
+    /// which the segment's byte size can never be: a screen that sat still for ten seconds and a
+    /// capture that froze for ten seconds both produce a tiny segment, and only the frame count
+    /// tells them apart.
+    /// </summary>
+    public long FramesWritten { get; private set; }
+
     public VideoSegmentWriter(
         string outputPath,
         int width,
@@ -212,6 +221,8 @@ internal sealed class VideoSegmentWriter : IDisposable
         sample.SampleDuration = _frameDurationTicks;
         _writer.WriteSample(_streamIndex, sample);
         _lastSampleTime = sampleTime;
+        // Only video reaches here; WriteAudio goes straight to the sink writer's audio stream.
+        FramesWritten++;
     }
 
     private ID3D11Texture2D CreateStagingTexture(ID3D11Texture2D texture)

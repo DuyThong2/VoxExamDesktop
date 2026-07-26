@@ -1,3 +1,4 @@
+using System.IO;
 using VoxOralExam.Core.Interfaces;
 using VoxOralExam.Core.Models;
 using VoxOralExam.DesktopApp.Infra.Clients.StreamService;
@@ -15,6 +16,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
     private readonly AppSettings _settings;
     private readonly ExamSessionState _sessionState;
     private readonly StreamSessionClient _sessionClient;
+    private readonly UploadCredentialRefresher _credentialRefresher;
     private readonly SegmentUploadWorker _uploadWorker;
     private readonly LocalSegmentStore _store;
     private readonly RecordingClock _clock;
@@ -51,6 +53,23 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
     private SystemAudioLoopbackCapture? _loopbackCapture;
     private AudioMixer? _audioMixer;
 
+    // Periodic health checks that run for as long as recording does: free disk space (see
+    // AppSettings.RecordingDiskCheckSeconds for why the start-of-attempt check is not enough) and
+    // upload credentials approaching expiry.
+    private Timer? _recordingWatchdog;
+
+    // Guards the credential refresh against re-entering itself on a later tick while an earlier
+    // one is still waiting on the network.
+    private int _refreshingCredentials;
+
+    // Same guard for the inventory declaration: a slow upload must not have a later tick start a
+    // second one behind it.
+    private int _declaringInventory;
+
+    // Latches so crossing the threshold is reported once on the way down and once on the way back
+    // up, instead of every tick for the rest of the exam.
+    private bool _diskSpaceLow;
+
     public event Action<RecordingStatus>? StatusChanged;
 
     public bool IsRecording { get; private set; }
@@ -59,6 +78,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         AppSettings settings,
         ExamSessionState sessionState,
         StreamSessionClient sessionClient,
+        UploadCredentialRefresher credentialRefresher,
         SegmentUploadWorker uploadWorker,
         LocalSegmentStore store,
         RecordingClock clock,
@@ -70,6 +90,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         _settings = settings;
         _sessionState = sessionState;
         _sessionClient = sessionClient;
+        _credentialRefresher = credentialRefresher;
         _uploadWorker = uploadWorker;
         _store = store;
         _clock = clock;
@@ -115,6 +136,18 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
             var streamIds = await CreateStreamIdsAsync(context, cancellationToken);
             if (_uploadEnabledForAttempt)
             {
+                // Written to the manifest before the first segment exists, so the credentials are
+                // already on disk no matter how abruptly this run ends -- a crash or a power cut
+                // one second later still leaves a later run able to finish the upload.
+                await _store.SaveUploadSessionsAsync(
+                    [.. _uploadSessions.Values.Select(session => new StoredUploadSession
+                    {
+                        StreamId = session.StreamId,
+                        StreamType = session.StreamType,
+                        UploadToken = session.UploadToken,
+                        ExpiresAt = session.ExpiresAt
+                    })],
+                    cancellationToken);
                 _uploadWorker.Start(_uploadSessions.Values);
             }
 
@@ -179,6 +212,8 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
             {
                 LocalFileLogger.Error("recording", "live_monitor_start_failed", ex);
             }
+
+            StartRecordingWatchdog();
 
             IsRecording = true;
             PublishStatus("recording_started", "Local recording has started.");
@@ -370,6 +405,221 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         }
     }
 
+    private void StartRecordingWatchdog()
+    {
+        _diskSpaceLow = false;
+        var period = TimeSpan.FromSeconds(_settings.RecordingDiskCheckSeconds);
+        if (period <= TimeSpan.Zero)
+        {
+            return;
+        }
+
+        _recordingWatchdog = new Timer(
+            _ =>
+            {
+                CheckDiskSpace();
+                // Not awaited: a timer callback must not block, and work still in flight when the
+                // next tick arrives is skipped by its own re-entrancy guard.
+                _ = RefreshExpiringCredentialsAsync();
+                _ = DeclareInventoriesAsync(complete: false, CancellationToken.None);
+            },
+            null,
+            period,
+            period);
+    }
+
+    /// <summary>
+    /// Tells vox-streaming what this device has captured, so it can tell a stream that finished from
+    /// one that merely stopped.
+    ///
+    /// Sent on every watchdog tick, not just at the end, because the failure it guards against is
+    /// this process not reaching the end at all -- and best-effort throughout, since a declaration
+    /// that does not get through costs only the precision of a later gap report, never a segment.
+    /// </summary>
+    private async Task DeclareInventoriesAsync(bool complete, CancellationToken ct)
+    {
+        if (!_uploadEnabledForAttempt)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _declaringInventory, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            foreach (var (streamType, session) in _uploadSessions.ToList())
+            {
+                if (!_startedStreams.Contains(streamType))
+                {
+                    continue;
+                }
+
+                try
+                {
+                    var declared = await _store.GetDeclaredSegmentsAsync(session.StreamId, ct);
+                    if (declared.Count == 0)
+                    {
+                        continue;
+                    }
+
+                    await _sessionClient.DeclareInventoryAsync(
+                        session.StreamId, session.UploadToken, complete, declared, ct);
+                }
+                catch (Exception ex)
+                {
+                    LocalFileLogger.Error(
+                        "recording",
+                        "declare_inventory_failed",
+                        ex,
+                        new { session.StreamId, session.StreamType, complete });
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _declaringInventory, 0);
+        }
+    }
+
+    /// <summary>
+    /// Renews upload credentials before they expire, so a long network outage cannot leave this
+    /// attempt holding a token the server has stopped accepting.
+    ///
+    /// Proactive rather than reactive on purpose. Waiting for the first 410 means discovering the
+    /// problem only once the credential is already dead, and at that point the exam may also be
+    /// over -- which is exactly when the Java endpoint behind the refresh stops issuing tokens.
+    /// Renewing while the exam is still running is the only window that reliably exists.
+    /// </summary>
+    private async Task RefreshExpiringCredentialsAsync()
+    {
+        if (!_uploadEnabledForAttempt || _context is not { } context)
+        {
+            return;
+        }
+
+        if (Interlocked.Exchange(ref _refreshingCredentials, 1) == 1)
+        {
+            return;
+        }
+
+        try
+        {
+            var lead = TimeSpan.FromMinutes(Math.Max(1, _settings.UploadCredentialRefreshLeadMinutes));
+            var deadline = DateTimeOffset.UtcNow.Add(lead);
+            var expiring = _uploadSessions
+                .Where(pair => pair.Value.ExpiresAt <= deadline)
+                .ToList();
+            if (expiring.Count == 0)
+            {
+                return;
+            }
+
+            foreach (var (streamType, session) in expiring)
+            {
+                var renewed = await _credentialRefresher.TryRefreshAsync(
+                    context.AttemptId, session.StreamType, CancellationToken.None);
+                if (renewed is null)
+                {
+                    continue;
+                }
+
+                if (!string.Equals(renewed.StreamId, session.StreamId, StringComparison.Ordinal))
+                {
+                    // vox-streaming only opens a new stream id when the previous one was already
+                    // completed. Adopting it here would silently split this attempt's evidence
+                    // across two streams, so keep the original and let it run to its own expiry.
+                    LocalFileLogger.Error(
+                        "recording",
+                        "credential_refresh_returned_different_stream",
+                        new InvalidOperationException(
+                            $"Refresh for {session.StreamId} returned {renewed.StreamId}."),
+                        new { session.StreamId, renewedStreamId = renewed.StreamId, session.StreamType });
+                    continue;
+                }
+
+                _uploadSessions[streamType] = renewed;
+                _uploadWorker.UpdateUploadToken(renewed.StreamId, renewed.UploadToken);
+                await _store.SaveUploadSessionsAsync(
+                    [new StoredUploadSession
+                    {
+                        StreamId = renewed.StreamId,
+                        StreamType = renewed.StreamType,
+                        UploadToken = renewed.UploadToken,
+                        ExpiresAt = renewed.ExpiresAt
+                    }],
+                    CancellationToken.None);
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("recording", "credential_refresh_sweep_failed", ex);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _refreshingCredentials, 0);
+        }
+    }
+
+    /// <summary>
+    /// Reports the recording drive running out of room, and deliberately does no more than that.
+    ///
+    /// The two ways to actually free space -- stop recording, or delete already-captured segments --
+    /// both destroy evidence for the period they cover, and which is less bad is a policy question
+    /// about the exam, not something this timer should decide on its own. Surfacing it as a degraded
+    /// status gives a proctor the chance to act while there is still room to act in; if nothing is
+    /// done, writes eventually fail and the recorders' own RecordingFailed path takes over.
+    /// </summary>
+    private void CheckDiskSpace()
+    {
+        long available;
+        try
+        {
+            available = _store.AvailableFreeSpace();
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("recording", "disk_space_check_failed", ex);
+            return;
+        }
+
+        var minimum = _settings.MinimumRecordingDiskBytes;
+        if (available < minimum)
+        {
+            if (_diskSpaceLow)
+            {
+                return;
+            }
+
+            _diskSpaceLow = true;
+            LocalFileLogger.Error(
+                "recording",
+                "disk_space_low_while_recording",
+                new IOException($"{available} bytes free, below the {minimum} byte minimum."),
+                new { availableBytes = available, minimumBytes = minimum });
+            PublishStatus(
+                "recording_disk_space_low",
+                $"The recording drive is low on space ({available / (1024 * 1024)} MB free). " +
+                "Free up space now: recording will fail if the drive fills.",
+                isDegraded: true);
+            return;
+        }
+
+        if (!_diskSpaceLow)
+        {
+            return;
+        }
+
+        _diskSpaceLow = false;
+        LocalFileLogger.Info(
+            "recording",
+            "disk_space_recovered",
+            new { availableBytes = available, minimumBytes = minimum });
+        PublishStatus("recording_disk_space_recovered", "The recording drive has space again.");
+    }
+
     private void OnSegmentCompleted(CompletedSegment segment)
     {
         _committedStreams.Add(segment.StreamType);
@@ -482,6 +732,11 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
             // finished sibling stream from ever calling /complete and getting assembled.
             await _uploadWorker.WaitUntilIdleAsync(drainCts.Token);
 
+            // The final declaration, marked complete: from here on a missing tail is a real gap
+            // rather than just the next segment not existing yet. Sent before /complete so the
+            // server already knows the expected set when it assembles.
+            await DeclareInventoriesAsync(complete: true, cancellationToken);
+
             var completedStreams = new List<bool>();
             foreach (var pair in _uploadSessions.Where(pair =>
                          _startedStreams.Contains(pair.Key)))
@@ -505,6 +760,18 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                 if (outstanding > 0)
                 {
                     completedStreams.Add(false);
+                    // Loud on purpose. Skipping /complete here means vox-streaming is never asked to
+                    // assemble this stream, so however many segments already reached S3 stay there
+                    // as loose parts with no recording.mp4 and nothing to trigger one later. That
+                    // happened once for a whole camera recording -- one straggling final segment --
+                    // and left no trace in any log, which is why it took an S3 inspection to find.
+                    LocalFileLogger.Error(
+                        "recording",
+                        "complete_skipped_segments_outstanding",
+                        new InvalidOperationException(
+                            $"{outstanding} segment(s) still pending after the {drainSeconds}s drain; " +
+                            "this stream will not be assembled."),
+                        new { streamId, streamType = pair.Key.ToString(), outstanding, drainSeconds });
                     continue;
                 }
 
@@ -517,6 +784,9 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                         pair.Value.UploadToken,
                         cancellationToken);
                     completedStreams.Add(true);
+                    // Recorded so a later run skips this stream instead of re-completing a stream
+                    // vox-streaming has already finalized.
+                    await _store.MarkUploadSessionCompletedAsync(streamId, cancellationToken);
                 }
                 catch (Exception ex)
                 {
@@ -536,6 +806,9 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
         _cameraRecorder.SegmentCompleted -= OnSegmentCompleted;
         _screenRecorder.RecordingFailed -= OnScreenRecordingFailed;
         _cameraRecorder.RecordingFailed -= OnCameraRecordingFailed;
+        _recordingWatchdog?.Dispose();
+        _recordingWatchdog = null;
+        _diskSpaceLow = false;
         _clock.Stop();
 
         if (_uploadEnabledForAttempt && !allUploaded)

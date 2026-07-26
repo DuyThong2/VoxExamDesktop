@@ -55,6 +55,8 @@ public partial class App : Application
 
         SessionEnding += App_SessionEnding;
 
+        StartOrphanedUploadRecovery();
+
         var settings = _services.GetRequiredService<AppSettings>();
         if (settings.LaunchStreamingDemo)
         {
@@ -90,6 +92,29 @@ public partial class App : Application
             LocalFileLogger.Error("app", "startup_show_shell_failed", ex);
             throw;
         }
+    }
+
+    /// <summary>
+    /// Finishes uploads a previous run left unfinished, in the background.
+    ///
+    /// Deliberately fire-and-forget and never awaited: a student waiting to sit an exam must not be
+    /// held up by a previous attempt's leftovers, and the recovery service is best-effort by
+    /// construction -- anything it cannot finish this launch is simply retried on the next one.
+    /// </summary>
+    private void StartOrphanedUploadRecovery()
+    {
+        var recovery = _services!.GetRequiredService<OrphanedUploadRecoveryService>();
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await recovery.RecoverAsync(CancellationToken.None);
+            }
+            catch (Exception ex)
+            {
+                LocalFileLogger.Error("app", "orphaned_upload_recovery_failed", ex);
+            }
+        });
     }
 
     private void OnExamStartRequested(object? sender, EventArgs e)
@@ -227,6 +252,8 @@ public partial class App : Application
         });
         services.AddSingleton<LocalSegmentStore>();
         services.AddSingleton<SegmentUploadWorker>();
+        services.AddSingleton<UploadCredentialRefresher>();
+        services.AddSingleton<OrphanedUploadRecoveryService>();
         services.AddSingleton<ScreenSegmentRecorder>();
         services.AddSingleton<CameraSegmentRecorder>();
         services.AddSingleton<LiveMonitorStreamService>();

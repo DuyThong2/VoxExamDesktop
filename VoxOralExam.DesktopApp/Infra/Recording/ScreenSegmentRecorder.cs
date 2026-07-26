@@ -313,6 +313,9 @@ public sealed class ScreenSegmentRecorder : IDisposable
             }
 
             writer.Complete();
+            // Read before Dispose: the writer is the only thing that knows how many frames actually
+            // made it into this segment.
+            var framesWritten = writer.FramesWritten;
             writer.Dispose();
 
             var segment = _store.CommitAsync(
@@ -321,7 +324,8 @@ public sealed class ScreenSegmentRecorder : IDisposable
                     _sequence,
                     path,
                     _segmentStartedAtUtc,
-                    endedAtUtc)
+                    endedAtUtc,
+                    framesWritten)
                 .GetAwaiter()
                 .GetResult();
             InvokeSegmentCompleted(segment);

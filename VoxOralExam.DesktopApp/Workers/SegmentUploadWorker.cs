@@ -56,6 +56,24 @@ public sealed class SegmentUploadWorker : IAsyncDisposable
         _signal.Release();
     }
 
+    /// <summary>
+    /// Swaps in a renewed upload credential for a stream already being uploaded. The stream id is
+    /// unchanged -- vox-streaming resumes the same stream rather than opening a new one -- so
+    /// nothing already uploaded is orphaned, and segments still queued simply go out under the new
+    /// token. Also wakes the worker: a refresh usually follows a spell of failures, and there is no
+    /// reason to sit out the remaining backoff now that they can succeed.
+    /// </summary>
+    public void UpdateUploadToken(string streamId, string uploadToken)
+    {
+        if (string.IsNullOrWhiteSpace(uploadToken))
+        {
+            return;
+        }
+
+        _uploadTokens[streamId] = uploadToken;
+        _signal.Release();
+    }
+
     public async Task<bool> WaitUntilIdleAsync(CancellationToken ct)
     {
         try
@@ -138,6 +156,25 @@ public sealed class SegmentUploadWorker : IAsyncDisposable
 
                     return;
                 }
+                catch (HttpRequestException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
+                {
+                    // The server holds different bytes under this sequence number and refuses to
+                    // overwrite them (vox-streaming's SegmentUseCase.Upload). Retrying is pointless
+                    // -- every attempt returns the same 409 -- and leaving it Failed would count as
+                    // outstanding forever, blocking this stream's /complete permanently. Settle it
+                    // terminally instead and surface the disagreement for a human.
+                    //
+                    // Only our own hash can be logged: the 409 body carries no server-side hash.
+                    // Reporting both sides needs the client segment inventory work, which is where
+                    // an anomaly like this belongs anyway.
+                    await _store.MarkConflictedAsync(segment, ex.Message, CancellationToken.None);
+                    LocalFileLogger.Error(
+                        "segment_upload",
+                        "segment_conflict_server_has_different_bytes",
+                        ex,
+                        new { segment.StreamId, segment.StreamType, segment.Sequence, LocalSha256 = segment.Sha256 });
+                    continue;
+                }
                 catch (Exception ex)
                 {
                     // continue, not break: GetPendingSegmentsAsync orders by (StreamId, Sequence),
@@ -167,8 +204,18 @@ public sealed class SegmentUploadWorker : IAsyncDisposable
             {
                 try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(30), ct);
-                    _signal.Release();
+                    // Waiting ON the signal rather than sleeping beside it is what makes this
+                    // backoff interruptible. It used to be Task.Delay(30s) followed by a Release,
+                    // which meant NotifyPendingSegment()'s Release only incremented a semaphore
+                    // nobody was awaiting -- the worker slept out the full 30 seconds regardless.
+                    //
+                    // That cost a whole camera recording: the final segment of a stream is always
+                    // produced during StopAsync, and if the worker happened to be mid-sleep when it
+                    // landed, ExamRecordingService's 20-second drain expired first, the stream was
+                    // left with one outstanding segment, /complete was never called, and the 130
+                    // segments already in S3 were never assembled. Waking on the signal removes that
+                    // race entirely, and with it the requirement that the drain outlast this delay.
+                    await _signal.WaitAsync(TimeSpan.FromSeconds(30), ct);
                 }
                 catch (OperationCanceledException) when (ct.IsCancellationRequested)
                 {

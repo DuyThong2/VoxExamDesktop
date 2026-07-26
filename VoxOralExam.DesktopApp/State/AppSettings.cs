@@ -38,6 +38,18 @@ public class AppSettings
     public int CameraRecordingBitrate { get; set; } = 2_000_000;
     public int RecordingQueueCapacity { get; set; } = 4;
     public long MinimumRecordingDiskBytes { get; set; } = 2L * 1024 * 1024 * 1024;
+
+    // How often to re-check free disk space while recording. The start-of-attempt check alone is not
+    // enough: screen and camera together write roughly 2.7 GB/hour at their configured bitrates, and
+    // an attempt whose uploads are failing keeps every segment on disk, so the drive can cross the
+    // threshold long after recording began. 0 disables the periodic check.
+    public int RecordingDiskCheckSeconds { get; set; } = 30;
+
+    // How long before an upload credential expires to start renewing it. Must be comfortably longer
+    // than any outage the renewal itself has to survive: the renewal needs the network, so trying
+    // only at the last minute means the one situation that makes renewal necessary -- being offline
+    // -- is also the one that prevents it.
+    public int UploadCredentialRefreshLeadMinutes { get; set; } = 10;
     public string RealtimeWebSocketPath { get; set; } = "/realtime/attempts";
     public string AvatarWebRtcOfferPath { get; set; } = "/avatar/webrtc/offer";
     public int MaxTurnsPerQuestion { get; set; } = 5;

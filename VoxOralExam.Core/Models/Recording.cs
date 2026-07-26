@@ -37,7 +37,21 @@ public sealed record CompletedSegment(
     DateTimeOffset StartedAt,
     DateTimeOffset EndedAt,
     long SizeBytes,
-    string Sha256
+    string Sha256,
+    long FramesWritten
+);
+
+/// <summary>
+/// One segment as the client declares it to the server, uploaded or not. See
+/// LocalSegmentStore.GetDeclaredSegmentsAsync for why the server needs to be told this at all.
+/// </summary>
+public sealed record DeclaredSegment(
+    long Seq,
+    DateTimeOffset StartedAt,
+    DateTimeOffset EndedAt,
+    string Sha256,
+    long SizeBytes,
+    long FramesWritten
 );
 
 public sealed class RecordingManifest
@@ -48,7 +62,38 @@ public sealed class RecordingManifest
 
     public string SessionId { get; init; } = string.Empty;
 
+    /// <summary>
+    /// The upload credentials this attempt's streams were opened with, so a later run can finish
+    /// what this one could not.
+    ///
+    /// Without them the manifest records which segments still need uploading but nothing that could
+    /// actually upload them: the stream id and upload token used to live only in
+    /// ExamRecordingService's memory and were dropped when the attempt ended, so a crash, a forced
+    /// shutdown or a drain that ran out of time left the segments permanently stranded -- already
+    /// half-uploaded to S3, with no way to send the rest and no way to ask for assembly.
+    /// </summary>
+    public List<StoredUploadSession> UploadSessions { get; init; } = [];
+
     public List<StoredSegment> Segments { get; init; } = [];
+}
+
+public sealed class StoredUploadSession
+{
+    public string StreamId { get; init; } = string.Empty;
+
+    public string StreamType { get; init; } = string.Empty;
+
+    public string UploadToken { get; set; } = string.Empty;
+
+    /// <summary>
+    /// When the server stops accepting this credential. vox-streaming sets it to the stream JWT's
+    /// own expiry plus a fixed grace and never extends it on upload activity, so it is a hard
+    /// deadline for any resumed upload, not a hint -- past it every request is answered 410 Gone.
+    /// </summary>
+    public DateTimeOffset ExpiresAt { get; set; }
+
+    /// <summary>Set once /complete succeeded, so a later run knows this stream needs nothing more.</summary>
+    public bool Completed { get; set; }
 }
 
 public sealed class StoredSegment
@@ -67,6 +112,17 @@ public sealed class StoredSegment
 
     public string Sha256 { get; init; } = string.Empty;
 
+    public long SizeBytes { get; init; }
+
+    /// <summary>
+    /// Video frames in this segment. Reported to the server as part of the segment inventory: a
+    /// count far below the segment's duration times its frame rate means the interval was recorded
+    /// but not really captured -- a frozen capture, a covered camera, a starved encoder -- which no
+    /// amount of gap analysis over sequence numbers can reveal, because the segment is present and
+    /// correct as far as sequencing is concerned.
+    /// </summary>
+    public long FramesWritten { get; init; }
+
     public SegmentUploadState State { get; set; }
 
     public string? LastError { get; set; }
@@ -77,5 +133,21 @@ public enum SegmentUploadState
     Pending,
     Uploading,
     Acknowledged,
-    Failed
+
+    /// <summary>Upload failed for a reason worth retrying. Picked up again on the next pass.</summary>
+    Failed,
+
+    /// <summary>
+    /// The server already holds a DIFFERENT segment under this stream's sequence number and
+    /// rejected ours with 409 (see vox-streaming's SegmentUseCase.Upload: same SHA-256 is accepted
+    /// idempotently, a different one is refused rather than overwritten).
+    ///
+    /// Terminal, and deliberately NOT counted as outstanding. Retrying can only ever produce the
+    /// same 409, and because the completion gate counts every non-Acknowledged segment, leaving
+    /// these as Failed would block /complete for the whole stream forever -- the exact silent
+    /// orphaning that loses an entire recording. The sequence itself is covered on the server, so
+    /// for coverage purposes there is nothing missing; what needs attention is the disagreement,
+    /// which is reported rather than resolved.
+    /// </summary>
+    Conflicted
 }
