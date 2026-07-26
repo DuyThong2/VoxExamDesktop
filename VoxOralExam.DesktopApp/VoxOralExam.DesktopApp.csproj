@@ -29,7 +29,6 @@
     <PackageReference Include="OpenCvSharp4.runtime.win" Version="4.10.0.20241108" />
     <PackageReference Include="SIPSorcery" Version="10.0.8" />
     <PackageReference Include="SIPSorcery.VP8" Version="10.0.8" />
-    <PackageReference Include="SIPSorceryMedia.FFmpeg" Version="10.0.8" />
     <PackageReference Include="Vortice.Direct3D11" Version="3.8.3" />
     <PackageReference Include="Vortice.DXGI" Version="3.8.3" />
     <PackageReference Include="Vortice.MediaFoundation" Version="3.8.3" />
@@ -53,19 +52,15 @@
     </None>
   </ItemGroup>
 
-  <!-- Native FFmpeg 8.1.x shared-build DLLs (avcodec/avformat/avutil/swscale/swresample/etc.) that
-       SIPSorceryMedia.FFmpeg's FFmpegVideoEncoder needs at runtime; not bundled by the NuGet
-       package (see FFmpeg.AutoGen's own README: "on Windows use ... obtain FFmpeg" separately).
-       Must match FFmpeg.AutoGen's version exactly (8.1.0 here, so FFmpeg 8.1.x, per its semver
-       convention) or native calls fail to resolve. Get the Windows x64 "shared" build (not
-       "static"/"essentials", which has no individual .dll files) from gyan.dev/ffmpeg/builds,
-       FFmpeg.AutoGen's own documented Windows source, and drop bin\*.dll here.
-       Condition keeps a fresh clone buildable before anyone has populated this folder. -->
-  <ItemGroup>
-    <None Include="FFmpeg\*.dll" Condition="Exists('FFmpeg')">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>ffmpeg\%(Filename)%(Extension)</Link>
-    </None>
-  </ItemGroup>
+  <!-- This project deliberately ships NO native FFmpeg DLLs and no SIPSorceryMedia.FFmpeg
+       reference. It used to bundle a gyan.dev shared build to give SIPSorceryMedia.FFmpeg's
+       FFmpegVideoEncoder an H.264 encoder for the live monitor stream, but those builds are
+       GPL-configured (their build string carries the enable-gpl and enable-version3 switches, and
+       they bundle libx264/libx265): distributing them with this app would have placed the app
+       itself under the GPLv3, source disclosure included. H.264 now goes through the Media
+       Foundation encoder built into Windows instead: see
+       Infra/WebRtc/VideoEncoding/MediaFoundationH264Encoder.cs, which also explains why. Please
+       do not reintroduce an FFmpeg dependency here without checking that build's licence first
+       (the enable-gpl switch in its configuration string is the thing to look for). -->
 
 </Project>

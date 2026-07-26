@@ -105,7 +105,7 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
     {
         var client = new MonitorStreamClient(
             _settings.StreamingBaseUrl, context.ScheduleId, RecordingStreamType.Camera, context.StreamToken,
-            _settings.MonitorStreamOrigin, _settings.CameraFps);
+            _settings.MonitorStreamOrigin, _settings.CameraFps, _settings.MonitorStreamVideoBitrate);
         await client.ConnectAsync(ct);
         _cameraClient = client;
 
@@ -169,7 +169,7 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
     {
         var client = new MonitorStreamClient(
             _settings.StreamingBaseUrl, context.ScheduleId, RecordingStreamType.Screen, context.StreamToken,
-            _settings.MonitorStreamOrigin, _settings.ScreenRecordingFps);
+            _settings.MonitorStreamOrigin, _settings.ScreenRecordingFps, _settings.MonitorStreamVideoBitrate);
         await client.ConnectAsync(ct);
         _screenClient = client;
 

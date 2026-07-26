@@ -10,10 +10,17 @@ public class AppSettings
     public bool EnableSegmentUpload { get; set; } = true;
 
     // Live WebRTC view for the monitor UI (separate from local recording/segment upload above).
-    // Off by default: needs native FFmpeg shared libraries (avcodec/avutil/swscale/...) alongside
-    // the app's exe for SIPSorceryMedia.FFmpeg's H.264 encoder to actually work at runtime -- these
-    // are not bundled by the NuGet package and are not yet part of this project's deployment.
+    // Encodes H.264 through the Media Foundation encoder that ships with Windows (see
+    // MediaFoundationH264Encoder), so it needs no bundled native libraries -- only Windows N/KN
+    // editions without the Media Feature Pack lack an encoder, and there the live view degrades
+    // while local recording is unaffected.
     public bool EnableLiveMonitorStream { get; set; } = true;
+
+    // Target bitrate for the live monitor video tracks. Deliberately well below the
+    // Screen/CameraRecordingBitrate values above: those govern the durable evidence recording that
+    // gets graded, whereas this is a best-effort real-time view over whatever network the school
+    // has, encoded CBR so a busy screen cannot balloon into a stall.
+    public int MonitorStreamVideoBitrate { get; set; } = 1_500_000;
 
     // vox-streaming's /ws/stream upgrader rejects the WebSocket handshake with 403 unless the
     // request's Origin header is in its own ALLOWED_ORIGINS (default http://localhost:5173, the

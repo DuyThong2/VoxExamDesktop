@@ -6,8 +6,8 @@ using System.Text.Json.Serialization;
 using System.Threading.Channels;
 using SIPSorcery.Net;
 using SIPSorceryMedia.Abstractions;
-using SIPSorceryMedia.FFmpeg;
 using VoxOralExam.Core.Models;
+using VoxOralExam.DesktopApp.Infra.WebRtc.VideoEncoding;
 using VoxOralExam.DesktopApp.Services;
 
 namespace VoxOralExam.DesktopApp.Infra.WebRtc;
@@ -21,7 +21,7 @@ namespace VoxOralExam.DesktopApp.Infra.WebRtc;
 ///
 /// Mirrors Infra/Clients/AIService/WebRtcClient.cs's RTCPeerConnection/encode/SendVideo pattern,
 /// with 3 differences: WebSocket offer/answer/ICE signaling (matching demo/web/student.js) instead
-/// of HTTP POST + SSE, H.264 (via SIPSorceryMedia.FFmpeg) instead of VP8 (server only accepts
+/// of HTTP POST + SSE, H.264 (via MediaFoundationH264Encoder) instead of VP8 (server only accepts
 /// H.264/Opus -- see vox-streaming/internal/transport/webrtc/api.go's registerCodecs), and an
 /// added Opus audio track.
 /// </summary>
@@ -36,9 +36,6 @@ public sealed class MonitorStreamClient : IAsyncDisposable
     private const int OpusRtpClockRate = 48_000;
     private const uint AudioDurationPerFrame = OpusRtpClockRate * OpusAudioEncoder.FrameMilliseconds / 1000;
 
-    private static readonly object FFmpegInitLock = new();
-    private static bool _ffmpegInitialized;
-
     private static readonly JsonSerializerOptions SignalJsonOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
@@ -46,6 +43,8 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
     private readonly string _wsUrl;
     private readonly string _origin;
+    private readonly int _videoFps;
+    private readonly int _videoBitrate;
     private readonly SemaphoreSlim _sendGate = new(1, 1);
 
     // Only used to seed the very first frame's RTP duration, before any real inter-frame gap is
@@ -56,15 +55,15 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
     private ClientWebSocket? _ws;
     private RTCPeerConnection? _pc;
-    private FFmpegVideoEncoder? _videoEncoder;
+    private MediaFoundationH264Encoder? _videoEncoder;
     private OpusAudioEncoder? _audioEncoder;
     private CancellationTokenSource? _cts;
     private Task? _receiveLoopTask;
 
     // Capture callbacks can arrive from more than one thread for the same stream (e.g.
     // ScreenCaptureSource's Windows Graphics Capture callback AND its separate keep-alive Timer,
-    // both independently invoking FrameArrived -- see its own comments). FFmpegVideoEncoder and
-    // RTCPeerConnection.SendVideo are not safe to call concurrently, so every frame is queued here
+    // both independently invoking FrameArrived -- see its own comments). MediaFoundationH264Encoder
+    // and RTCPeerConnection.SendVideo are not safe to call concurrently, so every frame is queued here
     // and drained by exactly one worker task instead of being encoded inline on whichever thread
     // captured it. Bounded to 2 with DropOldest: if the single worker falls behind (a slow encode,
     // a GC pause), the newest frame always wins over backlog -- catching up on stale frames is
@@ -84,25 +83,26 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
     public MonitorStreamClient(
         string streamingBaseUrl, string scheduleId, RecordingStreamType streamType, string token, string origin,
-        int videoFps)
+        int videoFps, int videoBitrate)
     {
         var wireStreamType = streamType == RecordingStreamType.Camera ? "camera" : "screen";
         var wsBase = ToWebSocketBase(streamingBaseUrl);
         _wsUrl = $"{wsBase}/ws/stream?scheduleId={Uri.EscapeDataString(scheduleId)}" +
                  $"&streamType={Uri.EscapeDataString(wireStreamType)}&token={Uri.EscapeDataString(token)}";
+        _videoFps = Math.Clamp(videoFps, 1, 60);
+        _videoBitrate = videoBitrate;
         // Seeds only the first frame's RTP duration (see VideoEncodeWorkerAsync); real frames
         // compute theirs from actual captured timestamps instead.
-        _firstFrameVideoDuration = (uint)(VideoClockRate / Math.Clamp(videoFps, 1, 60));
+        _firstFrameVideoDuration = (uint)(VideoClockRate / _videoFps);
         _origin = origin;
     }
 
     public async Task ConnectAsync(CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
-        EnsureFFmpegInitialized();
 
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _videoEncoder = new FFmpegVideoEncoder();
+        _videoEncoder = new MediaFoundationH264Encoder(_videoFps, _videoBitrate);
         _audioEncoder = new OpusAudioEncoder();
         _pc = new RTCPeerConnection(null);
 
@@ -244,8 +244,8 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
                 try
                 {
-                    var encoded = _videoEncoder.EncodeVideo(
-                        item.Width, item.Height, item.PixelBytes, item.PixelFormat, VideoCodecsEnum.H264);
+                    var encoded = _videoEncoder.Encode(
+                        item.PixelBytes, item.Width, item.Height, item.PixelFormat, item.CaptureTimestamp);
                     if (encoded is { Length: > 0 })
                     {
                         _pc.SendVideo(durationRtpUnits, encoded);
@@ -402,33 +402,6 @@ public sealed class MonitorStreamClient : IAsyncDisposable
                     "server_error",
                     new InvalidOperationException(message.Message ?? "unknown server error"));
                 break;
-        }
-    }
-
-    private static void EnsureFFmpegInitialized()
-    {
-        if (_ffmpegInitialized)
-        {
-            return;
-        }
-
-        lock (FFmpegInitLock)
-        {
-            if (_ffmpegInitialized)
-            {
-                return;
-            }
-
-            // The libPath argument -- not FFmpeg.AutoGen.ffmpeg.RootPath -- is what
-            // FFmpegInit.Initialise actually honors; calling Initialise() with no libPath instead
-            // falls back to probing well-known system install locations (observed: a Chocolatey
-            // FFmpeg install's bin folder), silently ignoring RootPath and throwing
-            // DllNotFoundException if that fallback doesn't have a matching version. See
-            // VoxOralExam.DesktopApp.csproj's ffmpeg\*.dll ItemGroup for where these DLLs come
-            // from and why the version must match FFmpeg.AutoGen's exactly.
-            var ffmpegLibPath = Path.Combine(AppContext.BaseDirectory, "ffmpeg");
-            FFmpegInit.Initialise(libPath: ffmpegLibPath);
-            _ffmpegInitialized = true;
         }
     }
 
