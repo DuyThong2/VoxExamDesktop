@@ -261,7 +261,11 @@ public sealed class OrphanedUploadRecoveryService
                         session.StreamId, session.UploadToken, complete: true, declared, ct);
                 }
 
-                await _sessionClient.CompleteAsync(session.StreamId, session.UploadToken, ct);
+                await _sessionClient.CompleteAsync(
+                    session.StreamId,
+                    session.UploadToken,
+                    RecordingStopReason.RecoveredAfterCrash,
+                    ct);
                 await store.MarkUploadSessionCompletedAsync(session.StreamId, ct);
                 LocalFileLogger.Info(
                     "upload_recovery",

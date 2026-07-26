@@ -782,6 +782,7 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                     await _sessionClient.CompleteAsync(
                         streamId,
                         pair.Value.UploadToken,
+                        reason,
                         cancellationToken);
                     completedStreams.Add(true);
                     // Recorded so a later run skips this stream instead of re-completing a stream

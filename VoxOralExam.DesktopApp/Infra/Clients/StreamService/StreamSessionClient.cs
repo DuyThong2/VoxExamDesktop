@@ -90,7 +90,21 @@ public sealed class StreamSessionClient
         response.EnsureSuccessStatusCode();
     }
 
-    public async Task CompleteAsync(string streamId, string uploadToken, CancellationToken ct)
+    /// <summary>
+    /// Tells vox-streaming this stream has no more segments coming, so it can assemble the
+    /// recording instead of waiting out the grace period.
+    /// </summary>
+    /// <param name="stopReason">
+    /// Why recording ended, so the server can tell an exam that finished normally from one whose
+    /// app was killed or whose capture died -- a short recording means very different things in
+    /// each case. Purely diagnostic: the server ignores values it does not recognise and accepts
+    /// the call with no body at all, so this can never be the reason a recording fails to assemble.
+    /// </param>
+    public async Task CompleteAsync(
+        string streamId,
+        string uploadToken,
+        RecordingStopReason stopReason,
+        CancellationToken ct)
     {
         using var request = new HttpRequestMessage(
             HttpMethod.Post,
@@ -98,6 +112,7 @@ public sealed class StreamSessionClient
         );
 
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", uploadToken);
+        request.Content = JsonContent.Create(new { stopReason = stopReason.ToString() });
 
         using var response = await _http.SendAsync(request, ct);
         response.EnsureSuccessStatusCode();

@@ -12,7 +12,17 @@ public enum RecordingStopReason
     Expired,
     UserClosed,
     ApplicationShutdown,
-    CaptureFailure
+    CaptureFailure,
+
+    /// <summary>
+    /// Never passed to StopAsync -- this run is not the one that did the recording.
+    /// OrphanedUploadRecoveryService reports it when it finishes a stream whose original run died
+    /// before reaching /complete, so the real reason was never observed. Distinguishing it from a
+    /// stream that simply reported nothing is the point: it tells the server this recording was
+    /// salvaged rather than completed normally, which is exactly the case where a short or gapped
+    /// recording has an explanation.
+    /// </summary>
+    RecoveredAfterCrash
 }
 
 public sealed record RecordingSessionContext(
