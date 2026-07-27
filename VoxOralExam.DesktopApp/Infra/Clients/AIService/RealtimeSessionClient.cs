@@ -314,23 +314,26 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     /// </summary>
     public async Task<RealtimeDecision> SendTurnEndAndWaitAsync(
         int turnOrder,
-        bool isLastAllowedTurn,
+        bool speechBudgetExceeded,
         double durationSeconds,
+        int assessmentTurnCount,
+        int maxAssessmentTurns,
         CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<RealtimeDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingDecisionTcs = tcs;
         _pendingDecisionTurnOrder = turnOrder;
 
-        // Tells Python not to speak another follow-up it can't actually get an answer to --
-        // without this, Python decides + speaks a follow-up in one step with no idea that
-        // MaxTurnsPerQuestion is about to force the question closed on the WPF side the moment
-        // that speech finishes, abandoning a question the student never gets to answer.
+        // Python applies the limit after it knows whether this decision is a clarification.
+        // That prevents a clarification at the boundary from consuming an assessment turn.
         await SendJsonAsync(new
         {
             type = "turn_end",
-            is_last_allowed_turn = isLastAllowedTurn,
-            duration_seconds = durationSeconds
+            is_last_allowed_turn = speechBudgetExceeded,
+            speech_budget_exceeded = speechBudgetExceeded,
+            duration_seconds = durationSeconds,
+            assessment_turn_count = assessmentTurnCount,
+            max_assessment_turns = maxAssessmentTurns
         }, ct);
 
         using var registration = ct.Register(() => tcs.TrySetCanceled());

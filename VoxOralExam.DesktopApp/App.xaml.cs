@@ -16,7 +16,10 @@ using VoxOralExam.DesktopApp.Services.DomainService.Impl;
 using VoxOralExam.DesktopApp.Services.EntryFlow;
 using VoxOralExam.DesktopApp.Services.EntryFlow.Impl;
 using VoxOralExam.DesktopApp.Services.ExamFlow;
+using VoxOralExam.DesktopApp.Services.ExamFlow.Attempt;
 using VoxOralExam.DesktopApp.Services.ExamFlow.Impl;
+using VoxOralExam.DesktopApp.Services.ExamFlow.Question;
+using VoxOralExam.DesktopApp.Services.Proctoring;
 using VoxOralExam.DesktopApp.State;
 using VoxOralExam.DesktopApp.ViewModels;
 
@@ -194,8 +197,8 @@ public partial class App : Application
         services.AddSingleton<LocalAvatarSpeaker>();
         services.AddSingleton<RealtimeSessionClient>();
         services.AddSingleton<AvatarWebRtcClient>();
-        services.AddSingleton<MicAudioStreamer>();
         services.AddSingleton<QuestionAssetPresentationCoordinator>();
+        services.AddSingleton<ExamAttemptRunnerFactory>();
         services.AddSingleton<RealtimeExamFlowService>();
         services.AddSingleton<IExamFlowService>(sp => sp.GetRequiredService<RealtimeExamFlowService>());
 
@@ -234,7 +237,7 @@ public partial class App : Application
             var examFlow = _services.GetService<IExamFlowService>();
             examFlow?.StopAsync().GetAwaiter().GetResult();
 
-            var proctoring = _services.GetService<ScreenProctoringService>();
+            var proctoring = _services.GetService<IProctoringService>();
             proctoring?.StopAsync().GetAwaiter().GetResult();
             LocalFileLogger.Info("app", "ensure_exam_flow_stopped_complete");
         }

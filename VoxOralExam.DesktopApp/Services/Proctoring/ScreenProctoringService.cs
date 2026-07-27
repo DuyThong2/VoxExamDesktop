@@ -1,10 +1,11 @@
 using System.Text.Json;
 using VoxOralExam.Core.Interfaces;
+using VoxOralExam.Core.Models;
 using VoxOralExam.DesktopApp.Infra.Clients.AIService;
 using VoxOralExam.DesktopApp.Infra.Devices;
 using VoxOralExam.DesktopApp.State;
 
-namespace VoxOralExam.DesktopApp.Services.ExamFlow;
+namespace VoxOralExam.DesktopApp.Services.Proctoring;
 
 public class ScreenProctoringService : IProctoringService, IDisposable
 {
@@ -25,7 +26,7 @@ public class ScreenProctoringService : IProctoringService, IDisposable
         _sessionState = sessionState;
     }
 
-    public async Task StartAsync()
+    public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         if (_isDisposed)
         {
@@ -43,10 +44,12 @@ public class ScreenProctoringService : IProctoringService, IDisposable
         var examAttemptId = _sessionState.ExamAttemptId != Guid.Empty
             ? _sessionState.ExamAttemptId.ToString("D")
             : _sessionState.SessionId;
+        cancellationToken.ThrowIfCancellationRequested();
         await _webRtc.ConnectAsync(examAttemptId);
 
         OnStatusChanged?.Invoke("Đang khởi động camera...");
         _camera.OnRawFrame += OnCameraRawFrame;
+        cancellationToken.ThrowIfCancellationRequested();
         await _camera.StartAsync();
 
         _isStarted = true;

@@ -1,4 +1,4 @@
-namespace VoxOralExam.DesktopApp.Services.ExamFlow;
+namespace VoxOralExam.Core.Models;
 
 public class ProctoringEvent
 {

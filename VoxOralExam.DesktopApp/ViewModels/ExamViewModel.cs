@@ -11,6 +11,8 @@ using VoxOralExam.DesktopApp.Infra.Devices;
 using VoxOralExam.DesktopApp.Services;
 using VoxOralExam.DesktopApp.Services.DomainService;
 using VoxOralExam.DesktopApp.Services.ExamFlow;
+using VoxOralExam.DesktopApp.Services.ExamFlow.Question;
+using VoxOralExam.DesktopApp.Services.Proctoring;
 using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
@@ -18,7 +20,7 @@ namespace VoxOralExam.DesktopApp.ViewModels;
 public class ExamViewModel : BaseViewModel
 {
     private readonly CameraService _camera;
-    private readonly ScreenProctoringService _proctoring;
+    private readonly IProctoringService _proctoring;
     private readonly ExamSessionState _sessionState;
     private readonly IExamFlowService _examFlow;
     private readonly AvatarWebRtcClient _avatarClient;
@@ -61,7 +63,7 @@ public class ExamViewModel : BaseViewModel
 
     public ExamViewModel(
         CameraService camera,
-        ScreenProctoringService proctoring,
+        IProctoringService proctoring,
         ExamSessionState sessionState,
         IExamFlowService examFlow,
         AvatarWebRtcClient avatarClient,
@@ -292,7 +294,7 @@ public class ExamViewModel : BaseViewModel
 
         _initialized = true;
         await EnsureExamLoadedAsync();
-        await StartCameraAsync();
+        PrepareProctoringUi();
         await _examFlow.StartAsync(CancellationToken.None);
     }
 
@@ -330,7 +332,6 @@ public class ExamViewModel : BaseViewModel
         {
             _countdownTimer?.Stop();
             await _examFlow.StopAsync();
-            await _proctoring.StopAsync();
             _examFlow.OnQuestionPresented -= HandleQuestionPresented;
             _examFlow.OnTranscriptAppended -= HandleTranscriptAppended;
             _examFlow.OnStatusChanged -= HandleExamStatusChanged;
@@ -344,7 +345,6 @@ public class ExamViewModel : BaseViewModel
             _camera.OnPreviewFrame -= HandlePreviewFrame;
             _proctoring.OnStatusChanged -= HandleProctoringStatusChanged;
             _proctoring.OnProctoringEvent -= HandleProctoringEvent;
-            _proctoring.Dispose();
         }
         finally
         {
@@ -383,35 +383,18 @@ public class ExamViewModel : BaseViewModel
         _sessionState.LoadExamPaper(paper, _sessionState.EntryTicket?.AttemptId);
     }
 
-    private async Task StartCameraAsync()
+    private void PrepareProctoringUi()
     {
-        try
-        {
-            _camera.OnPreviewFrame += HandlePreviewFrame;
-
-            if (!IsCameraOn)
-            {
-                await _camera.StartAsync();
-            }
-
-            IsCameraOn = true;
-            CameraStatus = "Camera da bat";
-            AddLog("Camera da bat", LogType.Success);
-
-            _proctoring.OnStatusChanged += HandleProctoringStatusChanged;
-            _proctoring.OnProctoringEvent += HandleProctoringEvent;
-            await _proctoring.StartAsync();
-        }
-        catch (Exception ex)
-        {
-            IsCameraOn = false;
-            CameraStatus = $"Loi camera: {ex.Message}";
-            AddLog(CameraStatus, LogType.Error);
-        }
+        _camera.OnPreviewFrame += HandlePreviewFrame;
+        _proctoring.OnStatusChanged += HandleProctoringStatusChanged;
+        _proctoring.OnProctoringEvent += HandleProctoringEvent;
+        CameraStatus = "Đang khởi động camera...";
     }
 
     private void HandlePreviewFrame(BitmapImage bitmapImage)
     {
+        IsCameraOn = true;
+        CameraStatus = "Camera đã bật";
         CameraPreview = bitmapImage;
     }
 
@@ -432,6 +415,7 @@ public class ExamViewModel : BaseViewModel
 
     private void HandleProctoringStatusChanged(string status)
     {
+        CameraStatus = status;
         AddLog(status, LogType.Info);
     }
 

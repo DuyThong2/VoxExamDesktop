@@ -1,7 +1,7 @@
 ﻿using VoxOralExam.DesktopApp.Infra.Clients.AIService;
 using VoxOralExam.DesktopApp.Infra.Devices;
 
-namespace VoxOralExam.DesktopApp.Services.ExamFlow;
+namespace VoxOralExam.DesktopApp.Services.ExamFlow.Attempt;
 
 /// <summary>
 /// Forwards TurnAudioRecorder's continuous StreamChunkAvailable PCM frames to the realtime

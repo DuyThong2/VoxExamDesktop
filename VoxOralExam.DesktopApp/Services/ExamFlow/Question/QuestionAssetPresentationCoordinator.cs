@@ -1,6 +1,6 @@
 using VoxOralExam.Core.Models;
 
-namespace VoxOralExam.DesktopApp.Services.ExamFlow;
+namespace VoxOralExam.DesktopApp.Services.ExamFlow.Question;
 
 public sealed class QuestionAssetPresentationCoordinator
 {
