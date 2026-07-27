@@ -62,6 +62,7 @@ public class MockExamDataFactory
                 Description = "Very easy primary-school English speaking mock with short answers and one slightly longer prompt to test whether follow-up works.",
                 DurationMinutes = 5,
                 ExamDate = today.AddHours(9),
+                ScheduleEndAt = today.AddHours(9).AddMinutes(5),
                 Status = "in_progress",
                 PaperQuestions =
                 [
@@ -207,6 +208,7 @@ public class MockExamDataFactory
                 Description = "Mock exam rut gon de test nhanh pipeline tung turn.",
                 DurationMinutes = 3,
                 ExamDate = today.AddDays(1).AddHours(14),
+                ScheduleEndAt = today.AddDays(1).AddHours(14).AddMinutes(3),
                 Status = "upcoming",
                 PaperQuestions =
                 [

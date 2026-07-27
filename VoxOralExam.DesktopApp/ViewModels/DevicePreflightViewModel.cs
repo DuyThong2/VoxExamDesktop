@@ -102,7 +102,6 @@ public class DevicePreflightViewModel : BaseViewModel
     public ICommand ToggleMicTestCommand { get; }
     public ICommand ToggleCameraTestCommand { get; }
 
-    
     public void CleanupDeviceTests()
     {
         StopMicTest();

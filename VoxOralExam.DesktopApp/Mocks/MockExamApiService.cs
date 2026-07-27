@@ -26,5 +26,8 @@ public class MockExamApiService : IExamApiService
 
     public Task UpdateSessionStatusAsync(Guid sessionId, string status, CancellationToken ct = default)
         => Task.CompletedTask;
+
+    public Task UpdateRemainingTimeAsync(Guid sessionId, int remainingSeconds, CancellationToken ct = default)
+        => Task.CompletedTask;
 }
 

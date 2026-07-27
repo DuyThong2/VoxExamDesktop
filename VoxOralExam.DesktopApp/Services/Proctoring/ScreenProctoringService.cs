@@ -1,10 +1,11 @@
 using System.Text.Json;
 using VoxOralExam.Core.Interfaces;
+using VoxOralExam.Core.Models;
 using VoxOralExam.DesktopApp.Infra.Clients.AIService;
 using VoxOralExam.DesktopApp.Infra.Devices;
 using VoxOralExam.DesktopApp.State;
 
-namespace VoxOralExam.DesktopApp.Services.ExamFlow;
+namespace VoxOralExam.DesktopApp.Services.Proctoring;
 
 public class ScreenProctoringService : IProctoringService, IDisposable
 {
@@ -25,7 +26,7 @@ public class ScreenProctoringService : IProctoringService, IDisposable
         _sessionState = sessionState;
     }
 
-    public async Task StartAsync()
+    public async Task StartAsync(CancellationToken cancellationToken = default)
     {
         if (_isDisposed)
         {
@@ -39,18 +40,20 @@ public class ScreenProctoringService : IProctoringService, IDisposable
 
         _webRtc.OnProctoringEvent += HandleSseEvent;
 
-        OnStatusChanged?.Invoke("Dang ket noi WebRTC...");
+        OnStatusChanged?.Invoke("Đang kết nối WebRTC...");
         var examAttemptId = _sessionState.ExamAttemptId != Guid.Empty
             ? _sessionState.ExamAttemptId.ToString("D")
             : _sessionState.SessionId;
+        cancellationToken.ThrowIfCancellationRequested();
         await _webRtc.ConnectAsync(examAttemptId);
 
-        OnStatusChanged?.Invoke("Dang khoi dong camera...");
+        OnStatusChanged?.Invoke("Đang khởi động camera...");
         _camera.OnRawFrame += OnCameraRawFrame;
+        cancellationToken.ThrowIfCancellationRequested();
         await _camera.StartAsync();
 
         _isStarted = true;
-        OnStatusChanged?.Invoke("Proctoring dang hoat dong");
+        OnStatusChanged?.Invoke("Proctoring đang hoạt động");
     }
 
     public async Task StopAsync()
@@ -70,7 +73,7 @@ public class ScreenProctoringService : IProctoringService, IDisposable
             await _webRtc.DisconnectAsync();
 
             _isStarted = false;
-            OnStatusChanged?.Invoke("Proctoring da dung");
+            OnStatusChanged?.Invoke("Proctoring đã dừng");
         }
         finally
         {

@@ -93,16 +93,30 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
     /// </summary>
     private async Task ResumeQuestionIndexIfNeededAsync(CancellationToken ct)
     {
+        _sessionState.ResumeTurnOrder = null;
+        _sessionState.ResumeActivePromptText = null;
+
         var currentAnswerId = await _attemptProgressClient.GetCurrentAnswerIdAsync(_sessionState.ExamAttemptId, ct);
         if (currentAnswerId is null)
         {
             return;
         }
 
+        var resumeState = await _attemptProgressClient.GetResumeStateAsync(
+            _sessionState.ExamAttemptId,
+            currentAnswerId.Value,
+            ct);
         var matchingQuestionId = _sessionState.AttemptAnswerIdsByQuestionId
             .Where(pair => pair.Value == currentAnswerId.Value)
             .Select(pair => (Guid?)pair.Key)
             .FirstOrDefault();
+        if (matchingQuestionId is null && resumeState?.PaperItemId is Guid paperItemId)
+        {
+            matchingQuestionId = _sessionState.PaperItemIdsByQuestionId
+                .Where(pair => pair.Value == paperItemId)
+                .Select(pair => (Guid?)pair.Key)
+                .FirstOrDefault();
+        }
         if (matchingQuestionId is null)
         {
             LocalFileLogger.Info("exam_bootstrap", "current_answer_not_in_paper", new
@@ -126,6 +140,19 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
             questionIndex = index
         });
         _sessionState.QuestionIndex = index;
+        _sessionState.AttemptAnswerIdsByQuestionId[matchingQuestionId.Value] = currentAnswerId.Value;
+
+        if (resumeState?.HasFollowUp == true)
+        {
+            _sessionState.ResumeTurnOrder = resumeState.TurnOrder;
+            _sessionState.ResumeActivePromptText = resumeState.ActivePromptText;
+            LocalFileLogger.Info("exam_bootstrap", "resuming_at_follow_up", new
+            {
+                _sessionState.ExamAttemptId,
+                currentAnswerId,
+                resumeState.TurnOrder
+            });
+        }
     }
 }
 

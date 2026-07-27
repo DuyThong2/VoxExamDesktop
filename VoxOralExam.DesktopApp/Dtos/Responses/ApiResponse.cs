@@ -1,6 +1,6 @@
 namespace VoxOralExam.DesktopApp.Dtos.Responses;
 
 public sealed record ApiResponse<T>(
-    string Message, 
+    string Message,
     T Data
 );

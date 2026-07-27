@@ -52,7 +52,7 @@ public class AppSettings
     public int UploadCredentialRefreshLeadMinutes { get; set; } = 10;
     public string RealtimeWebSocketPath { get; set; } = "/realtime/attempts";
     public string AvatarWebRtcOfferPath { get; set; } = "/avatar/webrtc/offer";
-    public int MaxTurnsPerQuestion { get; set; } = 5;
+    public int MaxTurnsPerQuestion { get; set; } = 10;
     public int QuestionTurnTimeoutSeconds { get; set; } = 180;
     public int InitialSilenceTimeoutSeconds { get; set; } = 12;
     public int SilenceTimeoutAfterRepeatSeconds { get; set; } = 18;
@@ -64,6 +64,10 @@ public class AppSettings
     public int CameraWidth { get; set; } = 640;
     public int CameraHeight { get; set; } = 480;
     public int CameraFps { get; set; } = 30;
+    public string StunUrls { get; set; } = "stun:stun.l.google.com:19302";
+    public string TurnUrl { get; set; } = "";
+    public string TurnUsername { get; set; } = "";
+    public string TurnCredential { get; set; } = "";
     public string LoginPlatform { get; set; } = "DESKTOP";
 
     // Length of the OTP the proctor's screen shows and the student types.

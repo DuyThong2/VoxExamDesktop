@@ -38,6 +38,7 @@ public class MockExamEntryApiService : IExamEntryApiService
             StreamTokenExpiresAt = DateTimeOffset.UtcNow.AddHours(2),
             TicketId = Guid.NewGuid().ToString("N"),
             ExpiresAt = DateTime.UtcNow.AddHours(2),
+            ScheduleEndAt = DateTime.UtcNow.AddMinutes(30),
         };
     }
 }

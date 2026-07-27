@@ -7,10 +7,10 @@ using VoxOralExam.DesktopApp.State;
 namespace VoxOralExam.DesktopApp.Infra.Clients.StreamService;
 
 public sealed record StudentStreamAccess(
-    string Token, 
-    string ScheduleId, 
-    string SessionId, 
-    IReadOnlyList<string> StreamTypes, 
+    string Token,
+    string ScheduleId,
+    string SessionId,
+    IReadOnlyList<string> StreamTypes,
     DateTimeOffset ExpiresAt
 );
 
@@ -38,7 +38,7 @@ public sealed class StudentStreamAccessClient
 
         request.Content = JsonContent.Create(new
         {
-            examSessionId, 
+            examSessionId,
             streamType = preferredStreamType
         });
 

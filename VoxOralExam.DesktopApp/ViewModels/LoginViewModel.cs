@@ -99,7 +99,7 @@ public class LoginViewModel : BaseViewModel
         }
         catch (Exception ex)
         {
-            ErrorMessage = $"Dang nhap that bai: {ex.Message}";
+            ErrorMessage = $"Đăng nhập thất bại: {ex.Message}";
             HasError = true;
             LocalFileLogger.Error("login", "login_failed", ex, new
             {

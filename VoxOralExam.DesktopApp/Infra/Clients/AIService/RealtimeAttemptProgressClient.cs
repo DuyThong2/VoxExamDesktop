@@ -7,6 +7,12 @@ using VoxOralExam.DesktopApp.Services;
 
 namespace VoxOralExam.DesktopApp.Infra.Clients.AIService;
 
+public sealed record AttemptResumeState(
+    int TurnOrder,
+    string? ActivePromptText,
+    bool HasFollowUp,
+    Guid? PaperItemId);
+
 /// <summary>
 /// GET /realtime/attempts/{examAttemptId}/current-answer (agents/src/controller/realtime_controller.py)
 /// -- lets ExamSessionBootstrapService find out which question an attempt was last on, for a
@@ -47,10 +53,62 @@ public class RealtimeAttemptProgressClient
         }
     }
 
+    public async Task<AttemptResumeState?> GetResumeStateAsync(
+        Guid examAttemptId,
+        Guid answerId,
+        CancellationToken ct)
+    {
+        try
+        {
+            var client = _httpClientFactory.CreateClient();
+            var url =
+                $"{_settings.PythonBaseUrl.TrimEnd('/')}/realtime/attempts/{examAttemptId:D}/resume-state"
+                + $"?answer_id={Uri.EscapeDataString(answerId.ToString("D"))}";
+            var result = await client.GetFromJsonAsync<ResumeStateResponse>(url, ct);
+            if (result is null)
+            {
+                return null;
+            }
+
+            return new AttemptResumeState(
+                Math.Max(1, result.TurnOrder),
+                result.ActivePromptText,
+                result.HasFollowUp,
+                result.PaperItemId is string rawPaperItemId
+                    && Guid.TryParse(rawPaperItemId, out var paperItemId)
+                        ? paperItemId
+                        : null);
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error(
+                "exam_bootstrap",
+                "get_resume_state_failed",
+                ex,
+                new { examAttemptId, answerId });
+            return null;
+        }
+    }
+
     private sealed class CurrentAnswerResponse
     {
         [JsonPropertyName("answer_id")]
         public string? AnswerId { get; set; }
+    }
+
+    private sealed class ResumeStateResponse
+    {
+        [JsonPropertyName("turnOrder")]
+        public int TurnOrder { get; set; }
+
+        [JsonPropertyName("activePromptText")]
+        public string? ActivePromptText { get; set; }
+
+        [JsonPropertyName("hasFollowUp")]
+        public bool HasFollowUp { get; set; }
+
+        [JsonPropertyName("paperItemId")]
+        public string? PaperItemId { get; set; }
     }
 }
 

@@ -19,7 +19,10 @@ using VoxOralExam.DesktopApp.Services.DomainService.Impl;
 using VoxOralExam.DesktopApp.Services.EntryFlow;
 using VoxOralExam.DesktopApp.Services.EntryFlow.Impl;
 using VoxOralExam.DesktopApp.Services.ExamFlow;
+using VoxOralExam.DesktopApp.Services.ExamFlow.Attempt;
 using VoxOralExam.DesktopApp.Services.ExamFlow.Impl;
+using VoxOralExam.DesktopApp.Services.ExamFlow.Question;
+using VoxOralExam.DesktopApp.Services.Proctoring;
 using VoxOralExam.DesktopApp.State;
 using VoxOralExam.DesktopApp.ViewModels;
 using VoxOralExam.DesktopApp.Workers;
@@ -43,6 +46,12 @@ public partial class App : Application
         TaskScheduler.UnobservedTaskException += TaskScheduler_UnobservedTaskException;
 
         DotEnvLoader.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".env"));
+        // .env.local (gitignored, optional) loads on top and wins on any key it sets -- lets
+        // local dev point JAVA_BASE_URL/PYTHON_BASE_URL/etc at localhost without ever touching
+        // the shared .env (which stays pointed at the live deployment), so switching between
+        // "test against prod" and "run everything local" never requires editing .env back and
+        // forth.
+        DotEnvLoader.Load(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, ".env.local"));
 
         _configuration = new ConfigurationBuilder()
             .SetBasePath(AppDomain.CurrentDomain.BaseDirectory)
@@ -197,7 +206,8 @@ public partial class App : Application
         services.AddSingleton(sp =>
             new WebRtcClient(
                 sp.GetRequiredService<IHttpClientFactory>(),
-                settings.PythonBaseUrl));
+                settings.PythonBaseUrl,
+                settings));
 
         services.AddSingleton<RecordingClock>();
         services.AddSingleton<CameraService>();
@@ -266,8 +276,8 @@ public partial class App : Application
         services.AddSingleton<LocalAvatarSpeaker>();
         services.AddSingleton<RealtimeSessionClient>();
         services.AddSingleton<AvatarWebRtcClient>();
-        services.AddSingleton<MicAudioStreamer>();
         services.AddSingleton<QuestionAssetPresentationCoordinator>();
+        services.AddSingleton<ExamAttemptRunnerFactory>();
         services.AddSingleton<RealtimeExamFlowService>();
         services.AddSingleton<IExamFlowService>(sp => sp.GetRequiredService<RealtimeExamFlowService>());
 
@@ -332,7 +342,7 @@ public partial class App : Application
                     await examFlow.StopAsync();
                 }
 
-                var proctoring = _services.GetService<ScreenProctoringService>();
+                var proctoring = _services.GetService<IProctoringService>();
                 if (proctoring is not null)
                 {
                     await proctoring.StopAsync();

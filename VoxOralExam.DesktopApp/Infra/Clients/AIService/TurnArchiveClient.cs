@@ -51,6 +51,10 @@ public class TurnArchiveClient
         content.Add(new StringContent(request.TurnOrder.ToString()), "turn_order");
         content.Add(new StringContent(request.PromptText), "prompt_text");
         content.Add(new StringContent(request.Language), "language");
+        if (request.DurationSeconds.HasValue)
+        {
+            content.Add(new StringContent(request.DurationSeconds.Value.ToString(System.Globalization.CultureInfo.InvariantCulture)), "duration_seconds");
+        }
         content.Add(new StringContent(JsonSerializer.Serialize(request.Question), Encoding.UTF8), "question");
 
         httpRequest.Content = content;

@@ -61,7 +61,7 @@ public class CameraService : IDisposable
         return Task.CompletedTask;
     }
 
-    
+
     public void Stop()
     {
         if (_isDisposed)
@@ -85,7 +85,7 @@ public class CameraService : IDisposable
         }
     }
 
-    
+
     private async Task CaptureLoop(CancellationToken ct)
     {
         var frameInterval = TimeSpan.FromMilliseconds(1000.0 / _settings.CameraFps);
@@ -110,12 +110,12 @@ public class CameraService : IDisposable
                 var width = frame.Width;
                 var height = frame.Height;
 
-                
+
                 var rawBytes = new byte[width * height * 3];
                 System.Runtime.InteropServices.Marshal.Copy(frame.Data, rawBytes, 0, rawBytes.Length);
                 var capturedAt = _recordingClock.Elapsed;
 
-                
+
                 if (_frameCount == 0)
                 {
                     bool allZero = rawBytes.All(b => b == 0);
@@ -149,7 +149,7 @@ public class CameraService : IDisposable
                     LocalFileLogger.Error("camera", "raw_frame_consumer_failed", ex);
                 }
 
-                
+
                 var bitmapImage = MatToBitmapImage(frame);
                 try
                 {

@@ -1,4 +1,5 @@
-﻿using NAudio.Wave;
+using System.Diagnostics;
+using NAudio.Wave;
 
 using VoxOralExam.DesktopApp.Services;
 
@@ -11,10 +12,13 @@ public sealed class TurnAudioRecorder : IDisposable
     private readonly List<byte> _turnBuffer = [];
     private readonly int _preBufferBytes;
     private readonly int _deviceNumber;
+    private readonly Stopwatch _turnStopwatch = new();
 
     private WaveInEvent? _waveIn;
     private bool _isTurnActive;
     private bool _isStarted;
+    private bool _isMuted;
+    private double _lastTurnDurationSeconds;
 
     /// <summary>
     /// Fires for every captured chunk regardless of turn-active state (Phase 5 of
@@ -129,6 +133,8 @@ public sealed class TurnAudioRecorder : IDisposable
             _preBuffer.Clear();
             _turnBuffer.Clear();
             _isTurnActive = false;
+            _turnStopwatch.Reset();
+            _lastTurnDurationSeconds = 0;
         }
 
         _isStarted = false;
@@ -153,6 +159,35 @@ public sealed class TurnAudioRecorder : IDisposable
         }
     }
 
+    public bool IsMuted
+    {
+        get
+        {
+            lock (_syncLock)
+            {
+                return _isMuted;
+            }
+        }
+        set
+        {
+            lock (_syncLock)
+            {
+                _isMuted = value;
+            }
+        }
+    }
+
+    public double LastTurnDurationSeconds
+    {
+        get
+        {
+            lock (_syncLock)
+            {
+                return _lastTurnDurationSeconds;
+            }
+        }
+    }
+
     public void BeginTurnCapture()
     {
         lock (_syncLock)
@@ -160,6 +195,7 @@ public sealed class TurnAudioRecorder : IDisposable
             _turnBuffer.Clear();
             _turnBuffer.AddRange(_preBuffer);
             _isTurnActive = true;
+            _turnStopwatch.Restart();
             LocalFileLogger.Info("turn_audio", "turn_capture_began", new
             {
                 deviceNumber = _deviceNumber,
@@ -173,12 +209,19 @@ public sealed class TurnAudioRecorder : IDisposable
         lock (_syncLock)
         {
             var buffer = _turnBuffer.ToArray();
+            if (_turnStopwatch.IsRunning)
+            {
+                _turnStopwatch.Stop();
+            }
+            _lastTurnDurationSeconds = Math.Round(Math.Max(0, _turnStopwatch.Elapsed.TotalSeconds), 2);
+            _turnStopwatch.Reset();
             _turnBuffer.Clear();
             _isTurnActive = false;
             LocalFileLogger.Info("turn_audio", "turn_capture_completed", new
             {
                 deviceNumber = _deviceNumber,
-                capturedBytes = buffer.Length
+                capturedBytes = buffer.Length,
+                durationSeconds = _lastTurnDurationSeconds
             });
             return buffer;
         }
@@ -194,9 +237,10 @@ public sealed class TurnAudioRecorder : IDisposable
         byte[]? streamChunk = null;
         lock (_syncLock)
         {
+            var effectiveBuffer = _isMuted ? new byte[e.BytesRecorded] : e.Buffer;
             for (var index = 0; index < e.BytesRecorded; index++)
             {
-                _preBuffer.Enqueue(e.Buffer[index]);
+                _preBuffer.Enqueue(effectiveBuffer[index]);
             }
 
             while (_preBuffer.Count > _preBufferBytes)
@@ -206,12 +250,12 @@ public sealed class TurnAudioRecorder : IDisposable
 
             if (_isTurnActive)
             {
-                _turnBuffer.AddRange(e.Buffer.AsSpan(0, e.BytesRecorded).ToArray());
+                _turnBuffer.AddRange(effectiveBuffer.AsSpan(0, e.BytesRecorded).ToArray());
             }
 
             if (StreamChunkAvailable is not null)
             {
-                streamChunk = e.Buffer.AsSpan(0, e.BytesRecorded).ToArray();
+                streamChunk = effectiveBuffer.AsSpan(0, e.BytesRecorded).ToArray();
             }
         }
 
@@ -231,4 +275,3 @@ public sealed class TurnAudioRecorder : IDisposable
         }
     }
 }
-
