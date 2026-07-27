@@ -1,0 +1,81 @@
+<Window x:Class="VoxOralExam.DesktopApp.Views.StreamingDemoWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:converters="clr-namespace:VoxOralExam.DesktopApp.Converters"
+        Title="Vox Streaming Demo (dev only)"
+        Height="720" Width="960"
+        MinHeight="560" MinWidth="760"
+        WindowStartupLocation="CenterScreen"
+        Background="#F5F5F5">
+    <Window.Resources>
+        <converters:InverseBooleanConverter x:Key="InverseBooleanConverter" />
+    </Window.Resources>
+    <Grid Margin="20">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="340" />
+            <ColumnDefinition Width="20" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <!-- Left: session inputs + controls, mirrors demo/web/student.html's form -->
+        <StackPanel Grid.Column="0">
+            <TextBlock Text="Streaming demo (dev only)" FontSize="20" FontWeight="Bold" />
+            <TextBlock Text="Không cần dữ liệu bài thi thật -- màn hình này chỉ dùng để test luồng ghi hình + upload segment sang vox-streaming."
+                       FontSize="12" Foreground="Gray" TextWrapping="Wrap" Margin="0,6,0,20" />
+
+            <TextBlock Text="Schedule Id" FontSize="12" FontWeight="SemiBold" Margin="0,0,0,4" />
+            <TextBox Text="{Binding ScheduleId, UpdateSourceTrigger=PropertyChanged}"
+                     Padding="8,6" FontSize="13" IsEnabled="{Binding IsRecording, Converter={StaticResource InverseBooleanConverter}}" />
+
+            <TextBlock Text="User Id (candidate)" FontSize="12" FontWeight="SemiBold" Margin="0,14,0,4" />
+            <TextBox Text="{Binding UserId, UpdateSourceTrigger=PropertyChanged}"
+                     Padding="8,6" FontSize="13" IsEnabled="{Binding IsRecording, Converter={StaticResource InverseBooleanConverter}}" />
+
+            <StackPanel Orientation="Horizontal" Margin="0,16,0,0">
+                <CheckBox Content="Camera" IsChecked="{Binding IncludeCamera}"
+                          IsEnabled="{Binding IsRecording, Converter={StaticResource InverseBooleanConverter}}" Margin="0,0,20,0" />
+                <CheckBox Content="Screen" IsChecked="{Binding IncludeScreen}"
+                          IsEnabled="{Binding IsRecording, Converter={StaticResource InverseBooleanConverter}}" />
+            </StackPanel>
+
+            <StackPanel Orientation="Horizontal" Margin="0,20,0,0">
+                <Button Content="Bắt đầu" Command="{Binding StartCommand}"
+                        Padding="18,8" Background="#16A34A" Foreground="White" BorderThickness="0" Margin="0,0,10,0" />
+                <Button Content="Dừng" Command="{Binding StopCommand}" Padding="18,8" />
+            </StackPanel>
+
+            <TextBlock Text="{Binding StatusText}" FontSize="12" Foreground="#475569"
+                       Margin="0,16,0,0" TextWrapping="Wrap" />
+
+            <Border Height="200" Margin="0,16,0,0" Background="#0F172A" CornerRadius="8"
+                    BorderBrush="#CBD5E1" BorderThickness="1">
+                <Grid>
+                    <Image Source="{Binding CameraPreview}" Stretch="UniformToFill" />
+                    <TextBlock Text="Camera preview" Foreground="White"
+                               HorizontalAlignment="Center" VerticalAlignment="Center">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding CameraPreview}" Value="{x:Null}">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+                </Grid>
+            </Border>
+        </StackPanel>
+
+        <!-- Right: rolling log, mirrors demo/web pages' <div class="log"> -->
+        <Border Grid.Column="2" Background="White" CornerRadius="8" Padding="14"
+                BorderBrush="#CBD5E1" BorderThickness="1">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Top" Text="Log" FontWeight="SemiBold" Margin="0,0,0,8" />
+                <ListBox ItemsSource="{Binding LogEntries}" FontFamily="Consolas" FontSize="12"
+                         BorderThickness="0" Background="Transparent" />
+            </DockPanel>
+        </Border>
+    </Grid>
+</Window>

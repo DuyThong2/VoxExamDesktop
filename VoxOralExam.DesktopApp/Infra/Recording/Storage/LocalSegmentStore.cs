@@ -1,0 +1,475 @@
+using System.IO;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using VoxOralExam.Core.Models;
+
+namespace VoxOralExam.DesktopApp.Infra.Recording.Storage;
+
+public sealed class LocalSegmentStore
+{
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        WriteIndented = true,
+        Converters = { new JsonStringEnumConverter() }
+    };
+
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private RecordingManifest? _manifest;
+    private string? _attemptDirectory;
+    private string? _manifestPath;
+
+    public string BaseDirectory { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "Vox",
+        "Recordings");
+
+    public async Task InitializeAsync(
+        RecordingSessionContext context,
+        CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            _manifest = null;
+            _attemptDirectory = Path.Combine(BaseDirectory, context.AttemptId.ToString("D"));
+            _manifestPath = Path.Combine(_attemptDirectory, "recording.json");
+            Directory.CreateDirectory(_attemptDirectory);
+            Directory.CreateDirectory(Path.Combine(_attemptDirectory, "camera"));
+            Directory.CreateDirectory(Path.Combine(_attemptDirectory, "screen"));
+
+            foreach (var partial in Directory.EnumerateFiles(
+                         _attemptDirectory,
+                         "*.partial.mp4",
+                         SearchOption.AllDirectories))
+            {
+                try
+                {
+                    File.Delete(partial);
+                }
+                catch
+                {
+                    // A stale partial is never uploaded; keep initializing the valid manifest.
+                }
+            }
+
+            if (File.Exists(_manifestPath))
+            {
+                await using var input = File.OpenRead(_manifestPath);
+                _manifest = await JsonSerializer.DeserializeAsync<RecordingManifest>(
+                    input,
+                    JsonOptions,
+                    ct);
+            }
+
+            if (_manifest is not null &&
+                (_manifest.AttemptId != context.AttemptId ||
+                 !string.Equals(_manifest.ScheduleId, context.ScheduleId, StringComparison.Ordinal) ||
+                 !string.Equals(_manifest.SessionId, context.SessionId, StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException("The recording manifest belongs to a different exam session.");
+            }
+
+            _manifest ??= new RecordingManifest
+            {
+                AttemptId = context.AttemptId,
+                ScheduleId = context.ScheduleId,
+                SessionId = context.SessionId
+            };
+
+            foreach (var segment in _manifest.Segments.Where(
+                         segment => segment.State == SegmentUploadState.Uploading))
+            {
+                segment.State = SegmentUploadState.Pending;
+            }
+
+            await SaveManifestUnsafeAsync(ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<long> GetNextSequenceAsync(string streamId, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var sequences = _manifest?.Segments
+                .Where(segment => string.Equals(segment.StreamId, streamId, StringComparison.Ordinal))
+                .Select(segment => segment.Sequence)
+                .ToArray() ?? [];
+            return sequences.Length == 0 ? 0 : sequences.Max() + 1;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public void EnsureFreeSpace(long requiredBytes)
+    {
+        var available = AvailableFreeSpace();
+        if (available < requiredBytes)
+        {
+            throw new IOException(
+                $"Not enough free space for recording. Required {requiredBytes} bytes, " +
+                $"available {available} bytes.");
+        }
+    }
+
+    /// <summary>
+    /// Free space on the recording drive right now. Separate from <see cref="EnsureFreeSpace"/>
+    /// because the check that matters is not the one at the start: an attempt only needs a couple of
+    /// gigabytes free to begin, but two streams at their configured bitrates write roughly that much
+    /// every hour, and an attempt whose segments cannot be uploaded keeps every one of them on disk.
+    /// </summary>
+    public long AvailableFreeSpace()
+    {
+        Directory.CreateDirectory(BaseDirectory);
+        var root = Path.GetPathRoot(Path.GetFullPath(BaseDirectory))
+            ?? throw new InvalidOperationException("Cannot resolve the recording drive.");
+        return new DriveInfo(root).AvailableFreeSpace;
+    }
+
+    public string CreatePartialPath(
+        RecordingStreamType streamType,
+        string streamId,
+        long sequence)
+    {
+        var attemptDirectory = _attemptDirectory
+            ?? throw new InvalidOperationException("The segment store is not initialized.");
+        var streamDirectory = Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(streamId)))
+            .ToLowerInvariant()[..16];
+        var directory = Path.Combine(
+            attemptDirectory,
+            ToWireValue(streamType),
+            streamDirectory);
+        Directory.CreateDirectory(directory);
+        return Path.Combine(directory, $"{sequence:D6}.partial.mp4");
+    }
+
+    public async Task<CompletedSegment> CommitAsync(
+        string streamId,
+        RecordingStreamType streamType,
+        long sequence,
+        string partialPath,
+        DateTimeOffset startedAt,
+        DateTimeOffset endedAt,
+        long framesWritten = 0,
+        CancellationToken ct = default)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var attemptDirectory = _attemptDirectory
+                ?? throw new InvalidOperationException("The segment store is not initialized.");
+            var manifest = _manifest
+                ?? throw new InvalidOperationException("The segment manifest is not initialized.");
+
+            var readyPath = partialPath.Replace(
+                ".partial.mp4",
+                ".mp4",
+                StringComparison.OrdinalIgnoreCase);
+            File.Move(partialPath, readyPath, overwrite: true);
+
+            await using var input = new FileStream(
+                readyPath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                64 * 1024,
+                useAsync: true);
+            var hash = Convert.ToHexString(
+                    await SHA256.HashDataAsync(input, ct))
+                .ToLowerInvariant();
+            var size = input.Length;
+
+            manifest.Segments.RemoveAll(segment =>
+                segment.StreamId == streamId && segment.Sequence == sequence);
+            manifest.Segments.Add(new StoredSegment
+            {
+                StreamId = streamId,
+                StreamType = ToWireValue(streamType),
+                Sequence = sequence,
+                RelativePath = Path.GetRelativePath(attemptDirectory, readyPath),
+                StartedAt = startedAt,
+                EndedAt = endedAt,
+                Sha256 = hash,
+                SizeBytes = size,
+                FramesWritten = framesWritten,
+                State = SegmentUploadState.Pending
+            });
+
+            await SaveManifestUnsafeAsync(ct);
+
+            return new CompletedSegment(
+                streamId,
+                streamType,
+                sequence,
+                readyPath,
+                startedAt,
+                endedAt,
+                size,
+                hash,
+                framesWritten);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<IReadOnlyList<CompletedSegment>> GetPendingSegmentsAsync(
+        IReadOnlySet<string> streamIds,
+        CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var manifest = _manifest;
+            var attemptDirectory = _attemptDirectory;
+            if (manifest is null || attemptDirectory is null)
+            {
+                return [];
+            }
+
+            return manifest.Segments
+                .Where(segment => segment.State is SegmentUploadState.Pending or SegmentUploadState.Failed)
+                .Where(segment => streamIds.Contains(segment.StreamId))
+                .OrderBy(segment => segment.StreamId, StringComparer.Ordinal)
+                .ThenBy(segment => segment.Sequence)
+                .Select(segment => ToCompletedSegment(segment, attemptDirectory))
+                .Where(segment => File.Exists(segment.FilePath))
+                .ToArray();
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public Task MarkUploadingAsync(CompletedSegment segment, CancellationToken ct) =>
+        UpdateStateAsync(segment, SegmentUploadState.Uploading, null, ct);
+
+    public Task MarkAcknowledgedAsync(CompletedSegment segment, CancellationToken ct) =>
+        UpdateStateAsync(segment, SegmentUploadState.Acknowledged, null, ct);
+
+    public Task MarkFailedAsync(
+        CompletedSegment segment,
+        string error,
+        CancellationToken ct) =>
+        UpdateStateAsync(segment, SegmentUploadState.Failed, error, ct);
+
+    /// <summary>
+    /// Records that the server refused this segment because it already holds different bytes under
+    /// the same sequence number. Terminal -- see SegmentUploadState.Conflicted.
+    ///
+    /// The local file is deliberately left on disk rather than deleted the way an acknowledged one
+    /// is: it is the only copy of the diverging bytes, and it is the evidence anyone investigating
+    /// the disagreement will need.
+    /// </summary>
+    public Task MarkConflictedAsync(
+        CompletedSegment segment,
+        string reason,
+        CancellationToken ct) =>
+        UpdateStateAsync(segment, SegmentUploadState.Conflicted, reason, ct);
+
+    /// <summary>
+    /// Persists the credentials this attempt's streams were opened with, so a run that never gets
+    /// to finish leaves behind everything a later one needs to pick up where it stopped. Replaces
+    /// any earlier record for the same stream, which is what makes a refreshed credential land here
+    /// rather than alongside the stale one.
+    /// </summary>
+    public async Task SaveUploadSessionsAsync(
+        IReadOnlyCollection<StoredUploadSession> sessions,
+        CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (_manifest is null)
+            {
+                return;
+            }
+
+            foreach (var session in sessions)
+            {
+                _manifest.UploadSessions.RemoveAll(existing =>
+                    string.Equals(existing.StreamId, session.StreamId, StringComparison.Ordinal));
+                _manifest.UploadSessions.Add(session);
+            }
+
+            await SaveManifestUnsafeAsync(ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Records that /complete succeeded for this stream, so a later run does not try to finish an
+    /// already finalized one (vox-streaming answers that 409, and the stream is done regardless).
+    /// </summary>
+    public async Task MarkUploadSessionCompletedAsync(string streamId, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var session = _manifest?.UploadSessions.FirstOrDefault(candidate =>
+                string.Equals(candidate.StreamId, streamId, StringComparison.Ordinal));
+            if (session is null || session.Completed)
+            {
+                return;
+            }
+
+            session.Completed = true;
+            await SaveManifestUnsafeAsync(ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    /// <summary>
+    /// Everything this device has captured for a stream, uploaded or not.
+    ///
+    /// Read from the manifest rather than from what has been acknowledged, because that is the whole
+    /// point: the server can already see what arrived, and what it cannot see -- and cannot infer
+    /// once this process dies -- is what was supposed to arrive.
+    /// </summary>
+    public async Task<IReadOnlyList<DeclaredSegment>> GetDeclaredSegmentsAsync(
+        string streamId,
+        CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (_manifest is null)
+            {
+                return [];
+            }
+
+            return [.. _manifest.Segments
+                .Where(segment => string.Equals(segment.StreamId, streamId, StringComparison.Ordinal))
+                .OrderBy(segment => segment.Sequence)
+                .Select(segment => new DeclaredSegment(
+                    segment.Sequence,
+                    segment.StartedAt,
+                    segment.EndedAt,
+                    segment.Sha256,
+                    segment.SizeBytes,
+                    segment.FramesWritten))];
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    public async Task<int> GetOutstandingCountAsync(IReadOnlySet<string> streamIds, CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            if (_manifest is null || _attemptDirectory is null)
+            {
+                return 0;
+            }
+            // Conflicted counts as settled, not outstanding: the server already has a segment for
+            // that sequence, no retry can ever change the answer, and counting it would block
+            // /complete for this stream permanently. See SegmentUploadState.Conflicted.
+            return _manifest.Segments.Count(segment =>
+                streamIds.Contains(segment.StreamId) &&
+                segment.State is not (SegmentUploadState.Acknowledged or SegmentUploadState.Conflicted) &&
+                File.Exists(Path.GetFullPath(Path.Combine(_attemptDirectory, segment.RelativePath))));
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task UpdateStateAsync(
+        CompletedSegment completed,
+        SegmentUploadState state,
+        string? error,
+        CancellationToken ct)
+    {
+        await _gate.WaitAsync(ct);
+        try
+        {
+            var segment = _manifest?.Segments.FirstOrDefault(candidate =>
+                candidate.StreamId == completed.StreamId &&
+                candidate.Sequence == completed.Sequence);
+            if (segment is null)
+            {
+                return;
+            }
+
+            segment.State = state;
+            segment.LastError = error;
+            await SaveManifestUnsafeAsync(ct);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    private async Task SaveManifestUnsafeAsync(CancellationToken ct)
+    {
+        var manifest = _manifest
+            ?? throw new InvalidOperationException("The segment manifest is not initialized.");
+        var path = _manifestPath
+            ?? throw new InvalidOperationException("The manifest path is not initialized.");
+        var temporaryPath = path + ".tmp";
+
+        await using (var output = new FileStream(
+                         temporaryPath,
+                         FileMode.Create,
+                         FileAccess.Write,
+                         FileShare.None,
+                         16 * 1024,
+                         useAsync: true))
+        {
+            await JsonSerializer.SerializeAsync(output, manifest, JsonOptions, ct);
+            await output.FlushAsync(ct);
+        }
+
+        File.Move(temporaryPath, path, overwrite: true);
+    }
+
+    private static CompletedSegment ToCompletedSegment(
+        StoredSegment stored,
+        string attemptDirectory)
+    {
+        var streamType = string.Equals(
+            stored.StreamType,
+            "camera",
+            StringComparison.OrdinalIgnoreCase)
+            ? RecordingStreamType.Camera
+            : RecordingStreamType.Screen;
+        var path = Path.GetFullPath(Path.Combine(attemptDirectory, stored.RelativePath));
+        var size = File.Exists(path) ? new FileInfo(path).Length : 0;
+
+        return new CompletedSegment(
+            stored.StreamId,
+            streamType,
+            stored.Sequence,
+            path,
+            stored.StartedAt,
+            stored.EndedAt,
+            size,
+            stored.Sha256,
+            stored.FramesWritten);
+    }
+
+    private static string ToWireValue(RecordingStreamType streamType) =>
+        streamType == RecordingStreamType.Camera ? "camera" : "screen";
+}

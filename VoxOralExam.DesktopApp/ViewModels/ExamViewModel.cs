@@ -26,6 +26,8 @@ public class ExamViewModel : BaseViewModel
     private readonly AvatarWebRtcClient _avatarClient;
     private readonly IExamApiService _examApi;
     private readonly QuestionAssetPresentationCoordinator _assetPresentationCoordinator;
+    private readonly IExamRecordingService _recording;
+    private readonly AppSettings _settings;
 
     private string _studentName = string.Empty;
     private string _studentId = string.Empty;
@@ -51,6 +53,7 @@ public class ExamViewModel : BaseViewModel
     private bool _isStudentSpeaking;
     private bool _isCameraOn;
     private bool _isCleaningUp;
+    private bool _examCompleted;
     private Task? _cleanupTask;
     private QuestionAsset? _currentQuestionAsset;
     private BitmapImage? _currentQuestionAssetImage;
@@ -68,7 +71,9 @@ public class ExamViewModel : BaseViewModel
         IExamFlowService examFlow,
         AvatarWebRtcClient avatarClient,
         IExamApiService examApi,
-        QuestionAssetPresentationCoordinator assetPresentationCoordinator)
+        QuestionAssetPresentationCoordinator assetPresentationCoordinator,
+        IExamRecordingService recording,
+        AppSettings settings)
     {
         _camera = camera;
         _proctoring = proctoring;
@@ -77,6 +82,8 @@ public class ExamViewModel : BaseViewModel
         _avatarClient = avatarClient;
         _examApi = examApi;
         _assetPresentationCoordinator = assetPresentationCoordinator;
+        _recording = recording;
+        _settings = settings;
 
         LoadSessionData();
 
@@ -90,6 +97,7 @@ public class ExamViewModel : BaseViewModel
         _examFlow.OnQuestionSpeakingTimeChanged += HandleQuestionSpeakingTimeChanged;
         _assetPresentationCoordinator.OnAssetDisplayRequested += HandleAssetDisplayRequested;
         _avatarClient.OnVideoFrame += HandleAvatarVideoFrame;
+        _recording.StatusChanged += HandleRecordingStatusChanged;
         _isMicMuted = _examFlow.IsMicMuted;
         ToggleMuteCommand = new RelayCommand(ToggleMute);
         SubmitNowCommand = new RelayCommand(SubmitNowClicked);
@@ -294,6 +302,51 @@ public class ExamViewModel : BaseViewModel
 
         _initialized = true;
         await EnsureExamLoadedAsync();
+
+        try
+        {
+            var ticket = _sessionState.EntryTicket
+                ?? throw new InvalidOperationException("Exam entry ticket is missing.");
+            RecordingStreamType[] streamTypes = ticket.StreamTypes.Count == 0
+                ? [RecordingStreamType.Camera, RecordingStreamType.Screen]
+                : ticket.StreamTypes
+                    .Select(value => value.Trim().ToLowerInvariant())
+                    .Select(value => value switch
+                    {
+                        "camera" => RecordingStreamType.Camera,
+                        "screen" => RecordingStreamType.Screen,
+                        _ => throw new InvalidOperationException($"Unsupported stream type: {value}")
+                    })
+                    .Distinct()
+                    .ToArray();
+
+            await _recording.StartAsync(
+                new RecordingSessionContext(
+                    ticket.AttemptId,
+                    string.IsNullOrWhiteSpace(ticket.ScheduleId)
+                        ? "local"
+                        : ticket.ScheduleId,
+                    string.IsNullOrWhiteSpace(ticket.SessionId)
+                        ? ticket.AttemptId.ToString("D")
+                        : ticket.SessionId,
+                    ticket.StreamJwt,
+                    streamTypes),
+                CancellationToken.None);
+            if (_settings.RequireRecording && !_recording.IsRecording)
+            {
+                throw new InvalidOperationException("Recording is required before the exam can start.");
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("recording", "exam_recording_start_failed", ex);
+            AddLog($"Local recording could not start: {ex.Message}", LogType.Warning);
+            if (_settings.RequireRecording)
+            {
+                throw;
+            }
+        }
+
         PrepareProctoringUi();
         await _examFlow.StartAsync(CancellationToken.None);
     }
@@ -332,6 +385,12 @@ public class ExamViewModel : BaseViewModel
         {
             _countdownTimer?.Stop();
             await _examFlow.StopAsync();
+            await _recording.StopAsync(
+                _examCompleted ? RecordingStopReason.Submitted : RecordingStopReason.UserClosed,
+                CancellationToken.None);
+            // ExamWindow is always the last window in the real exam flow -- safe to tear down the
+            // shared upload worker here rather than leaving it for App.xaml.cs's OnExit fallback.
+            await _recording.ShutdownAsync();
             _examFlow.OnQuestionPresented -= HandleQuestionPresented;
             _examFlow.OnTranscriptAppended -= HandleTranscriptAppended;
             _examFlow.OnStatusChanged -= HandleExamStatusChanged;
@@ -345,6 +404,7 @@ public class ExamViewModel : BaseViewModel
             _camera.OnPreviewFrame -= HandlePreviewFrame;
             _proctoring.OnStatusChanged -= HandleProctoringStatusChanged;
             _proctoring.OnProctoringEvent -= HandleProctoringEvent;
+            _recording.StatusChanged -= HandleRecordingStatusChanged;
         }
         finally
         {
@@ -527,7 +587,7 @@ public class ExamViewModel : BaseViewModel
         }
 
         var confirmed = MessageBox.Show(
-            "ạn chắc chắn muốn nộp bài ngay bây giờ? Các câu hỏi chưa trả lời sẽ được tính là chưa trả lời và không thể làm lại.",
+            "Bạn chắc chắn muốn nộp bài ngay bây giờ? Các câu hỏi chưa trả lời sẽ được tính là chưa trả lời và không thể làm lại.",
             "Xác nhận nộp bài",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning) == MessageBoxResult.Yes;
@@ -609,6 +669,7 @@ public class ExamViewModel : BaseViewModel
 
     private void HandleExamEnded(bool succeeded)
     {
+        _examCompleted = succeeded;
         Application.Current.Dispatcher.Invoke(() =>
         {
             ShowSubmittedOverlay = succeeded;
@@ -628,6 +689,14 @@ public class ExamViewModel : BaseViewModel
         });
 
         _ = CloseWindowAfterDelayAsync(succeeded ? 4 : 6);
+    }
+
+    private void HandleRecordingStatusChanged(RecordingStatus status)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            AddLog(status.Message, status.IsDegraded ? LogType.Warning : LogType.Info);
+        });
     }
 
     private async Task CloseWindowAfterDelayAsync(int seconds)

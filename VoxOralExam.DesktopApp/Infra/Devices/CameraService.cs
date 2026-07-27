@@ -1,31 +1,32 @@
 ﻿using System.Windows.Media.Imaging;
 using OpenCvSharp;
 using OpenCvSharp.Extensions;
+using VoxOralExam.DesktopApp.Infra.Recording;
+using VoxOralExam.DesktopApp.Services;
 using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.Infra.Devices;
 
-/// <summary>
-/// Captures webcam frames using OpenCV.
-///
-/// Outputs:
-///   - OnRawFrame: raw BGR bytes + width/height â†’ cho WebRtcClient encode H264/VP8
-///   - OnPreviewFrame: BitmapImage â†’ cho WPF Image control hiá»ƒn thá»‹
-/// </summary>
+
 public class CameraService : IDisposable
 {
     private VideoCapture? _capture;
     private readonly AppSettings _settings;
+    private readonly RecordingClock _recordingClock;
     private readonly object _lock = new();
     private bool _isCapturing;
     private CancellationTokenSource? _cts;
     private int _frameCount;
     private bool _isDisposed;
 
-    /// <summary>
-    /// Raw BGR pixel data + dimensions. DÃ¹ng cho WebRTC video encoding.
-    /// </summary>
+
     public event Action<byte[], int, int>? OnRawFrame;
+
+    /// <summary>
+    /// Immutable camera frame for local recording. The camera remains single-owner: consumers
+    /// fan out from this event instead of opening the physical device a second time.
+    /// </summary>
+    public event Action<CameraFrame>? OnCapturedFrame;
 
     /// <summary>
     /// BitmapImage cho WPF preview.
@@ -34,14 +35,13 @@ public class CameraService : IDisposable
 
     public bool IsCapturing => _isCapturing;
 
-    public CameraService(AppSettings settings)
+    public CameraService(AppSettings settings, RecordingClock recordingClock)
     {
         _settings = settings;
+        _recordingClock = recordingClock;
     }
 
-    /// <summary>
-    /// Má»Ÿ camera vÃ  báº¯t Ä‘áº§u capture loop.
-    /// </summary>
+
     public Task StartAsync()
     {
         if (_isCapturing) return Task.CompletedTask;
@@ -52,7 +52,7 @@ public class CameraService : IDisposable
         _capture.Set(VideoCaptureProperties.Fps, _settings.CameraFps);
 
         if (!_capture.IsOpened())
-            throw new InvalidOperationException($"KhÃ´ng thá»ƒ má»Ÿ camera (device {_settings.CameraDeviceIndex})");
+            throw new InvalidOperationException($"Không tìm thấy thiết bị camera (device {_settings.CameraDeviceIndex})");
 
         _isCapturing = true;
         _cts = new CancellationTokenSource();
@@ -61,9 +61,7 @@ public class CameraService : IDisposable
         return Task.CompletedTask;
     }
 
-    /// <summary>
-    /// Dá»«ng capture vÃ  giáº£i phÃ³ng camera.
-    /// </summary>
+
     public void Stop()
     {
         if (_isDisposed)
@@ -87,9 +85,7 @@ public class CameraService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Capture loop: Ä‘á»c Mat â†’ raw BGR bytes (cho WebRTC) + BitmapImage (cho preview).
-    /// </summary>
+
     private async Task CaptureLoop(CancellationToken ct)
     {
         var frameInterval = TimeSpan.FromMilliseconds(1000.0 / _settings.CameraFps);
@@ -114,12 +110,12 @@ public class CameraService : IDisposable
                 var width = frame.Width;
                 var height = frame.Height;
 
-                // 1. Raw BGR bytes cho WebRTC (liÃªn tá»¥c trong bá»™ nhá»›, zero-copy náº¿u Ä‘Æ°á»£c)
-                //    Mat.Data lÃ  pointer â†’ copy ra byte[] Ä‘á»ƒ an toÃ n cross-thread
+
                 var rawBytes = new byte[width * height * 3];
                 System.Runtime.InteropServices.Marshal.Copy(frame.Data, rawBytes, 0, rawBytes.Length);
+                var capturedAt = _recordingClock.Elapsed;
 
-                // Debug: log frame Ä‘áº§u Ä‘á»ƒ confirm camera grab Ä‘Æ°á»£c pixel data
+
                 if (_frameCount == 0)
                 {
                     bool allZero = rawBytes.All(b => b == 0);
@@ -130,11 +126,39 @@ public class CameraService : IDisposable
                 }
                 _frameCount++;
 
-                OnRawFrame?.Invoke(rawBytes, width, height);
+                try
+                {
+                    OnCapturedFrame?.Invoke(new CameraFrame(
+                        rawBytes,
+                        width,
+                        height,
+                        width * 3,
+                        capturedAt));
+                }
+                catch (Exception ex)
+                {
+                    LocalFileLogger.Error("camera", "recording_frame_consumer_failed", ex);
+                }
 
-                // 2. BitmapImage cho WPF preview (chuyá»ƒn Ä‘á»•i trÃªn background thread, Freeze Ä‘á»ƒ cross-thread safe)
+                try
+                {
+                    OnRawFrame?.Invoke(rawBytes, width, height);
+                }
+                catch (Exception ex)
+                {
+                    LocalFileLogger.Error("camera", "raw_frame_consumer_failed", ex);
+                }
+
+
                 var bitmapImage = MatToBitmapImage(frame);
-                OnPreviewFrame?.Invoke(bitmapImage);
+                try
+                {
+                    OnPreviewFrame?.Invoke(bitmapImage);
+                }
+                catch (Exception ex)
+                {
+                    LocalFileLogger.Error("camera", "preview_frame_consumer_failed", ex);
+                }
 
                 await Task.Delay(frameInterval, ct);
             }
@@ -149,9 +173,7 @@ public class CameraService : IDisposable
         }
     }
 
-    /// <summary>
-    /// Chuyá»ƒn OpenCV Mat â†’ BitmapImage cho WPF Image control.
-    /// </summary>
+
     private static BitmapImage MatToBitmapImage(Mat mat)
     {
         using var bitmap = BitmapConverter.ToBitmap(mat);

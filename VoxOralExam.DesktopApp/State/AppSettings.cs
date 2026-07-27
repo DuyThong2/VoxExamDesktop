@@ -2,9 +2,54 @@ namespace VoxOralExam.DesktopApp.State;
 
 public class AppSettings
 {
-    public string JavaBaseUrl { get; set; } = "http://localhost:8080";
+    public string JavaBaseUrl { get; set; } = "http://localhost:8081";
     public string PythonBaseUrl { get; set; } = "http://localhost:8000";
-    public string WebRtcSignalingUrl { get; set; } = "ws://localhost:8081/signaling";
+    public string WebRtcSignalingUrl { get; set; } = "ws://localhost:8082/signaling";
+    public string StreamingBaseUrl { get; set; } = "http://localhost:8082";
+    public bool EnableLocalRecording { get; set; } = true;
+    public bool EnableSegmentUpload { get; set; } = true;
+
+    // Live WebRTC view for the monitor UI (separate from local recording/segment upload above).
+    // Encodes H.264 through the Media Foundation encoder that ships with Windows (see
+    // MediaFoundationH264Encoder), so it needs no bundled native libraries -- only Windows N/KN
+    // editions without the Media Feature Pack lack an encoder, and there the live view degrades
+    // while local recording is unaffected.
+    public bool EnableLiveMonitorStream { get; set; } = true;
+
+    // Target bitrate for the live monitor video tracks. Deliberately well below the
+    // Screen/CameraRecordingBitrate values above: those govern the durable evidence recording that
+    // gets graded, whereas this is a best-effort real-time view over whatever network the school
+    // has, encoded CBR so a busy screen cannot balloon into a stall.
+    public int MonitorStreamVideoBitrate { get; set; } = 1_500_000;
+
+    // vox-streaming's /ws/stream upgrader rejects the WebSocket handshake with 403 unless the
+    // request's Origin header is in its own ALLOWED_ORIGINS (default http://localhost:5173, the
+    // browser demo's nginx-proxied origin) -- .NET's ClientWebSocket sends no Origin header at all
+    // by default, unlike a browser, so MonitorStreamClient sets this one explicitly. Must match
+    // whatever ALLOWED_ORIGINS the target vox-streaming instance is actually configured with.
+    public string MonitorStreamOrigin { get; set; } = "http://localhost:5173";
+    public bool RequireRecording { get; set; } = true;
+    public int RecordingSegmentSeconds { get; set; } = 10;
+    public int RecordingUploadTimeoutSeconds { get; set; } = 30;
+    public int RecordingFinalDrainSeconds { get; set; } = 20;
+    public int RecordingAuditTimeoutSeconds { get; set; } = 3;
+    public int ScreenRecordingFps { get; set; } = 30;
+    public int ScreenRecordingBitrate { get; set; } = 4_000_000;
+    public int CameraRecordingBitrate { get; set; } = 2_000_000;
+    public int RecordingQueueCapacity { get; set; } = 4;
+    public long MinimumRecordingDiskBytes { get; set; } = 2L * 1024 * 1024 * 1024;
+
+    // How often to re-check free disk space while recording. The start-of-attempt check alone is not
+    // enough: screen and camera together write roughly 2.7 GB/hour at their configured bitrates, and
+    // an attempt whose uploads are failing keeps every segment on disk, so the drive can cross the
+    // threshold long after recording began. 0 disables the periodic check.
+    public int RecordingDiskCheckSeconds { get; set; } = 30;
+
+    // How long before an upload credential expires to start renewing it. Must be comfortably longer
+    // than any outage the renewal itself has to survive: the renewal needs the network, so trying
+    // only at the last minute means the one situation that makes renewal necessary -- being offline
+    // -- is also the one that prevents it.
+    public int UploadCredentialRefreshLeadMinutes { get; set; } = 10;
     public string RealtimeWebSocketPath { get; set; } = "/realtime/attempts";
     public string AvatarWebRtcOfferPath { get; set; } = "/avatar/webrtc/offer";
     public int MaxTurnsPerQuestion { get; set; } = 10;
@@ -35,6 +80,27 @@ public class AppSettings
     // Dev-only: true serves exam data from MockExamDataFactory; false uses ExamApiService (real
     // Java backend). Defaults true so the app runs before Java's exam endpoints exist.
     public bool UseMockData { get; set; } = true;
+
+    // Dev-only, only consulted while UseMockData is true: mint a real, signed vox-streaming JWT
+    // from vox-streaming/demo/devserver (see that folder's README) instead of the hardcoded
+    // "dev-stub-stream-jwt" in MockExamEntryApiService. Lets the client-side recording + segment
+    // upload pipeline (Workers/SegmentUploadWorker.cs, Infra/Recording) run against a real,
+    // locally-running vox-streaming instance while the rest of the exam content stays mocked --
+    // mirrors how vox-streaming's demo/web Student page gets its token. Defaults false so plain
+    // mock runs stay fully offline (no dependency on vox-streaming/Redis/Kafka/MinIO being up).
+    public bool UseDevStreamToken { get; set; } = false;
+
+    // Base URL of vox-streaming/demo/devserver's HTTP token endpoint (its own default is :8090).
+    // Only read when UseDevStreamToken is true.
+    public string DevStreamTokenUrl { get; set; } = "http://localhost:8090";
+
+    // Dev-only: true shows Views/StreamingDemoWindow at startup instead of the normal
+    // login/OTP/exam-paper flow (ShellWindow) -- the WPF analogue of vox-streaming's
+    // demo/web/student.html. Lets you exercise camera/screen capture + the client-side
+    // recording/segment-upload pipeline against a real vox-streaming instance without needing
+    // exam content from the Java backend. Always mints its token via DevStreamTokenClient,
+    // independent of UseMockData/UseDevStreamToken above.
+    public bool LaunchStreamingDemo { get; set; } = false;
 
     // Prototype (see task/performance.txt): Azure TTS synthesized directly on WPF via
     // Services/LocalAvatarSpeaker.cs, instead of Python synthesizing and streaming it back over

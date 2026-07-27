@@ -31,7 +31,11 @@ public class MockExamEntryApiService : IExamEntryApiService
         return new ExamEntryTicket
         {
             AttemptId = Guid.NewGuid(),
+            ScheduleId = Guid.NewGuid().ToString("D"),
+            SessionId = Guid.NewGuid().ToString("D"),
             StreamJwt = "dev-stub-stream-jwt",
+            StreamTypes = ["camera", "screen"],
+            StreamTokenExpiresAt = DateTimeOffset.UtcNow.AddHours(2),
             TicketId = Guid.NewGuid().ToString("N"),
             ExpiresAt = DateTime.UtcNow.AddHours(2),
             ScheduleEndAt = DateTime.UtcNow.AddMinutes(30),
