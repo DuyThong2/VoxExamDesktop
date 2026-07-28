@@ -2,6 +2,8 @@ using VoxOralExam.DesktopApp.Services;
 
 namespace VoxOralExam.DesktopApp.Infra.Clients.StreamService;
 
+public sealed record RefreshUploadCredential(StreamUploadSession Session, string StreamToken);
+
 /// <summary>
 /// Renews an upload credential that is about to expire, without starting a new stream.
 ///
@@ -38,21 +40,28 @@ public sealed class UploadCredentialRefresher
     /// signed-in student, an exam window that has closed, an unreachable server -- which is a
     /// normal outcome, not an error: the caller keeps the credential it has and tries again later.
     /// </summary>
-    public async Task<StreamUploadSession?> TryRefreshAsync(
+    public async Task<RefreshUploadCredential?> TryRefreshAsync(
         Guid examSessionId,
         string streamType,
         CancellationToken ct)
     {
         try
         {
-            var access = await _streamAccessClient.IssueAsync(examSessionId, streamType, ct);
+            // No preferred stream type on purpose. The token belongs to the exam session, not to one
+            // stream: it carries every type the session was granted, and the session locks that
+            // choice on the first issue (IssueStudentStreamTokenUseCase). Naming a single type here
+            // would be asking to change a locked choice -- rejected for a CAMERA_AND_SCREEN session,
+            // which is exactly the case that has two credentials to refresh. streamType still
+            // matters below: the upload session IS per-stream, and vox-streaming checks it against
+            // the token's streamTypes.
+            var access = await _streamAccessClient.IssueAsync(examSessionId, preferredStreamType: null, ct);
             var renewed = await _sessionClient.CreateAsync(streamType, access.Token, ct);
 
             LocalFileLogger.Info(
                 "upload_credential",
                 "refreshed",
                 new { renewed.StreamId, streamType, renewed.ExpiresAt });
-            return renewed;
+            return new RefreshUploadCredential(renewed, access.Token);
         }
         catch (Exception ex)
         {

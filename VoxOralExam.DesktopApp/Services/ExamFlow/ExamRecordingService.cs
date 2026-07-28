@@ -519,38 +519,40 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
 
             foreach (var (streamType, session) in expiring)
             {
-                var renewed = await _credentialRefresher.TryRefreshAsync(
+                var refreshed = await _credentialRefresher.TryRefreshAsync(
                     context.AttemptId, session.StreamType, CancellationToken.None);
-                if (renewed is null)
+                if (refreshed is { Session: var renewed })
                 {
-                    continue;
-                }
+                    if (!string.Equals(renewed.StreamId, session.StreamId, StringComparison.Ordinal))
+                    {
+                        // vox-streaming only opens a new stream id when the previous one was already
+                        // completed. Adopting it here would silently split this attempt's evidence
+                        // across two streams, so keep the original and let it run to its own expiry.
+                        LocalFileLogger.Error(
+                            "recording",
+                            "credential_refresh_returned_different_stream",
+                            new InvalidOperationException(
+                                $"Refresh for {session.StreamId} returned {renewed.StreamId}."),
+                            new { session.StreamId, renewedStreamId = renewed.StreamId, session.StreamType });
+                        continue;
+                    }
 
-                if (!string.Equals(renewed.StreamId, session.StreamId, StringComparison.Ordinal))
-                {
-                    // vox-streaming only opens a new stream id when the previous one was already
-                    // completed. Adopting it here would silently split this attempt's evidence
-                    // across two streams, so keep the original and let it run to its own expiry.
-                    LocalFileLogger.Error(
-                        "recording",
-                        "credential_refresh_returned_different_stream",
-                        new InvalidOperationException(
-                            $"Refresh for {session.StreamId} returned {renewed.StreamId}."),
-                        new { session.StreamId, renewedStreamId = renewed.StreamId, session.StreamType });
-                    continue;
-                }
-
-                _uploadSessions[streamType] = renewed;
-                _uploadWorker.UpdateUploadToken(renewed.StreamId, renewed.UploadToken);
-                await _store.SaveUploadSessionsAsync(
-                    [new StoredUploadSession
+                    _uploadSessions[streamType] = renewed;
+                    _uploadWorker.UpdateUploadToken(renewed.StreamId, renewed.UploadToken);
+                    await _store.SaveUploadSessionsAsync(
+                        [new StoredUploadSession
                     {
                         StreamId = renewed.StreamId,
                         StreamType = renewed.StreamType,
                         UploadToken = renewed.UploadToken,
                         ExpiresAt = renewed.ExpiresAt
                     }],
-                    CancellationToken.None);
+                        CancellationToken.None);
+                }
+                else
+                {
+                    LocalFileLogger.Error("recording", "session_not_found", new InvalidOperationException("Session not found in refresh upload credentials"));
+                }
             }
         }
         catch (Exception ex)

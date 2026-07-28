@@ -157,9 +157,9 @@ public sealed class OrphanedUploadRecoveryService
             // Expired, but not necessarily lost: if the exam is still inside its schedule window and
             // a student is signed in, the credential can be renewed for the same stream. That only
             // succeeds during an exam, which is rare at startup -- so it is attempted, not assumed.
-            var renewed = await _credentialRefresher.TryRefreshAsync(
+            var refreshed = await _credentialRefresher.TryRefreshAsync(
                 manifest.AttemptId, session.StreamType, ct);
-            if (renewed is not null &&
+            if (refreshed is { Session: var renewed } &&
                 string.Equals(renewed.StreamId, session.StreamId, StringComparison.Ordinal))
             {
                 session.UploadToken = renewed.UploadToken;
