@@ -23,6 +23,14 @@ public sealed class AudioMixer : IDisposable
     public const int TargetSampleRate = 16_000;
     private const int TickMilliseconds = 20;
 
+    /// <summary>
+    /// Upper bound on chunks emitted per tick, i.e. how fast OnTick may work off a backlog. Five
+    /// chunks is 100ms of audio, so the mixer can run five times real time while catching up --
+    /// enough to clear the two-second buffer in under half a second -- without handing the segment
+    /// writer an unbounded burst if something pauses the timer for a long time.
+    /// </summary>
+    private const int MaxChunksPerTick = 5;
+
     private readonly RecordingClock _clock;
     private readonly BufferedWaveProvider _micBuffer;
     private readonly int _bytesPerTick;
@@ -30,6 +38,7 @@ public sealed class AudioMixer : IDisposable
     private IWaveProvider? _loopbackResampled;
     private Timer? _timer;
     private volatile bool _loopbackEnabled;
+    private int _captureFaultLogged;
 
     public event Action<byte[], TimeSpan>? MixedAudioAvailable;
 
@@ -40,7 +49,13 @@ public sealed class AudioMixer : IDisposable
         _micBuffer = new BufferedWaveProvider(micFormat)
         {
             ReadFully = true,
-            BufferDuration = TimeSpan.FromSeconds(2)
+            BufferDuration = TimeSpan.FromSeconds(2),
+            // Without this NAudio throws InvalidOperationException("Buffer full") from AddSamples --
+            // which runs on the capture device's own callback thread, where nothing catches it and
+            // an unhandled exception takes the whole app down mid-exam. Losing the oldest fraction
+            // of a second of audio is not a good outcome, but it is not remotely comparable to
+            // ending the candidate's exam. See OnTick for why the buffer can fill at all.
+            DiscardOnBufferOverflow = true
         };
         _bytesPerTick = micFormat.AverageBytesPerSecond * TickMilliseconds / 1000;
     }
@@ -55,7 +70,9 @@ public sealed class AudioMixer : IDisposable
         _loopbackRawBuffer = new BufferedWaveProvider(loopbackFormat)
         {
             ReadFully = true,
-            BufferDuration = TimeSpan.FromSeconds(2)
+            BufferDuration = TimeSpan.FromSeconds(2),
+            // Same reason as _micBuffer's, and the same callback-thread consequence.
+            DiscardOnBufferOverflow = true
         };
 
         ISampleProvider sample = _loopbackRawBuffer.ToSampleProvider();
@@ -81,42 +98,139 @@ public sealed class AudioMixer : IDisposable
         _timer ??= new Timer(OnTick, null, TickMilliseconds, TickMilliseconds);
     }
 
-    public void AddMicSamples(byte[] pcm) => _micBuffer.AddSamples(pcm, 0, pcm.Length);
+    // Both of these run on their capture device's callback thread, where an escaping exception is
+    // unhandled and terminates the process. DiscardOnBufferOverflow above already removes the one
+    // throw that was actually reachable; these exist so that no future change to NAudio or to the
+    // buffer configuration can turn a recoverable audio fault back into a dead exam. Logged once so
+    // a fault that repeats every 20ms cannot itself become the problem.
+    public void AddMicSamples(byte[] pcm)
+    {
+        try
+        {
+            ReportIfOverflowing(_micBuffer, pcm.Length, "mic");
+            _micBuffer.AddSamples(pcm, 0, pcm.Length);
+        }
+        catch (Exception ex)
+        {
+            LogCaptureFaultOnce("mic_samples_rejected", ex);
+        }
+    }
 
-    public void AddLoopbackSamples(byte[] raw) => _loopbackRawBuffer?.AddSamples(raw, 0, raw.Length);
+    public void AddLoopbackSamples(byte[] raw)
+    {
+        try
+        {
+            var buffer = _loopbackRawBuffer;
+            if (buffer is null)
+            {
+                return;
+            }
+            ReportIfOverflowing(buffer, raw.Length, "loopback");
+            buffer.AddSamples(raw, 0, raw.Length);
+        }
+        catch (Exception ex)
+        {
+            LogCaptureFaultOnce("loopback_samples_rejected", ex);
+        }
+    }
 
+    /// <summary>
+    /// Logs the overflow that DiscardOnBufferOverflow is about to swallow.
+    /// </summary>
+    /// <remarks>
+    /// Turning the crash into a silent discard fixed the freeze but would otherwise have made
+    /// audio loss invisible, which for an oral exam is the worse of the two failures: a frozen app
+    /// is at least noticed while the candidate is still in the room. NAudio reports nothing when it
+    /// drops, so the condition has to be checked before handing the samples over.
+    ///
+    /// Reaching here at all means OnTick's catch-up could not keep pace, so it is worth an entry
+    /// even though the recording continues.
+    /// </remarks>
+    private void ReportIfOverflowing(BufferedWaveProvider buffer, int incomingBytes, string source)
+    {
+        if (buffer.BufferedBytes + incomingBytes <= buffer.BufferLength)
+        {
+            return;
+        }
+
+        LogCaptureFaultOnce(
+            "audio_buffer_overflow_discarding",
+            new InvalidOperationException(
+                $"{source} buffer full ({buffer.BufferedBytes}/{buffer.BufferLength} bytes); " +
+                "the oldest audio is being discarded because the mixer tick fell behind real time."));
+    }
+
+    private void LogCaptureFaultOnce(string @event, Exception ex)
+    {
+        if (Interlocked.Exchange(ref _captureFaultLogged, 1) == 0)
+        {
+            LocalFileLogger.Error("audio_mixer", @event, ex);
+        }
+    }
+
+    /// <summary>
+    /// Drains one tick's worth of audio, plus whatever backlog has built up.
+    /// </summary>
+    /// <remarks>
+    /// The catch-up loop is the whole point. Capture devices produce at exactly real time, but this
+    /// runs on a <see cref="Timer"/> whose 20ms period is below Windows' default timer resolution
+    /// and whose callbacks are queued on the thread pool -- so ticks arrive late whenever the pool
+    /// is busy, and a burst of failing HTTP uploads is more than enough to do that.
+    ///
+    /// Draining exactly one chunk per tick made every late tick a permanent debt, because
+    /// ReadFully pads a short read with silence instead of leaving the backlog to be picked up
+    /// next time. That gave the entire recording session a fixed budget of BufferDuration -- two
+    /// seconds, a hundred ticks -- of accumulated lateness, after which the buffer filled and
+    /// AddSamples threw on the capture thread and froze the app. Six minutes of recording is
+    /// eighteen thousand ticks; the budget works out to a tenth of a millisecond each, which no
+    /// thread-pool timer can hold to.
+    /// </remarks>
     private void OnTick(object? state)
     {
         try
         {
-            var micChunk = new byte[_bytesPerTick];
-            _micBuffer.Read(micChunk, 0, _bytesPerTick);
-
-            if (!_loopbackEnabled || _loopbackResampled is null)
+            // Bounded so a large backlog is worked off over several ticks rather than emitted as
+            // one burst that the segment writer has to absorb at once.
+            for (var chunk = 0; chunk < MaxChunksPerTick; chunk++)
             {
-                MixedAudioAvailable?.Invoke(micChunk, _clock.Elapsed);
-                return;
+                EmitChunk();
+                if (_micBuffer.BufferedBytes < _bytesPerTick)
+                {
+                    break;
+                }
             }
-
-            var loopbackChunk = new byte[_bytesPerTick];
-            _loopbackResampled.Read(loopbackChunk, 0, _bytesPerTick);
-
-            var mixed = new byte[_bytesPerTick];
-            for (var i = 0; i < _bytesPerTick; i += 2)
-            {
-                var micSample = (short)(micChunk[i] | (micChunk[i + 1] << 8));
-                var loopbackSample = (short)(loopbackChunk[i] | (loopbackChunk[i + 1] << 8));
-                var sum = Math.Clamp(micSample + loopbackSample, short.MinValue, short.MaxValue);
-                mixed[i] = (byte)(sum & 0xFF);
-                mixed[i + 1] = (byte)((sum >> 8) & 0xFF);
-            }
-
-            MixedAudioAvailable?.Invoke(mixed, _clock.Elapsed);
         }
         catch (Exception ex)
         {
             LocalFileLogger.Error("audio_mixer", "tick_failed", ex);
         }
+    }
+
+    private void EmitChunk()
+    {
+        var micChunk = new byte[_bytesPerTick];
+        _micBuffer.Read(micChunk, 0, _bytesPerTick);
+
+        if (!_loopbackEnabled || _loopbackResampled is null)
+        {
+            MixedAudioAvailable?.Invoke(micChunk, _clock.Elapsed);
+            return;
+        }
+
+        var loopbackChunk = new byte[_bytesPerTick];
+        _loopbackResampled.Read(loopbackChunk, 0, _bytesPerTick);
+
+        var mixed = new byte[_bytesPerTick];
+        for (var i = 0; i < _bytesPerTick; i += 2)
+        {
+            var micSample = (short)(micChunk[i] | (micChunk[i + 1] << 8));
+            var loopbackSample = (short)(loopbackChunk[i] | (loopbackChunk[i + 1] << 8));
+            var sum = Math.Clamp(micSample + loopbackSample, short.MinValue, short.MaxValue);
+            mixed[i] = (byte)(sum & 0xFF);
+            mixed[i + 1] = (byte)((sum >> 8) & 0xFF);
+        }
+
+        MixedAudioAvailable?.Invoke(mixed, _clock.Elapsed);
     }
 
     public void Dispose()
