@@ -301,7 +301,11 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
     private async Task<bool> TryStartMicAsync(CancellationToken ct)
     {
         var recorder = new TurnAudioRecorder(deviceNumber: _sessionState.SelectedAudioInputDeviceIndex);
-        var mixer = new AudioMixer(_clock);
+        // Recording policy: nothing downstream of the segment writer cares how late a sample
+        // arrives, so the mixer tolerates a deep backlog rather than discarding audio out of the
+        // file that gets graded. Contrast LiveMonitorStreamService, which trades exactly that
+        // audio for staying in sync.
+        var mixer = new AudioMixer(_clock, AudioMixerLatencyPolicy.Recording);
         try
         {
             recorder.StreamChunkAvailable += OnMicAudioChunk;

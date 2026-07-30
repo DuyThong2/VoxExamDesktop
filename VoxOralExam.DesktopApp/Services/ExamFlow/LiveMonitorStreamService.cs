@@ -116,7 +116,7 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
         // its ffmpeg ingest once BOTH a video and an audio track have arrived (see
         // noteFFmpegIngestTrack), so a silent-but-flowing track is what keeps recording and live
         // rewind working for this stream on a machine with no usable capture device.
-        var mixer = new AudioMixer(_clock);
+        var mixer = new AudioMixer(_clock, AudioMixerLatencyPolicy.LiveMonitor);
         mixer.MixedAudioAvailable += OnCameraMixedAudio;
         // Field takes ownership before anything below can throw, so StopCameraAsync tears the mixer
         // down on the failure path too.
@@ -173,7 +173,9 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
         await client.ConnectAsync(ct);
         _screenClient = client;
 
-        var mixer = new AudioMixer(_clock);
+        // Live policy: a teacher watching in real time is better served by skipping stale audio
+        // than by hearing it late, the opposite of ExamRecordingService's choice.
+        var mixer = new AudioMixer(_clock, AudioMixerLatencyPolicy.LiveMonitor);
         mixer.MixedAudioAvailable += OnScreenMixedAudio;
         // Owned by the field before anything below can throw -- see StartCameraAsync.
         _screenAudioMixer = mixer;
