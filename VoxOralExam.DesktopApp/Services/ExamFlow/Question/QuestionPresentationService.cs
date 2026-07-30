@@ -74,12 +74,14 @@ internal sealed class QuestionPresentationService : IDisposable
         _sessionClient.OnAvatarUtteranceComplete += HandleAvatarCompletion;
     }
 
-    public async Task<bool> PresentInitialAsync(
+    public async Task<(bool AvatarSpoke, bool Interrupted)> PresentInitialAsync(
         ExamQuestion question,
         Guid answerId,
         Guid paperItemId,
         QuestionContextDto context,
         string promptText,
+        Action openSpeechWindow,
+        Func<Task> getSpeechStartedTask,
         CancellationToken cancellationToken)
     {
         _assets.Clear();
@@ -127,9 +129,22 @@ internal sealed class QuestionPresentationService : IDisposable
             }
         }
 
-        return await WaitForAvatarAfterAsync(
+        openSpeechWindow();
+        var speechStarted = getSpeechStartedTask();
+        var promptTask = WaitForAvatarAfterAsync(
             token => _sessionClient.SendPresentQuestionAsync(promptText, token),
             cancellationToken);
+        if (await WasInterruptedAsync(
+                promptTask,
+                speechStarted,
+                cancellationToken))
+        {
+            _avatarSpeaker.Stop();
+            await promptTask;
+            return (true, true);
+        }
+
+        return (await promptTask, false);
     }
 
     public async Task<bool> PresentResumeAsync(

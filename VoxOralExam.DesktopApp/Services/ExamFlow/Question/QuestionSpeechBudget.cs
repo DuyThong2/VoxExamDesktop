@@ -13,9 +13,12 @@ internal sealed class QuestionSpeechBudget : ISpeechBudget, IDisposable
     private DateTime? _speakingStartedAtUtc;
     private bool _disposed;
 
-    public QuestionSpeechBudget(int maxResponseSeconds)
+    public QuestionSpeechBudget(
+        int maxResponseSeconds,
+        double initialElapsedSeconds = 0)
     {
         _limit = TimeSpan.FromSeconds(Math.Max(0, maxResponseSeconds));
+        _elapsed = TimeSpan.FromSeconds(Math.Max(0, initialElapsedSeconds));
         _progressTimer = new Timer(
             _ => PublishProgress(),
             null,

@@ -259,6 +259,31 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         return SendJsonAsync(payload, ct);
     }
 
+    public async Task SendSpeechBudgetProgressAsync(
+        Guid answerId,
+        double elapsedSeconds)
+    {
+        try
+        {
+            await SendJsonAsync(
+                new
+                {
+                    type = "speech_budget_progress",
+                    answer_id = answerId.ToString("D"),
+                    elapsed_seconds = Math.Max(0, elapsedSeconds)
+                },
+                CancellationToken.None);
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error(
+                "realtime_ws",
+                "speech_budget_progress_failed",
+                ex,
+                new { answerId, elapsedSeconds });
+        }
+    }
+
     public async Task SendExamEndAndWaitForAckAsync(CancellationToken ct)
     {
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);

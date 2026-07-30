@@ -11,7 +11,8 @@ public sealed record AttemptResumeState(
     int TurnOrder,
     string? ActivePromptText,
     bool HasFollowUp,
-    Guid? PaperItemId);
+    Guid? PaperItemId,
+    double ElapsedSpeechSeconds);
 
 /// <summary>
 /// GET /realtime/attempts/{examAttemptId}/current-answer (agents/src/controller/realtime_controller.py)
@@ -77,7 +78,8 @@ public class RealtimeAttemptProgressClient
                 result.PaperItemId is string rawPaperItemId
                     && Guid.TryParse(rawPaperItemId, out var paperItemId)
                         ? paperItemId
-                        : null);
+                        : null,
+                Math.Max(0, result.ElapsedSpeechSeconds));
         }
         catch (Exception ex)
         {
@@ -109,6 +111,9 @@ public class RealtimeAttemptProgressClient
 
         [JsonPropertyName("paperItemId")]
         public string? PaperItemId { get; set; }
+
+        [JsonPropertyName("elapsedSpeechSeconds")]
+        public double ElapsedSpeechSeconds { get; set; }
     }
 }
 

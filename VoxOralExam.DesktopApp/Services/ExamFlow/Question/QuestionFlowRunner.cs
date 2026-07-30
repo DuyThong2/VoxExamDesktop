@@ -58,6 +58,9 @@ internal sealed class QuestionFlowRunner
         var maxAssessmentTurns = Math.Max(1, _settings.MaxTurnsPerQuestion);
         var resumeTurnOrder = _sessionState.ResumeTurnOrder;
         var resumePrompt = _sessionState.ResumeActivePromptText;
+        var resumeSpokenSeconds = Math.Max(
+            0,
+            _sessionState.ResumeSpokenSeconds);
         var isResumingFollowUp = resumeTurnOrder is > 1
             && !string.IsNullOrWhiteSpace(resumePrompt);
 
@@ -66,9 +69,27 @@ internal sealed class QuestionFlowRunner
             _sessionState.ResumeTurnOrder = null;
             _sessionState.ResumeActivePromptText = null;
         }
+        _sessionState.ResumeSpokenSeconds = 0;
 
-        using var budget = new QuestionSpeechBudget(question.MaxResponseSeconds);
-        budget.ProgressChanged += HandleSpeakingTimeChanged;
+        using var budget = new QuestionSpeechBudget(
+            question.MaxResponseSeconds,
+            resumeSpokenSeconds);
+        var lastCheckpointedSecond = (int)Math.Floor(resumeSpokenSeconds);
+        void HandleBudgetProgress(TimeSpan elapsed, TimeSpan limit)
+        {
+            HandleSpeakingTimeChanged(elapsed, limit);
+            var elapsedWholeSeconds = (int)Math.Floor(elapsed.TotalSeconds);
+            if (elapsedWholeSeconds <= lastCheckpointedSecond)
+            {
+                return;
+            }
+
+            lastCheckpointedSecond = elapsedWholeSeconds;
+            _ = _sessionClient.SendSpeechBudgetProgressAsync(
+                answerId,
+                elapsed.TotalSeconds);
+        }
+        budget.ProgressChanged += HandleBudgetProgress;
         _speechTurns.CloseSpeechWindow();
         _presentation.Clear();
         var questionContext = BuildQuestionContext(question);
@@ -102,16 +123,18 @@ internal sealed class QuestionFlowRunner
                 turnOrder = 1;
                 assessmentTurnCount = 0;
                 currentPrompt = prompt.QuestionText;
-                avatarSpoke = await _presentation.PresentInitialAsync(
+                var initialPresentation = await _presentation.PresentInitialAsync(
                     question,
                     answerId,
                     paperItemId,
                     questionContext,
                     currentPrompt,
+                    () => _speechTurns.OpenSpeechWindow(budget),
+                    () => _speechTurns.SpeechStartedTask,
                     cancellationToken);
-                if (avatarSpoke)
+                avatarSpoke = initialPresentation.AvatarSpoke;
+                if (avatarSpoke && !initialPresentation.Interrupted)
                 {
-                    _speechTurns.OpenSpeechWindow(budget);
                     await _presentation.RunPreparationAsync(
                         question,
                         _speechTurns.SpeechStartedTask,
@@ -121,6 +144,7 @@ internal sealed class QuestionFlowRunner
 
             if (!avatarSpoke)
             {
+                _speechTurns.CloseSpeechWindow();
                 StatusChanged?.Invoke(
                     "AI chưa xác nhận đọc xong câu hỏi. Tạm thời chưa mở lượt trả lời.");
             }
@@ -257,8 +281,11 @@ internal sealed class QuestionFlowRunner
         finally
         {
             _speechTurns.CloseSpeechWindow();
+            await _sessionClient.SendSpeechBudgetProgressAsync(
+                answerId,
+                budget.ElapsedSeconds);
             _presentation.Clear();
-            budget.ProgressChanged -= HandleSpeakingTimeChanged;
+            budget.ProgressChanged -= HandleBudgetProgress;
         }
     }
 

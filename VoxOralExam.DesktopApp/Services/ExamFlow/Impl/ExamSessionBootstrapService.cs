@@ -95,6 +95,7 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
     {
         _sessionState.ResumeTurnOrder = null;
         _sessionState.ResumeActivePromptText = null;
+        _sessionState.ResumeSpokenSeconds = 0;
 
         var currentAnswerId = await _attemptProgressClient.GetCurrentAnswerIdAsync(_sessionState.ExamAttemptId, ct);
         if (currentAnswerId is null)
@@ -141,6 +142,8 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
         });
         _sessionState.QuestionIndex = index;
         _sessionState.AttemptAnswerIdsByQuestionId[matchingQuestionId.Value] = currentAnswerId.Value;
+        _sessionState.ResumeSpokenSeconds =
+            Math.Max(0, resumeState?.ElapsedSpeechSeconds ?? 0);
 
         if (resumeState?.HasFollowUp == true)
         {

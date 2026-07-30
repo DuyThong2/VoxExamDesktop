@@ -30,6 +30,7 @@ public class ExamSessionState
     public int? RemainingSeconds { get; set; }
     public int? ResumeTurnOrder { get; set; }
     public string? ResumeActivePromptText { get; set; }
+    public double ResumeSpokenSeconds { get; set; }
     public int QuestionIndex { get; set; }
     public List<Question> Questions { get; set; } = [];
     public Dictionary<Guid, Guid> AttemptAnswerIdsByQuestionId { get; set; } = [];
@@ -80,6 +81,7 @@ public class ExamSessionState
         RemainingSeconds = examPaper.RemainingSeconds;
         ResumeTurnOrder = null;
         ResumeActivePromptText = null;
+        ResumeSpokenSeconds = 0;
         QuestionIndex = 0;
         Questions = examPaper.PaperQuestions
             .OrderBy(item => item.OrderIndex)
