@@ -34,6 +34,9 @@ public class MockExamEntryApiService : IExamEntryApiService
             ScheduleId = Guid.NewGuid().ToString("D"),
             SessionId = Guid.NewGuid().ToString("D"),
             StreamJwt = "dev-stub-stream-jwt",
+            // Mock exams stay monitored -- the dev flow exists to exercise recording + upload.
+            RequiredStreamType = "CAMERA_AND_SCREEN",
+            StreamTypePermission = "ALL",
             StreamTypes = ["camera", "screen"],
             StreamTokenExpiresAt = DateTimeOffset.UtcNow.AddHours(2),
             TicketId = Guid.NewGuid().ToString("N"),

@@ -303,6 +303,22 @@ public class ExamViewModel : BaseViewModel
         _initialized = true;
         await EnsureExamLoadedAsync();
 
+        // An unmonitored exam has no stream token, so recording has nothing to authenticate with.
+        // Handled before the try/catch below rather than inside it: that block turns every failure
+        // into "recording could not start", which is the wrong story to tell about an exam that was
+        // never meant to record -- and under RequireRecording it would rethrow and block entry.
+        if (_sessionState.EntryTicket is { IsMonitored: false })
+        {
+            LocalFileLogger.Info("recording", "recording_skipped_exam_not_monitored", new
+            {
+                _sessionState.ExamAttemptId
+            });
+            AddLog("Bài thi này không yêu cầu giám sát, bỏ qua ghi hình.");
+            PrepareProctoringUi();
+            await _examFlow.StartAsync(CancellationToken.None);
+            return;
+        }
+
         try
         {
             var ticket = _sessionState.EntryTicket

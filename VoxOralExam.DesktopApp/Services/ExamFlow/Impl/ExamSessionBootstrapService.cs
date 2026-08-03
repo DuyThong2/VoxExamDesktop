@@ -36,7 +36,16 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
 
     public async Task EnterWithTicketAsync(ExamEntryTicket ticket, CancellationToken ct = default)
     {
-        if (!_settings.UseMockData)
+        if (!ticket.IsMonitored)
+        {
+            // The exam was created with monitoring off. Asking for a stream token here is not just
+            // pointless, it is fatal: the server rejects the request and the student never gets in.
+            LocalFileLogger.Info("exam_bootstrap", "stream_token_skipped_exam_not_monitored", new
+            {
+                ticket.AttemptId
+            });
+        }
+        else if (!_settings.UseMockData)
         {
             var access = await _streamAccessClient.IssueAsync(ticket.AttemptId, preferredStreamType: null, ct);
             ApplyStreamAccess(ticket, access.Token, access.ScheduleId, access.SessionId, access.StreamTypes, access.ExpiresAt);

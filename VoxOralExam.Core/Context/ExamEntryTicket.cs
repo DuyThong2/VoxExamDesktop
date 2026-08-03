@@ -36,4 +36,23 @@ public class ExamEntryTicket
 
     public DateTimeOffset StreamTokenExpiresAt { get; set; }
 
+    /// <summary>
+    /// What the exam requires the student to share: CAMERA, SCREEN, CAMERA_AND_SCREEN -- or null
+    /// when the exam is not monitored at all. Sent by Java on the entry ticket.
+    ///
+    /// <para>Null is not "unknown", it is a decision the teacher made at creation time, and it is
+    /// the ONLY way the client can find out: /streams/student/token answers 400 ("Kỳ thi không hỗ
+    /// trợ stream") for such an exam, so blindly asking for a token locks the student out of an
+    /// exam they are otherwise fully entitled to sit.</para>
+    /// </summary>
+    public string? RequiredStreamType { get; set; }
+
+    /// <summary>ALL / ANY, only meaningful for CAMERA_AND_SCREEN. Null otherwise.</summary>
+    public string? StreamTypePermission { get; set; }
+
+    /// <summary>
+    /// False means: skip the stream token request, and record nothing. Distinct from an empty
+    /// <see cref="StreamTypes"/>, which just means "the token has not been issued yet".
+    /// </summary>
+    public bool IsMonitored => !string.IsNullOrWhiteSpace(RequiredStreamType);
 }
