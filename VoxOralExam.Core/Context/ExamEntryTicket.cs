@@ -20,10 +20,10 @@ public class ExamEntryTicket
     public string TicketId { get; set; } = string.Empty;
 
     /// <summary>When the ticket itself expires (longer than the 60s OTP window).</summary>
-    public DateTime ExpiresAt { get; set; }
+    public DateTimeOffset ExpiresAt { get; set; }
 
     /// <summary>The absolute schedule end time used by the exam countdown.</summary>
-    public DateTime? ScheduleEndAt { get; set; }
+    public DateTimeOffset? ScheduleEndAt { get; set; }
 
     // TODO(§B/§C/§E): also carry the lockdown blocklist, minEnforcementTier, the presigned-upload
     // source for turn audio, and deliveryMode (ProctoredLab / ProctoredByod / TakeHome) so the

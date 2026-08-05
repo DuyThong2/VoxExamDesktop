@@ -21,12 +21,12 @@ public class ExamSessionState
     public string ExamTitle { get; set; } = string.Empty;
     public int DurationSeconds { get; set; } = 30 * 60;
     public int DurationMinutes { get; set; } = 30;
-    public DateTime? ScheduleEndAt { get; set; }
+    public DateTimeOffset? ScheduleEndAt { get; set; }
     /// <summary>
     /// Attempt's real start time from the server. The countdown itself is restored from
     /// RemainingSeconds so offline time is not deducted.
     /// </summary>
-    public DateTime? StartedAt { get; set; }
+    public DateTimeOffset? StartedAt { get; set; }
     public int? RemainingSeconds { get; set; }
     public int? ResumeTurnOrder { get; set; }
     public string? ResumeActivePromptText { get; set; }

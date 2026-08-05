@@ -7,7 +7,7 @@ public class Exam
     public string Subject { get; set; } = string.Empty;
     public string Description { get; set; } = string.Empty;
     public int Duration { get; set; }
-    public DateTime? ExamDate { get; set; }
+    public DateTimeOffset? ExamDate { get; set; }
     public string Status { get; set; } = string.Empty;
     public ExamKind Kind { get; set; } = ExamKind.Centralized;
     public bool RequiresOtp { get; set; } = true;

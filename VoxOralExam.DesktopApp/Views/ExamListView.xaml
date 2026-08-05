@@ -11,6 +11,7 @@
         <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
         <converters:InverseBooleanToVisibilityConverter x:Key="InverseBoolToVisibility" />
         <converters:ZeroCountToVisibilityConverter x:Key="CountToVisibilityConverter" />
+        <converters:LocalDateTimeConverter x:Key="LocalDateTime" />
 
         <Style x:Key="StartExamButtonStyle" TargetType="Button">
             <Setter Property="Background" Value="#2563EB" />
@@ -72,7 +73,11 @@
                                VerticalAlignment="Center" Margin="0,0,16,0">
                         <TextBlock.Style>
                             <Style TargetType="TextBlock">
-                                <Setter Property="Text" Value="{Binding ExamDate, StringFormat='{}{0:dd/MM/yyyy HH:mm}'}" />
+                                <!--
+                                Qua converter chứ không StringFormat: Java trả về giờ UTC ("...Z"),
+                                in thẳng sẽ sớm 7 tiếng so với giờ Việt Nam.
+                                -->
+                                <Setter Property="Text" Value="{Binding ExamDate, Converter={StaticResource LocalDateTime}}" />
                                 <Style.Triggers>
                                     <!--
                                     No ExamDate is the NORMAL state for a class test that has no

@@ -45,7 +45,10 @@ public class MockExamDataFactory
 
     private static List<ExamPaper> GetExamPapers()
     {
-        var today = DateTime.Today;
+        // Mốc gốc phải là một instant UTC, đúng như Java gửi xuống (Instant.toString() -> "...Z").
+        // Trước đây chỗ này dùng DateTime.Today (giờ máy), nên chạy mock thì giờ hiển thị luôn đúng
+        // và che mất lỗi lệch múi giờ chỉ xuất hiện với backend thật.
+        var today = new DateTimeOffset(DateTime.UtcNow.Date, TimeSpan.Zero);
 
         var englishExamId = Guid.Parse("11111111-1111-1111-1111-111111111111");
         var mathExamId = Guid.Parse("22222222-2222-2222-2222-222222222222");

@@ -40,8 +40,8 @@ public class MockExamEntryApiService : IExamEntryApiService
             StreamTypes = ["camera", "screen"],
             StreamTokenExpiresAt = DateTimeOffset.UtcNow.AddHours(2),
             TicketId = Guid.NewGuid().ToString("N"),
-            ExpiresAt = DateTime.UtcNow.AddHours(2),
-            ScheduleEndAt = DateTime.UtcNow.AddMinutes(30),
+            ExpiresAt = DateTimeOffset.UtcNow.AddHours(2),
+            ScheduleEndAt = DateTimeOffset.UtcNow.AddMinutes(30),
         };
     }
 }
