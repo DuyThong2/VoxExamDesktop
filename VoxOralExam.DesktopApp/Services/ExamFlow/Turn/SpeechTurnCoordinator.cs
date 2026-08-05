@@ -77,6 +77,75 @@ internal sealed class SpeechTurnCoordinator : IDisposable
         StudentSpeakingChanged?.Invoke(false);
     }
 
+    /// <summary>
+    /// Rescues the recorder's turn buffer after CaptureAsync unwound on cancellation without ever
+    /// reaching CompleteCapture -- the student was mid-answer when the exam clock hit zero, when
+    /// they pressed "Nop bai", or when proctoring force-ended the attempt. Nobody has drained the
+    /// recorder at that point, and ExamAttemptRunner's finally is about to call recorder.StopAsync()
+    /// which clears the buffer, so without this the answer is simply gone.
+    ///
+    /// Returns null when there is nothing to rescue -- either no turn was active, or CaptureAsync
+    /// completed normally and already drained it. Never throws: the caller is on a shutdown path
+    /// and losing one answer is preferable to derailing the submit.
+    ///
+    /// Cannot double-drain with CompleteCapture: TurnAudioRecorder.GetTurnBufferAndReset clears
+    /// _turnBuffer and _isTurnActive under the recorder's own lock, so whichever of the two runs
+    /// first is the only one that ever sees IsTurnActive == true.
+    /// </summary>
+    public CapturedTurn? TrySalvageInFlightCapture(int turnOrder)
+    {
+        ISpeechBudget? budget;
+        byte[] pcm;
+        try
+        {
+            lock (_sync)
+            {
+                // Close the window and read the buffer inside the SAME lock HandleSpeechStart takes.
+                // MicAudioStreamer is still streaming here (ExamAttemptRunner only stops it in its
+                // finally) and CaptureAsync throws without calling CloseSpeechWindow, so
+                // _speechWindowOpen is still true -- a vad_speech_start landing right now would
+                // reach _recorder.BeginTurnCapture(), which clears _turnBuffer, destroying exactly
+                // the audio we came here to save.
+                _speechWindowOpen = false;
+                _isSpeaking = false;
+                budget = _budget;
+                _budget = null;
+                _speechStarted.TrySetResult(false);
+                _speechEnded.TrySetResult(false);
+
+                pcm = _recorder.IsTurnActive ? _recorder.GetTurnBufferAndReset() : [];
+            }
+
+            budget?.StopSpeaking();
+            StudentSpeakingChanged?.Invoke(false);
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("exam_flow", "turn_salvage_failed", ex, new { turnOrder });
+            return null;
+        }
+
+        if (pcm.Length == 0)
+        {
+            LocalFileLogger.Info("exam_flow", "turn_salvage_skipped", new
+            {
+                turnOrder,
+                reason = "no_active_turn"
+            });
+            return null;
+        }
+
+        // GetTurnBufferAndReset just stopped the recorder's own stopwatch and published this
+        // capture's wall-clock length -- a more honest duration than a budget.ElapsedSeconds delta,
+        // which needs the elapsedAtStart local that CaptureAsync took with it when it unwound (and
+        // reads from a budget HandleForceEnded may already have detached via CloseSpeechWindow).
+        return new CapturedTurn(
+            turnOrder,
+            pcm,
+            _recorder.LastTurnDurationSeconds,
+            SpeechCaptureEndReason.Salvaged);
+    }
+
     public async Task<CapturedTurn> CaptureAsync(
         int turnOrder,
         TimeSpan initialTimeout,

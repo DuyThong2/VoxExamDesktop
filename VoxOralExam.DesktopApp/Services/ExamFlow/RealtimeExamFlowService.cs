@@ -28,6 +28,7 @@ public sealed class RealtimeExamFlowService : IExamFlowService
     public event Action<bool>? OnStudentSpeakingChanged;
     public event Action<bool>? OnAvatarSpeakingChanged;
     public event Action<TimeSpan, TimeSpan>? OnQuestionSpeakingTimeChanged;
+    public event Action<bool>? OnFinalSaveStateChanged;
 
     public bool IsMicMuted => _runner?.IsMicMuted ?? _isMicMuted;
 
@@ -114,6 +115,7 @@ public sealed class RealtimeExamFlowService : IExamFlowService
         runner.StudentSpeakingChanged += HandleStudentSpeakingChanged;
         runner.AvatarSpeakingChanged += HandleAvatarSpeakingChanged;
         runner.QuestionSpeakingTimeChanged += HandleQuestionSpeakingTimeChanged;
+        runner.FinalSaveStateChanged += HandleFinalSaveStateChanged;
     }
 
     private void UnwireRunner(ExamAttemptRunner runner)
@@ -126,6 +128,7 @@ public sealed class RealtimeExamFlowService : IExamFlowService
         runner.StudentSpeakingChanged -= HandleStudentSpeakingChanged;
         runner.AvatarSpeakingChanged -= HandleAvatarSpeakingChanged;
         runner.QuestionSpeakingTimeChanged -= HandleQuestionSpeakingTimeChanged;
+        runner.FinalSaveStateChanged -= HandleFinalSaveStateChanged;
     }
 
     private void HandleQuestionPresented(ExamQuestionPrompt value) =>
@@ -151,4 +154,7 @@ public sealed class RealtimeExamFlowService : IExamFlowService
         TimeSpan elapsed,
         TimeSpan limit) =>
         OnQuestionSpeakingTimeChanged?.Invoke(elapsed, limit);
+
+    private void HandleFinalSaveStateChanged(bool saving) =>
+        OnFinalSaveStateChanged?.Invoke(saving);
 }

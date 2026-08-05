@@ -60,6 +60,7 @@ public class ExamViewModel : BaseViewModel
     private Uri? _currentQuestionMediaSource;
     private bool _isMicMuted;
     private bool _isSubmitting;
+    private bool _isSavingFinalAnswer;
     private bool _showSubmittedOverlay;
     private bool _showErrorOverlay;
     private string _endScreenMessage = string.Empty;
@@ -95,6 +96,7 @@ public class ExamViewModel : BaseViewModel
         _examFlow.OnStudentSpeakingChanged += HandleStudentSpeakingChanged;
         _examFlow.OnAvatarSpeakingChanged += HandleAvatarSpeakingChanged;
         _examFlow.OnQuestionSpeakingTimeChanged += HandleQuestionSpeakingTimeChanged;
+        _examFlow.OnFinalSaveStateChanged += HandleFinalSaveStateChanged;
         _assetPresentationCoordinator.OnAssetDisplayRequested += HandleAssetDisplayRequested;
         _avatarClient.OnVideoFrame += HandleAvatarVideoFrame;
         _recording.StatusChanged += HandleRecordingStatusChanged;
@@ -220,6 +222,40 @@ public class ExamViewModel : BaseViewModel
 
     public string MuteButtonText => IsMicMuted ? "Bật mic" : "Tắt mic";
     public string MicStatusText => IsMicMuted ? "Mic đang tắt" : "Mic đang bật";
+
+    /// <summary>
+    /// True while the attempt is uploading the student's final answer and closing the session out.
+    /// The student must not shut the machine down during this window, so it gets its own overlay.
+    /// </summary>
+    public bool IsSavingFinalAnswer
+    {
+        get => _isSavingFinalAnswer;
+        private set
+        {
+            if (SetProperty(ref _isSavingFinalAnswer, value))
+            {
+                OnPropertyChanged(nameof(CanInteract));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Notifying so the controls grey out the instant the countdown auto-submits, not only when
+    /// the student clicked the button themselves.
+    /// </summary>
+    public bool IsSubmitting
+    {
+        get => _isSubmitting;
+        private set
+        {
+            if (SetProperty(ref _isSubmitting, value))
+            {
+                OnPropertyChanged(nameof(CanInteract));
+            }
+        }
+    }
+
+    public bool CanInteract => !IsSubmitting && !IsSavingFinalAnswer;
 
     public bool ShowSubmittedOverlay
     {
@@ -415,6 +451,7 @@ public class ExamViewModel : BaseViewModel
             _examFlow.OnStudentSpeakingChanged -= HandleStudentSpeakingChanged;
             _examFlow.OnAvatarSpeakingChanged -= HandleAvatarSpeakingChanged;
             _examFlow.OnQuestionSpeakingTimeChanged -= HandleQuestionSpeakingTimeChanged;
+            _examFlow.OnFinalSaveStateChanged -= HandleFinalSaveStateChanged;
             _assetPresentationCoordinator.OnAssetDisplayRequested -= HandleAssetDisplayRequested;
             _avatarClient.OnVideoFrame -= HandleAvatarVideoFrame;
             _camera.OnPreviewFrame -= HandlePreviewFrame;
@@ -623,10 +660,23 @@ public class ExamViewModel : BaseViewModel
             return;
         }
 
-        _isSubmitting = true;
+        IsSubmitting = true;
         _countdownTimer?.Stop();
         _ = _examFlow.SubmitNowAsync();
     }
+
+    private void HandleFinalSaveStateChanged(bool saving) =>
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            IsSavingFinalAnswer = saving;
+            if (saving)
+            {
+                AiStatus = "Đang lưu câu trả lời cuối...";
+                AddLog(
+                    "Đang lưu câu trả lời cuối cùng, vui lòng không tắt máy",
+                    LogType.Warning);
+            }
+        });
 
     private void HandleQuestionPresented(ExamQuestionPrompt prompt)
     {
@@ -688,6 +738,9 @@ public class ExamViewModel : BaseViewModel
         _examCompleted = succeeded;
         Application.Current.Dispatcher.Invoke(() =>
         {
+            // Defensive: the end-screen overlay must always win over the saving one, even if the
+            // attempt runner somehow ended without clearing the saving state itself.
+            IsSavingFinalAnswer = false;
             ShowSubmittedOverlay = succeeded;
             ShowErrorOverlay = !succeeded;
             if (succeeded)
