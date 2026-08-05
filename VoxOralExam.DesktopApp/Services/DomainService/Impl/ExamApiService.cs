@@ -30,9 +30,11 @@ public class ExamApiService : IExamApiService
 
     public async Task<IReadOnlyList<Exam>> GetAvailableExamsAsync(CancellationToken ct = default)
     {
-        using var request = BuildRequest(HttpMethod.Get, "/api/v1/exams");
-        var exams = await SendAsync<List<Exam>>(request, ct);
-        return exams ?? [];
+        // Backend đã chuyển endpoint này sang PageResult. Màn chọn bài thi liệt kê một lần nên lấy
+        // luôn một trang đủ lớn thay vì phân trang trên app.
+        using var request = BuildRequest(HttpMethod.Get, "/api/v1/exams?page=0&size=200");
+        var page = await SendAsync<PageResponse<Exam>>(request, ct);
+        return page?.Content ?? [];
     }
 
     public async Task<ExamPaper> GetExamPaperAsync(string? sessionId, CancellationToken ct = default)
@@ -92,6 +94,19 @@ public class ExamApiService : IExamApiService
         where T : class
     {
         public T? Data { get; set; }
+    }
+
+    private sealed class PageResponse<T>
+    {
+        public List<T> Content { get; set; } = [];
+
+        public int Page { get; set; }
+
+        public int Size { get; set; }
+
+        public long TotalElements { get; set; }
+
+        public int TotalPages { get; set; }
     }
 }
 
