@@ -110,10 +110,11 @@ public class MainViewModel : BaseViewModel
             return;
         }
 
-        // A class test always skips OTP (no schedule concept). A centralized exam only skips it
-        // when the teacher/admin has explicitly disabled OTP for it (Exam.requiresOtp); otherwise
-        // it goes through the normal OTP entry + schedule-window flow below.
-        var skipsOtp = exam.Kind == ExamKind.ClassTest || !exam.RequiresOtp;
+        // OTP is decided purely by Exam.requiresOtp, for both kinds. A class test now has a real
+        // schedule and its teacher can turn OTP on when creating it, so the old "class test always
+        // skips OTP" assumption would send those students to /class-test/start, which the server
+        // rejects with "yeu cau xac thuc OTP, vui long dung luong xac thuc OTP".
+        var skipsOtp = !exam.RequiresOtp;
 
         if (skipsOtp)
         {

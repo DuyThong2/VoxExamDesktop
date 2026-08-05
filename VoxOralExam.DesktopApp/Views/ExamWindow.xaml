@@ -373,6 +373,7 @@
                                            Margin="0,0,10,0"
                                            VerticalAlignment="Center" />
                                 <Button Command="{Binding SubmitNowCommand}"
+                                        IsEnabled="{Binding CanInteract}"
                                         Content="Nop bai"
                                         Padding="14,8"
                                         MinWidth="88"
@@ -383,6 +384,7 @@
                                         Margin="0,0,8,0"
                                         Cursor="Hand" />
                                 <Button Command="{Binding ToggleMuteCommand}"
+                                        IsEnabled="{Binding CanInteract}"
                                         Content="{Binding MuteButtonText}"
                                         Padding="14,8"
                                         MinWidth="96"
@@ -483,6 +485,48 @@
                 </Grid>
             </Border>
         </Grid>
+
+        <!-- Shown while the final answer is being uploaded and the session closed out. Sits below
+             the submitted/error overlays (ZIndex 500) so those always win once the exam is done. -->
+        <Border Grid.RowSpan="2"
+                Background="#E60F172A"
+                Panel.ZIndex="490">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsSavingFinalAnswer}" Value="True">
+                            <Setter Property="Visibility" Value="Visible" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <Border Background="White"
+                    CornerRadius="20"
+                    Padding="32"
+                    Width="520"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                <StackPanel>
+                    <ProgressBar IsIndeterminate="True"
+                                 Height="6"
+                                 Width="260"
+                                 Margin="0,0,0,18"
+                                 Foreground="#B45309" />
+                    <TextBlock Text="Đang lưu câu trả lời cuối"
+                               FontSize="24"
+                               FontWeight="SemiBold"
+                               Foreground="#0F172A"
+                               TextAlignment="Center"
+                               Margin="0,0,0,10" />
+                    <TextBlock Text="Vui lòng không tắt máy hoặc đóng ứng dụng. Hệ thống đang tải câu trả lời cuối cùng của bạn lên."
+                               FontSize="15"
+                               Foreground="#475569"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+        </Border>
 
         <Border Grid.RowSpan="2"
                 Background="#CC0F172A"

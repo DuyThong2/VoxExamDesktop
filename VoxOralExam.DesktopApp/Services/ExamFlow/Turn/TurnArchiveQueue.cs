@@ -28,6 +28,13 @@ internal sealed class TurnArchiveQueue : IDisposable
             ObjectDisposedException.ThrowIf(_disposed, this);
             _pending.RemoveAll(task => task.IsCompleted);
             _pending.Add(ArchiveAsync(item, _lifetime.Token));
+            LocalFileLogger.Info("exam_flow", "archive_enqueued", new
+            {
+                item.AnswerId,
+                item.TurnOrder,
+                pcmBytes = item.Pcm.Length,
+                pendingCount = _pending.Count
+            });
         }
     }
 
@@ -40,16 +47,31 @@ internal sealed class TurnArchiveQueue : IDisposable
         }
         if (pending.Length == 0)
         {
+            LocalFileLogger.Info("exam_flow", "archive_drain_noop", null);
             return;
         }
 
+        // Timing this matters: a successful drain used to be completely silent, so there was no
+        // way to tell "nothing to drain" from "drained one turn in 12s" -- and that second number
+        // is exactly what PostArchiveSettleSeconds has to be tuned against.
+        var startedAt = DateTime.UtcNow;
         try
         {
             await Task.WhenAll(pending).WaitAsync(timeout);
+            LocalFileLogger.Info("exam_flow", "archive_drain_complete", new
+            {
+                drained = pending.Length,
+                elapsedMs = (int)(DateTime.UtcNow - startedAt).TotalMilliseconds
+            });
         }
         catch (Exception ex)
         {
-            LocalFileLogger.Error("exam_flow", "pending_archives_incomplete", ex);
+            LocalFileLogger.Error("exam_flow", "pending_archives_incomplete", ex, new
+            {
+                pending = pending.Length,
+                timeoutSeconds = timeout.TotalSeconds,
+                elapsedMs = (int)(DateTime.UtcNow - startedAt).TotalMilliseconds
+            });
         }
     }
 

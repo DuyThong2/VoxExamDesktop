@@ -25,6 +25,7 @@ internal sealed class QuestionFlowRunner
     private readonly QuestionPresentationService _presentation;
     private readonly SpeechTurnCoordinator _speechTurns;
     private readonly TurnArchiveQueue _archiveQueue;
+    private readonly Func<TimeSpan> _shutdownGrace;
 
     public QuestionFlowRunner(
         ExamSessionState sessionState,
@@ -32,7 +33,8 @@ internal sealed class QuestionFlowRunner
         RealtimeSessionClient sessionClient,
         QuestionPresentationService presentation,
         SpeechTurnCoordinator speechTurns,
-        TurnArchiveQueue archiveQueue)
+        TurnArchiveQueue archiveQueue,
+        Func<TimeSpan> shutdownGrace)
     {
         _sessionState = sessionState;
         _settings = settings;
@@ -40,11 +42,18 @@ internal sealed class QuestionFlowRunner
         _presentation = presentation;
         _speechTurns = speechTurns;
         _archiveQueue = archiveQueue;
+        _shutdownGrace = shutdownGrace;
     }
 
     public event Action<string>? StatusChanged;
     public event Action<string>? TranscriptAppended;
     public event Action<TimeSpan, TimeSpan>? SpeakingTimeChanged;
+
+    /// <summary>
+    /// Raised the moment an aborted answer is rescued, so the UI can show its "saving" state
+    /// without waiting for this method to unwind into ExamAttemptRunner's catch.
+    /// </summary>
+    public event Action? FinalAnswerSaveStarted;
 
     public async Task<QuestionFlowResult> RunAsync(
         ExamQuestionPrompt prompt,
@@ -177,12 +186,54 @@ internal sealed class QuestionFlowRunner
                 var gracePeriod = TimeSpan.FromSeconds(
                     Math.Max(1, _settings.PostSpeechSilenceGracePeriodSeconds));
 
-                var captured = await _speechTurns.CaptureAsync(
-                    turnOrder,
-                    initialTimeout,
-                    overallTimeout,
-                    gracePeriod,
-                    cancellationToken);
+                CapturedTurn captured;
+                var salvaged = false;
+                try
+                {
+                    captured = await _speechTurns.CaptureAsync(
+                        turnOrder,
+                        initialTimeout,
+                        overallTimeout,
+                        gracePeriod,
+                        cancellationToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    // The exam clock hit zero, the student pressed "Nop bai", or proctoring
+                    // force-ended the attempt -- all while the student was mid-answer. CaptureAsync
+                    // unwinds before CompleteCapture, so the recorder still holds the audio and
+                    // nobody has drained it; ExamAttemptRunner's finally is about to call
+                    // recorder.StopAsync(), which clears the buffer. Rescue it here or the answer
+                    // is gone from the results entirely -- not scored zero, simply absent.
+                    var rescued = _speechTurns.TrySalvageInFlightCapture(turnOrder);
+                    if (rescued is null || rescued.Pcm.Length < MinimumSalvageBytes())
+                    {
+                        if (rescued is not null)
+                        {
+                            LocalFileLogger.Info("exam_flow", "turn_salvage_skipped", new
+                            {
+                                turnOrder,
+                                reason = "below_minimum_audio",
+                                pcmBytes = rescued.Pcm.Length
+                            });
+                        }
+                        throw;
+                    }
+
+                    captured = rescued;
+                    salvaged = true;
+                    // Raised here rather than from ExamAttemptRunner's catch so the "dang luu"
+                    // overlay appears within milliseconds instead of after this method unwinds.
+                    FinalAnswerSaveStarted?.Invoke();
+                    LocalFileLogger.Info("exam_flow", "turn_salvage_begin", new
+                    {
+                        answerId,
+                        paperItemId,
+                        turnOrder,
+                        pcmBytes = captured.Pcm.Length,
+                        captured.DurationSeconds
+                    });
+                }
                 lastTurnOrder = turnOrder;
 
                 StatusChanged?.Invoke(captured.EndReason switch
@@ -207,30 +258,56 @@ internal sealed class QuestionFlowRunner
                             questionContext));
                 }
 
+                // A salvaged turn is the student's last answer of the exam by definition, so tell
+                // Python not to hand back a follow-up: TurnProcessor clamps should_continue=false
+                // and speaks the closing line instead. Java never reads the decision reason, so
+                // this costs nothing at grading time.
                 var speechBudgetExceeded =
-                    captured.SpeechBudgetExceeded || budget.IsExceeded;
+                    salvaged || captured.SpeechBudgetExceeded || budget.IsExceeded;
                 RealtimeDecision decision;
                 bool avatarSpokeAfterDecision;
                 try
                 {
-                    (decision, avatarSpokeAfterDecision) =
-                        await _presentation.WaitForAvatarAfterAsync(
-                            token => _sessionClient.SendTurnEndAndWaitAsync(
-                                turnOrder,
-                                speechBudgetExceeded,
-                                captured.DurationSeconds,
-                                assessmentTurnCount,
-                                maxAssessmentTurns,
-                                token),
+                    if (salvaged)
+                    {
+                        // No WaitForAvatarAfterAsync: the student is watching the "dang luu"
+                        // overlay and the farewell is about to speak anyway, so waiting out the
+                        // closing line only adds seconds. What matters is that the turn_end frame
+                        // lands -- that is the only thing that makes Python publish the turn.
+                        decision = await SendTurnEndBoundedAsync(
+                            turnOrder,
+                            speechBudgetExceeded,
+                            captured.DurationSeconds,
+                            assessmentTurnCount,
+                            maxAssessmentTurns,
                             cancellationToken);
+                        avatarSpokeAfterDecision = false;
+                    }
+                    else
+                    {
+                        (decision, avatarSpokeAfterDecision) =
+                            await _presentation.WaitForAvatarAfterAsync(
+                                _ => SendTurnEndBoundedAsync(
+                                    turnOrder,
+                                    speechBudgetExceeded,
+                                    captured.DurationSeconds,
+                                    assessmentTurnCount,
+                                    maxAssessmentTurns,
+                                    cancellationToken),
+                                cancellationToken);
+                    }
                 }
-                catch (TimeoutException ex)
+                // Wider than the TimeoutException this used to catch: after a proctoring force_end
+                // Python closes the socket, so the send throws InvalidOperationException /
+                // WebSocketException instead. Letting those escape would turn a clean cancellation
+                // into ExamAttemptRunner's run_failed path and mark the attempt INTERRUPTED.
+                catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     LocalFileLogger.Error(
                         "exam_flow",
                         "turn_end_decision_timeout",
                         ex,
-                        new { turnOrder });
+                        new { turnOrder, salvaged });
                     decision = new RealtimeDecision
                     {
                         ShouldContinue = false,
@@ -241,6 +318,21 @@ internal sealed class QuestionFlowRunner
                 }
 
                 _sessionClient.SetResumeCheckpoint(answerId, turnOrder);
+
+                if (salvaged)
+                {
+                    LocalFileLogger.Info("exam_flow", "turn_salvage_complete", new
+                    {
+                        answerId,
+                        turnOrder,
+                        decisionReason = decision.Reason
+                    });
+                    // Hand control back to ExamAttemptRunner's OperationCanceledException handler
+                    // so its _submitRequested branch (farewell -> drain -> SUBMITTED) runs.
+                    // Falling through would only present the next question before the loop's own
+                    // ThrowIfCancellationRequested threw anyway.
+                    throw new OperationCanceledException(cancellationToken);
+                }
                 if (!string.IsNullOrWhiteSpace(decision.NextPromptText))
                 {
                     TranscriptAppended?.Invoke($"AI: {decision.NextPromptText}");
@@ -288,6 +380,65 @@ internal sealed class QuestionFlowRunner
             budget.ProgressChanged -= HandleBudgetProgress;
         }
     }
+
+    /// <summary>
+    /// Sends turn_end for a turn whose audio is already in the archive queue, on a deadline the
+    /// run token can only SHORTEN -- never cancel.
+    ///
+    /// The queue uploads and archives that audio regardless (it runs on its own lifetime token),
+    /// but Python publishes AnswerTurnsRecorded -- the only thing that makes Java create the
+    /// answer row -- exclusively from its turn_end handler. So letting the run token abort this
+    /// handshake produces archived audio that Java never sees: the same lost answer this whole
+    /// change exists to prevent, one step further along the pipeline.
+    ///
+    /// Normal operation keeps the existing generous ceiling; a shutdown grants a few more seconds
+    /// of grace and then gives up, because the student is watching a "saving" overlay and cannot
+    /// be made to wait out the 180s reconnect-recovery ceiling.
+    ///
+    /// Deliberately never retried: SendTurnEndAndWaitAsync awaits the send before registering its
+    /// cancellation callback, so a caller catching a cancellation genuinely cannot tell whether
+    /// the frame reached the wire. Re-sending blind would complete the turn twice server-side and
+    /// spawn a second publish for a turn that will never be archived.
+    /// </summary>
+    private async Task<RealtimeDecision> SendTurnEndBoundedAsync(
+        int turnOrder,
+        bool speechBudgetExceeded,
+        double durationSeconds,
+        int assessmentTurnCount,
+        int maxAssessmentTurns,
+        CancellationToken runToken)
+    {
+        using var handshake = new CancellationTokenSource(
+            TimeSpan.FromSeconds(Math.Max(15, _settings.QuestionTurnTimeoutSeconds)));
+        // Fires synchronously when runToken is already cancelled (the salvage case), so the grace
+        // window starts immediately there. CancelAfter reschedules the existing timer.
+        // Registered after the CTS and disposed before it, so the callback can never touch a
+        // disposed source.
+        using var shorten = runToken.Register(
+            () => handshake.CancelAfter(_shutdownGrace()));
+
+        try
+        {
+            return await _sessionClient.SendTurnEndAndWaitAsync(
+                turnOrder,
+                speechBudgetExceeded,
+                durationSeconds,
+                assessmentTurnCount,
+                maxAssessmentTurns,
+                handshake.Token);
+        }
+        catch (OperationCanceledException) when (handshake.IsCancellationRequested)
+        {
+            // Normalise to the exception the caller already handles. This must never look like a
+            // run-token cancellation, or the caller would mistake it for "the exam was cancelled".
+            throw new TimeoutException(
+                $"turn_end handshake for turn {turnOrder} gave up after its shutdown grace.");
+        }
+    }
+
+    // 16 kHz, 16-bit, mono.
+    private int MinimumSalvageBytes() =>
+        16_000 * 2 * Math.Max(0, _settings.MinimumSalvageAudioMilliseconds) / 1000;
 
     private void HandleSpeakingTimeChanged(TimeSpan elapsed, TimeSpan limit) =>
         SpeakingTimeChanged?.Invoke(elapsed, limit);

@@ -58,6 +58,45 @@ public class AppSettings
     public int SilenceTimeoutAfterRepeatSeconds { get; set; } = 18;
     public int PostSpeechSilenceGracePeriodSeconds { get; set; } = 4;
     public int AvatarSpeechMaxWaitSeconds { get; set; } = 25;
+
+    // --- Shutdown budget -------------------------------------------------------------------
+    // Every step of "the exam is ending" needs its own deadline, because the normal ceilings are
+    // sized for reconnect recovery (QuestionTurnTimeoutSeconds is 180s) and a student staring at
+    // a "dang luu" overlay cannot be made to wait that out. Total worst case is ~41s.
+    //
+    // These matter because a turn only reaches Java by a long chain: PCM -> S3 -> Python's
+    // POST /turns/archive -> the websocket turn_end handshake -> Python publishes
+    // AnswerTurnsRecorded -> Kafka -> Java writes the turn row. Java grades synchronously inside
+    // the PATCH that marks the session SUBMITTED, so anything still in flight when that PATCH
+    // lands exists in the database but is never graded.
+
+    // Grace given to the turn_end handshake after the run token is cancelled on submit. Server
+    // work is one transcript flush (3s hard cap) plus one LLM decision, typically 2-8s.
+    public int SubmitTurnEndGraceSeconds { get; set; } = 10;
+
+    // Same, for the stop / proctoring force-end paths. Shorter on purpose: nothing is being
+    // graded, and after a force_end Python has already closed the socket so the send fails fast.
+    public int InterruptTurnEndGraceSeconds { get; set; } = 5;
+
+    // Ceiling for exam_end + its farewell utterance. Previously unbounded (CancellationToken.None
+    // over a 180s ack ceiling plus a 60s avatar wait = 240s of a student watching nothing).
+    public int SubmitFarewellTimeoutSeconds { get; set; } = 20;
+
+    // Ceiling for draining pending turn uploads before the session is marked SUBMITTED.
+    // NOTE: Python's archival runs Azure STT continuous recognition, which scales with audio
+    // length -- a 60-90s answer can take tens of seconds to land. Raise this (env
+    // FINAL_ARCHIVE_DRAIN_TIMEOUT_SECONDS) if 'pending_archives_incomplete' shows up in the logs.
+    public int FinalArchiveDrainTimeoutSeconds { get; set; } = 20;
+
+    // Bridge between "the archive POST returned 200" and "Java has committed the turn row":
+    // Python still has to notice the archived turn (it polls), publish to Kafka, and let Java's
+    // consumer commit. Without this the PATCH can win the race and the turn goes ungraded.
+    public int PostArchiveSettleSeconds { get; set; } = 3;
+
+    // Floor for salvaging an aborted capture. TurnAudioRecorder always seeds a turn with
+    // TurnAudioPreRollMilliseconds of pre-roll, so anything near that floor holds no speech --
+    // uploading it would create a junk turn row and cost Python a doomed 92s archive poll.
+    public int MinimumSalvageAudioMilliseconds { get; set; } = 800;
     public int TurnAudioPreRollMilliseconds { get; set; } = 400;
     public int TurnAudioTailMilliseconds { get; set; } = 500;
     public int CameraDeviceIndex { get; set; } = 0;

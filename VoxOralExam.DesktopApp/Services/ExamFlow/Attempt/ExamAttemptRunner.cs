@@ -66,6 +66,12 @@ internal sealed class ExamAttemptRunner
     public event Action<bool>? AvatarSpeakingChanged;
     public event Action<TimeSpan, TimeSpan>? QuestionSpeakingTimeChanged;
 
+    /// <summary>
+    /// True while the attempt is saving the student's final answer and closing out the session,
+    /// false once the status has been submitted. Drives the "dang luu" overlay.
+    /// </summary>
+    public event Action<bool>? FinalSaveStateChanged;
+
     public bool IsMicMuted => _recorder?.IsMuted ?? _isMicMuted;
 
     public async Task RunAsync(CancellationToken cancellationToken)
@@ -95,7 +101,13 @@ internal sealed class ExamAttemptRunner
             _sessionClient,
             presentation,
             speechTurns,
-            archiveQueue);
+            archiveQueue,
+            // Submit: the student is watching a "saving" overlay, so pay for the answer to make
+            // it all the way to Java. Stop / force-end: the window is closing or Python has
+            // already hung up, so fail fast.
+            () => TimeSpan.FromSeconds(_submitRequested
+                ? _settings.SubmitTurnEndGraceSeconds
+                : _settings.InterruptTurnEndGraceSeconds));
 
         _recorder = recorder;
         _speechTurns = speechTurns;
@@ -141,9 +153,15 @@ internal sealed class ExamAttemptRunner
             await presentation.WaitForAvatarAfterAsync(
                 token => _sessionClient.SendExamEndAndWaitForAckAsync(token),
                 runToken);
+            // Even the clean finish drains and settles before the status goes up, so tell the
+            // student rather than leaving them on a frozen-looking screen.
+            FinalSaveStateChanged?.Invoke(true);
             await CompleteAttemptAsync(
                 archiveQueue,
                 "SUBMITTED",
+                drainTimeout: TimeSpan.FromSeconds(
+                    _settings.FinalArchiveDrainTimeoutSeconds),
+                settle: TimeSpan.FromSeconds(_settings.PostArchiveSettleSeconds),
                 notifyEnded: true,
                 completed: true);
         }
@@ -151,18 +169,38 @@ internal sealed class ExamAttemptRunner
         {
             if (_submitRequested)
             {
-                await SendFarewellBestEffortAsync(presentation);
-                await CompleteAttemptAsync(
-                    archiveQueue,
-                    "SUBMITTED",
-                    notifyEnded: true,
-                    completed: true);
+                // Idempotent with the signal QuestionFlowRunner may already have raised from a
+                // salvage -- the ViewModel just sets a bool. Raised here too so the overlay also
+                // appears when there was nothing to salvage, since exam_end and the drain still
+                // take real time.
+                FinalSaveStateChanged?.Invoke(true);
+                try
+                {
+                    await SendFarewellBestEffortAsync(presentation);
+                }
+                finally
+                {
+                    await CompleteAttemptAsync(
+                        archiveQueue,
+                        "SUBMITTED",
+                        drainTimeout: TimeSpan.FromSeconds(
+                            _settings.FinalArchiveDrainTimeoutSeconds),
+                        settle: TimeSpan.FromSeconds(_settings.PostArchiveSettleSeconds),
+                        notifyEnded: true,
+                        completed: true);
+                }
             }
             else
             {
                 await CompleteAttemptAsync(
                     archiveQueue,
                     "INTERRUPTED",
+                    // Shorter on the stop path: this runs inside ExamWindow_Closing's awaited
+                    // cleanup, so it is literally how long the window takes to disappear. No
+                    // settle either -- nothing is being graded on an interrupted attempt.
+                    drainTimeout: TimeSpan.FromSeconds(
+                        _settings.FinalArchiveDrainTimeoutSeconds),
+                    settle: TimeSpan.Zero,
                     notifyEnded: _forceEndRequested || !_stopRequested,
                     completed: false);
             }
@@ -173,6 +211,9 @@ internal sealed class ExamAttemptRunner
             await CompleteAttemptAsync(
                 archiveQueue,
                 "INTERRUPTED",
+                drainTimeout: TimeSpan.FromSeconds(
+                    _settings.FinalArchiveDrainTimeoutSeconds),
+                settle: TimeSpan.Zero,
                 notifyEnded: !_stopRequested,
                 completed: false);
             throw;
@@ -225,12 +266,37 @@ internal sealed class ExamAttemptRunner
     private async Task CompleteAttemptAsync(
         TurnArchiveQueue archiveQueue,
         string status,
+        TimeSpan drainTimeout,
+        TimeSpan settle,
         bool notifyEnded,
         bool completed)
     {
-        await archiveQueue.DrainAsync(TimeSpan.FromSeconds(30));
+        LocalFileLogger.Info("exam_flow", "final_drain_begin", new
+        {
+            status,
+            drainSeconds = drainTimeout.TotalSeconds
+        });
+        await archiveQueue.DrainAsync(drainTimeout);
+        LocalFileLogger.Info("exam_flow", "final_drain_complete", new { status });
+
+        if (settle > TimeSpan.Zero)
+        {
+            // Java runs the whole grading submission synchronously inside the PATCH that marks
+            // this session SUBMITTED, snapshotting the answer's turn rows right then. A drained
+            // archive only means Python HAS the turn -- it still has to notice it (it polls),
+            // publish AnswerTurnsRecorded, and let Java's consumer commit the row. A turn that
+            // lands after the PATCH exists in the database but is never graded.
+            LocalFileLogger.Info("exam_flow", "submit_settle_delay", new
+            {
+                seconds = settle.TotalSeconds
+            });
+            await Task.Delay(settle);
+        }
+
         await SubmitSessionStatusAsync(status);
         await StopProctoringAsync();
+        // Before ExamEnded so the saving overlay is already down even if a subscriber throws.
+        FinalSaveStateChanged?.Invoke(false);
         if (notifyEnded)
         {
             ExamEnded?.Invoke(completed);
@@ -240,11 +306,16 @@ internal sealed class ExamAttemptRunner
     private async Task SendFarewellBestEffortAsync(
         QuestionPresentationService presentation)
     {
+        // Was CancellationToken.None, which meant SendExamEndAndWaitForAckAsync's 180s ceiling
+        // plus WaitForAvatarCompletionAsync's own 60s -- up to four minutes of a student watching
+        // nothing happen after their exam ended.
+        using var deadline = new CancellationTokenSource(
+            TimeSpan.FromSeconds(Math.Max(1, _settings.SubmitFarewellTimeoutSeconds)));
         try
         {
             await presentation.WaitForAvatarAfterAsync(
                 token => _sessionClient.SendExamEndAndWaitForAckAsync(token),
-                CancellationToken.None);
+                deadline.Token);
         }
         catch (Exception ex)
         {
@@ -411,6 +482,7 @@ internal sealed class ExamAttemptRunner
         questionRunner.StatusChanged += HandleStatusChanged;
         questionRunner.TranscriptAppended += HandleTranscriptAppended;
         questionRunner.SpeakingTimeChanged += HandleSpeakingTimeChanged;
+        questionRunner.FinalAnswerSaveStarted += HandleFinalAnswerSaveStarted;
     }
 
     private void UnwireRuntimeEvents(
@@ -424,6 +496,18 @@ internal sealed class ExamAttemptRunner
         questionRunner.StatusChanged -= HandleStatusChanged;
         questionRunner.TranscriptAppended -= HandleTranscriptAppended;
         questionRunner.SpeakingTimeChanged -= HandleSpeakingTimeChanged;
+        questionRunner.FinalAnswerSaveStarted -= HandleFinalAnswerSaveStarted;
+    }
+
+    // The salvage fires on every cancellation path, but only a submit should tell the student we
+    // are saving their final answer. A stop is the window closing, and a force-end already shows
+    // "bai thi da tam dung de xem xet" -- covering that with a saving overlay would misinform them.
+    private void HandleFinalAnswerSaveStarted()
+    {
+        if (_submitRequested)
+        {
+            FinalSaveStateChanged?.Invoke(true);
+        }
     }
 
     private void HandleStudentSpeakingChanged(bool value) =>
