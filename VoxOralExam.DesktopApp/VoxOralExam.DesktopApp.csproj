@@ -50,8 +50,5 @@
          ..\.env: lets local dev point JAVA_BASE_URL/PYTHON_BASE_URL/etc at localhost without
          touching ..\.env, which stays pointed at the live deployment. Gitignored, not expected
          to exist by default: create it from ..\.env.local.example when needed. -->
-    <None Include="..\.env.local" Condition="Exists('..\.env.local')" Link=".env.local">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </None>
   </ItemGroup>
 </Project>
