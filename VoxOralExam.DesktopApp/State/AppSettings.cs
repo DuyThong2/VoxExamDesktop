@@ -4,7 +4,6 @@ public class AppSettings
 {
     public string JavaBaseUrl { get; set; } = "http://localhost:8081";
     public string PythonBaseUrl { get; set; } = "http://localhost:8000";
-    public string WebRtcSignalingUrl { get; set; } = "ws://localhost:8082/signaling";
     public string StreamingBaseUrl { get; set; } = "http://localhost:8082";
     public bool EnableLocalRecording { get; set; } = true;
     public bool EnableSegmentUpload { get; set; } = true;

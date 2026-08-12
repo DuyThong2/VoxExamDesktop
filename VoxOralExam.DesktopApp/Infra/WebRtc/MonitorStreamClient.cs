@@ -45,6 +45,10 @@ public sealed class MonitorStreamClient : IAsyncDisposable
     private readonly string _origin;
     private readonly int _videoFps;
     private readonly int _videoBitrate;
+    private readonly string _stunUrls;
+    private readonly string _turnUrl;
+    private readonly string _turnUsername;
+    private readonly string _turnCredential;
     private readonly SemaphoreSlim _sendGate = new(1, 1);
 
     // Only used to seed the very first frame's RTP duration, before any real inter-frame gap is
@@ -83,7 +87,8 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
     public MonitorStreamClient(
         string streamingBaseUrl, string scheduleId, RecordingStreamType streamType, string token, string origin,
-        int videoFps, int videoBitrate)
+        int videoFps, int videoBitrate,
+        string stunUrls, string turnUrl, string turnUsername, string turnCredential)
     {
         var wireStreamType = streamType == RecordingStreamType.Camera ? "camera" : "screen";
         var wsBase = ToWebSocketBase(streamingBaseUrl);
@@ -95,6 +100,56 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         // compute theirs from actual captured timestamps instead.
         _firstFrameVideoDuration = (uint)(VideoClockRate / _videoFps);
         _origin = origin;
+        _stunUrls = stunUrls ?? string.Empty;
+        _turnUrl = turnUrl ?? string.Empty;
+        _turnUsername = turnUsername ?? string.Empty;
+        _turnCredential = turnCredential ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Same STUN/TURN set the proctoring connection uses (Infra/Clients/AIService/WebRtcClient.cs's
+    /// BuildRtcConfiguration) -- kept deliberately identical rather than shared, matching this
+    /// class's existing "mirrors WebRtcClient's pattern" structure.
+    ///
+    /// This used to be <c>new RTCPeerConnection(null)</c>, i.e. NO ice servers at all, which meant
+    /// the client only ever offered its own LAN address. Over the internet that is unusable twice
+    /// over: the exam machine sits behind home NAT so the address is unreachable, and without STUN
+    /// it never learns its public address either, so the SDP carries nothing the server can reach.
+    /// vox-streaming does allocate a TURN relay of its own, but it can only grant coturn permission
+    /// for the peer addresses it sees in that SDP -- the private one -- so the real packets arrived
+    /// from an un-permitted address and were dropped. Confirmed live 2026-08-11: camera and screen
+    /// both went connecting -> failed after the 31s ICE timeout while HTTP segment upload (a
+    /// separate path) kept working, so recordings were fine and only the live view was dead.
+    /// </summary>
+    private RTCConfiguration BuildRtcConfiguration()
+    {
+        var iceServers = new List<RTCIceServer>();
+        foreach (var url in _stunUrls.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var trimmedUrl = url.Trim();
+            if (trimmedUrl.Length > 0)
+            {
+                iceServers.Add(new RTCIceServer { urls = trimmedUrl });
+            }
+        }
+
+        if (iceServers.Count == 0)
+        {
+            iceServers.Add(new RTCIceServer { urls = "stun:stun.l.google.com:19302" });
+        }
+
+        var turnUrl = _turnUrl.Trim();
+        if (!string.IsNullOrEmpty(turnUrl))
+        {
+            iceServers.Add(new RTCIceServer
+            {
+                urls = turnUrl,
+                username = _turnUsername,
+                credential = _turnCredential
+            });
+        }
+
+        return new RTCConfiguration { iceServers = iceServers };
     }
 
     public async Task ConnectAsync(CancellationToken ct)
@@ -104,7 +159,7 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _videoEncoder = new MediaFoundationH264Encoder(_videoFps, _videoBitrate);
         _audioEncoder = new OpusAudioEncoder();
-        _pc = new RTCPeerConnection(null);
+        _pc = new RTCPeerConnection(BuildRtcConfiguration());
 
         _videoQueue = Channel.CreateBounded<VideoFrameItem>(new BoundedChannelOptions(2)
         {
