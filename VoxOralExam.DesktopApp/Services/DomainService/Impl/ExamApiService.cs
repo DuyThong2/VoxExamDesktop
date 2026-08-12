@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using VoxOralExam.Core.Models;
+using VoxOralExam.DesktopApp.Dtos.Requests;
 using VoxOralExam.DesktopApp.Services.DomainService;
 using VoxOralExam.DesktopApp.State;
 
@@ -66,6 +67,13 @@ public class ExamApiService : IExamApiService
             $"/api/v1/exam-sessions/{sessionId:D}/remaining-time");
         request.Content = JsonContent.Create(new { remainingSeconds });
         await SendAsync<object>(request, ct);
+    }
+
+    public async Task ReportAiUsageAsync(Guid sessionId, ReportAiUsageRequestDto request, CancellationToken ct = default)
+    {
+        using var httpRequest = BuildRequest(HttpMethod.Post, $"/api/v1/exam-sessions/{sessionId:D}/ai-usage");
+        httpRequest.Content = JsonContent.Create(request);
+        await SendAsync<object>(httpRequest, ct);
     }
 
     private HttpRequestMessage BuildRequest(HttpMethod method, string path)
