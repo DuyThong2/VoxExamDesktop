@@ -2,6 +2,9 @@ using System.IO;
 using System.Text;
 using Microsoft.CognitiveServices.Speech;
 using NAudio.Wave;
+using VoxOralExam.DesktopApp.Dtos.Requests;
+using VoxOralExam.DesktopApp.Services;
+using VoxOralExam.DesktopApp.Services.DomainService;
 using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.Infra.Devices;
@@ -24,15 +27,22 @@ namespace VoxOralExam.DesktopApp.Infra.Devices;
 /// </summary>
 public sealed class LocalAvatarSpeaker
 {
+    // PLACEHOLDER -- khớp DURATION_PRICING_PER_SECOND["azure_tts"] bên Agentic AI
+    // (config/ai_usage_pricing.py). Chưa phải giá thật, cần thay sau khi có đủ dữ liệu
+    // ai_usage_record thật để hiệu chỉnh (xem QuotaPricingProperties bên BE).
+    private const decimal TtsPricePerSecondUsd = 0.006m;
+
     private readonly AppSettings _settings;
     private readonly ExamSessionState _sessionState;
+    private readonly IExamApiService _examApiService;
     private readonly object _playbackSync = new();
     private WaveOutEvent? _activeWaveOut;
 
-    public LocalAvatarSpeaker(AppSettings settings, ExamSessionState sessionState)
+    public LocalAvatarSpeaker(AppSettings settings, ExamSessionState sessionState, IExamApiService examApiService)
     {
         _settings = settings;
         _sessionState = sessionState;
+        _examApiService = examApiService;
     }
 
     public async Task SpeakAsync(string text, string? rate, CancellationToken ct)
@@ -43,7 +53,60 @@ public sealed class LocalAvatarSpeaker
         }
 
         var wav = await SynthesizeAsync(text, rate, ct).ConfigureAwait(false);
+        // Chi phí đã phát sinh ngay khi Azure trả về audio -- báo cáo không phụ thuộc ct của lượt
+        // phát (playback có thể bị huỷ sau đó, nhưng tiền đã tốn rồi), và không được chặn/làm hỏng
+        // việc phát âm thanh nếu báo cáo lỗi.
+        _ = ReportTtsUsageBestEffortAsync(wav);
         await PlayAsync(wav, ct).ConfigureAwait(false);
+    }
+
+    private async Task ReportTtsUsageBestEffortAsync(byte[] wav)
+    {
+        try
+        {
+            var examSessionId = _sessionState.ExamAttemptId;
+            if (examSessionId == Guid.Empty)
+            {
+                return;
+            }
+
+            double durationSeconds;
+            using (var stream = new MemoryStream(wav))
+            using (var reader = new WaveFileReader(stream))
+            {
+                durationSeconds = reader.TotalTime.TotalSeconds;
+            }
+
+            var questionId = _sessionState.CurrentQuestion?.Id;
+            var turnId = questionId.HasValue
+                && _sessionState.AttemptAnswerIdsByQuestionId.TryGetValue(questionId.Value, out var answerId)
+                ? answerId
+                : examSessionId;
+
+            var request = new ReportAiUsageRequestDto
+            {
+                TurnId = turnId,
+                UsageEvents =
+                [
+                    new AiUsageEventItemDto
+                    {
+                        UsageEventId = Guid.NewGuid(),
+                        Type = "DURATION",
+                        Provider = "azure_tts",
+                        DurationMs = (long)(durationSeconds * 1000),
+                        UnitPrice = new { amount = TtsPricePerSecondUsd, unit = "per_second", currency = "USD" },
+                        CostUsd = Math.Round((decimal)durationSeconds * TtsPricePerSecondUsd, 8),
+                        OccurredAt = DateTimeOffset.UtcNow,
+                    }
+                ],
+            };
+
+            await _examApiService.ReportAiUsageAsync(examSessionId, request, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("exam_flow", "ai_usage_report_failed", ex, new { provider = "azure_tts" });
+        }
     }
 
     public void Stop()

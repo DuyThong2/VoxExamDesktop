@@ -1,5 +1,6 @@
 using VoxOralExam.Core.Models;
 
+using VoxOralExam.DesktopApp.Dtos.Requests;
 using VoxOralExam.DesktopApp.Services.DomainService;
 
 namespace VoxOralExam.DesktopApp.Mocks;
@@ -28,6 +29,9 @@ public class MockExamApiService : IExamApiService
         => Task.CompletedTask;
 
     public Task UpdateRemainingTimeAsync(Guid sessionId, int remainingSeconds, CancellationToken ct = default)
+        => Task.CompletedTask;
+
+    public Task ReportAiUsageAsync(Guid sessionId, ReportAiUsageRequestDto request, CancellationToken ct = default)
         => Task.CompletedTask;
 }
 
