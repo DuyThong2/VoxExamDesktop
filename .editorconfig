@@ -1,0 +1,27 @@
+root = true
+
+# Deliberately narrow: this file exists to pin the text encoding, not to impose formatting.
+#
+# Vietnamese UI strings are stored as precomposed UTF-8, and this repo has already been bitten once
+# by an editor guessing Windows-1252 on a BOM-less file and re-saving it -- that is where the "Â§"
+# sequences in some comments came from. Pinning charset stops that from recurring.
+#
+# charset is utf-8 (no BOM) rather than utf-8-bom because that is what almost every existing file
+# already is; utf-8-bom would make editors prepend a BOM to every file anyone touches, burying real
+# changes in whole-file encoding diffs.
+#
+# No trim_trailing_whitespace / insert_final_newline on purpose: 63 of the 146 existing .cs/.xaml
+# files carry trailing whitespace, so enabling those would rewrite unrelated lines in every file
+# anyone happens to open. Same reasoning as the BOM decision above.
+[*]
+charset = utf-8
+end_of_line = crlf
+
+# Matches the existing code; inert for files already written, applies to new typing only.
+[*.{cs,xaml}]
+indent_style = space
+indent_size = 4
+
+[*.{json,yml,yaml}]
+indent_style = space
+indent_size = 2

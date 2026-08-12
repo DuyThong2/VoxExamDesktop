@@ -57,7 +57,7 @@ public class ExamEntryApiService : IExamEntryApiService
             {
                 error = await response.Content.ReadFromJsonAsync<ErrorPayload>(JsonOptions, ct);
             }
-            throw new OtpVerificationException(error?.Message ?? "Ma OTP khong dung hoac da het han.");
+            throw new OtpVerificationException(error?.Message ?? "Mã OTP không đúng hoặc đã hết hạn.");
         }
 
         if ((int)response.StatusCode >= 400 && (int)response.StatusCode < 500)
@@ -67,13 +67,13 @@ public class ExamEntryApiService : IExamEntryApiService
             {
                 error = await response.Content.ReadFromJsonAsync<ErrorPayload>(JsonOptions, ct);
             }
-            throw new ExamEntryRejectedException(error?.Message ?? "Ban chua du dieu kien vao thi.");
+            throw new ExamEntryRejectedException(error?.Message ?? "Bạn chưa đủ điều kiện vào thi.");
         }
 
         response.EnsureSuccessStatusCode();
         var payload = await response.Content.ReadFromJsonAsync<ApiResponse<ExamEntryTicket>>(JsonOptions, ct);
         return payload?.Data
-            ?? throw new InvalidOperationException("Phan hoi vao thi khong chua entry ticket.");
+            ?? throw new InvalidOperationException("Phản hồi vào thi không chứa entry ticket.");
     }
 
     private sealed class ApiResponse<T>

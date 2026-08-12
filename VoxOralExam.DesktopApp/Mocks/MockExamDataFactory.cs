@@ -22,7 +22,7 @@ public class MockExamDataFactory
                 CanEnter = paper.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase),
                 EntryMessage = paper.Status.Equals("in_progress", StringComparison.OrdinalIgnoreCase)
                     ? string.Empty
-                    : "Chua den luc vao thi cho bai nay.",
+                    : "Chưa đến lúc vào thi cho bài này.",
             })
             .ToList();
     }
@@ -206,9 +206,9 @@ public class MockExamDataFactory
                 ExamId = mathExamId,
                 ExamPaperId = Guid.Parse("22222222-aaaa-2222-aaaa-222222222222"),
                 ExamAttemptId = Guid.Parse("22222222-bbbb-2222-bbbb-222222222222"),
-                Title = "Ky thi van dap Toan ung dung (rut gon)",
-                Subject = "Toan",
-                Description = "Mock exam rut gon de test nhanh pipeline tung turn.",
+                Title = "Kỳ thi vấn đáp Toán ứng dụng (rút gọn)",
+                Subject = "Toán",
+                Description = "Mock exam rút gọn để test nhanh pipeline từng turn.",
                 DurationMinutes = 3,
                 ExamDate = today.AddDays(1).AddHours(14),
                 ScheduleEndAt = today.AddDays(1).AddHours(14).AddMinutes(3),
@@ -226,9 +226,9 @@ public class MockExamDataFactory
                             Code = "MATH-APP-Q1",
                             Type = QuestionType.ShortAnswer,
                             DifficultyLevel = "medium",
-                            InstructionText = "Trinh bay ngan gon cach giai.",
-                            QuestionText = "Giai he phuong trinh: 2x + y = 7 va x - y = 2.",
-                            PromptText = "Bai toan giai he phuong trinh co ban.",
+                            InstructionText = "Trình bày ngắn gọn cách giải.",
+                            QuestionText = "Giải hệ phương trình: 2x + y = 7 và x - y = 2.",
+                            PromptText = "Bài toán giải hệ phương trình cơ bản.",
                             PreparationText = string.Empty,
                             PreparationTimeSeconds = 0,
                             MinResponseSeconds = 10,
@@ -246,10 +246,10 @@ public class MockExamDataFactory
                             Code = "MATH-APP-Q2",
                             Type = QuestionType.Description,
                             DifficultyLevel = "medium",
-                            InstructionText = "Giai thich ngan gon y nghia thuc te.",
-                            QuestionText = "Neu ham so mo ta chi phi san xuat la C(x) = x^2 + 4x + 10, dao ham C'(x) cho ta thong tin gi?",
-                            PromptText = "Giai thich y nghia thuc te cua dao ham chi phi.",
-                            PreparationText = "Goi y: nghi ve toc do thay doi cua chi phi.",
+                            InstructionText = "Giải thích ngắn gọn ý nghĩa thực tế.",
+                            QuestionText = "Nếu hàm số mô tả chi phí sản xuất là C(x) = x^2 + 4x + 10, đạo hàm C'(x) cho ta thông tin gì?",
+                            PromptText = "Giải thích ý nghĩa thực tế của đạo hàm chi phí.",
+                            PreparationText = "Gợi ý: nghĩ về tốc độ thay đổi của chi phí.",
                             PreparationTimeSeconds = 5,
                             MinResponseSeconds = 10,
                             MaxResponseSeconds = 25

@@ -14,7 +14,7 @@ public class MockExamEntryApiService : IExamEntryApiService
 
         if (otp != DevOtp)
         {
-            throw new OtpVerificationException($"Ma OTP khong dung (che do dev: nhap {DevOtp}).");
+            throw new OtpVerificationException($"Mã OTP không đúng (chế độ dev: nhập {DevOtp}).");
         }
 
         return CreateTicket();
