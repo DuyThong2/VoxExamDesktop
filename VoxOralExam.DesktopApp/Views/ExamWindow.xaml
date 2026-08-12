@@ -3,7 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="clr-namespace:VoxOralExam.DesktopApp.Controls"
         xmlns:views="clr-namespace:VoxOralExam.DesktopApp.Views"
-        Title="Vox Oral Exam - Ky thi van dap"
+        Title="Vox Oral Exam - Kỳ thi vấn đáp"
         Height="700"
         Width="1200"
         WindowStartupLocation="CenterScreen"
@@ -104,7 +104,7 @@
                             </Style>
                         </StackPanel.Style>
                         <TextBlock Text="Camera off" FontSize="14" HorizontalAlignment="Center" />
-                        <TextBlock Text="Camera khong hoat dong"
+                        <TextBlock Text="Camera không hoạt động"
                                    Foreground="#64748B"
                                    FontSize="10"
                                    HorizontalAlignment="Center"
@@ -127,7 +127,7 @@
                     <StackPanel VerticalAlignment="Center">
                         <TextBlock Text="{Binding StudentName}" Foreground="White" FontSize="15" FontWeight="SemiBold" />
                         <TextBlock Foreground="#94A3B8" FontSize="12">
-                            <Run Text="Ma SV: " />
+                            <Run Text="Mã SV: " />
                             <Run Text="{Binding StudentId}" />
                         </TextBlock>
                     </StackPanel>
@@ -150,7 +150,7 @@
                 <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center">
                     <TextBlock Text="{Binding ExamTitle}" Foreground="White" FontSize="14" FontWeight="SemiBold" HorizontalAlignment="Right" />
                     <TextBlock Foreground="#94A3B8" FontSize="12" HorizontalAlignment="Right">
-                        <Run Text="Cau " />
+                        <Run Text="Câu " />
                         <Run Text="{Binding QuestionNumber}" />
                         <Run Text=" / " />
                         <Run Text="{Binding TotalQuestions}" />
@@ -221,7 +221,7 @@
                         <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,12">
                             <Border Background="#EFF6FF" CornerRadius="4" Padding="8,4">
                                 <TextBlock FontSize="12" FontWeight="SemiBold" Foreground="#2563EB">
-                                    <Run Text="CAU " />
+                                    <Run Text="CÂU " />
                                     <Run Text="{Binding QuestionNumber}" />
                                 </TextBlock>
                             </Border>
@@ -363,7 +363,7 @@
 
                             <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                                 <Ellipse Width="8" Height="8" Fill="#F59E0B" Margin="0,0,8,0" VerticalAlignment="Center" />
-                                <TextBlock Text="Dang cho hoc sinh tra loi..." FontSize="13" Foreground="#F59E0B" />
+                                <TextBlock Text="Đang chờ học sinh trả lời..." FontSize="13" Foreground="#F59E0B" />
                             </StackPanel>
 
                             <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
@@ -374,7 +374,7 @@
                                            VerticalAlignment="Center" />
                                 <Button Command="{Binding SubmitNowCommand}"
                                         IsEnabled="{Binding CanInteract}"
-                                        Content="Nop bai"
+                                        Content="Nộp bài"
                                         Padding="14,8"
                                         MinWidth="88"
                                         FontWeight="SemiBold"
@@ -426,7 +426,7 @@
                             CornerRadius="12,12,0,0"
                             BorderBrush="#E2E8F0"
                             BorderThickness="0,0,0,1">
-                        <TextBlock Text="Nhat ky hanh vi" FontSize="14" FontWeight="SemiBold" />
+                        <TextBlock Text="Nhật ký hành vi" FontSize="14" FontWeight="SemiBold" />
                     </Border>
 
                     <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" Padding="12,8">

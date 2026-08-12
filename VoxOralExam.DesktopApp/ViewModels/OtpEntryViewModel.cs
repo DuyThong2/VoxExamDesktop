@@ -49,7 +49,7 @@ public class OtpEntryViewModel : BaseViewModel
         _refreshTimer.Start();
     }
 
-    public string ExamTitle => _sessionState.SelectedExam?.Title ?? "(chua chon bai thi)";
+    public string ExamTitle => _sessionState.SelectedExam?.Title ?? "(chưa chọn bài thi)";
 
     public int OtpLength => _settings.OtpLength;
 
@@ -149,7 +149,7 @@ public class OtpEntryViewModel : BaseViewModel
         }
         catch (Exception ex)
         {
-            ErrorMessage = $"Khong xac thuc duoc OTP: {ex.Message}";
+            ErrorMessage = $"Không xác thực được OTP: {ex.Message}";
             HasError = true;
             _sessionState.EntryTicket = null;
             LocalFileLogger.Error("otp", "verify_failed", ex, new { examId });

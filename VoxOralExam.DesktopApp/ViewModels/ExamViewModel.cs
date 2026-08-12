@@ -19,6 +19,19 @@ namespace VoxOralExam.DesktopApp.ViewModels;
 
 public class ExamViewModel : BaseViewModel
 {
+    /// <summary>
+    /// How long to wait for the realtime session to become usable before giving the student their
+    /// window back. Generous on purpose: a slow-but-working connection must never trip this.
+    /// </summary>
+    private const int SessionReadyWatchdogSeconds = 120;
+
+    /// <summary>
+    /// Hard ceiling on the "attempt is finishing" phase, sized well above the worst realistic sum of
+    /// the farewell + archive-drain + settle budgets in <see cref="AppSettings"/>, so it only ever
+    /// fires when the flow has genuinely died without raising OnExamEnded.
+    /// </summary>
+    private const int ExamEndWatchdogSeconds = 180;
+
     private readonly CameraService _camera;
     private readonly IProctoringService _proctoring;
     private readonly ExamSessionState _sessionState;
@@ -37,8 +50,8 @@ public class ExamViewModel : BaseViewModel
     private string _examDurationText = "Thời lượng bài thi: 30 phút";
     private string _questionSpeakingTime = "00:00 / --:--";
     private string _responseWindowText = "Thời gian trả lời: chưa cấu hình";
-    private string _aiStatus = "Dang cho...";
-    private string _cameraStatus = "Dang khoi dong camera...";
+    private string _aiStatus = "Đang chờ...";
+    private string _cameraStatus = "Đang khởi động camera...";
     private int _questionNumber;
     private int _totalQuestions;
     private bool _initialized;
@@ -64,6 +77,12 @@ public class ExamViewModel : BaseViewModel
     private bool _showSubmittedOverlay;
     private bool _showErrorOverlay;
     private string _endScreenMessage = string.Empty;
+
+    // Defaults to true: an ExamViewModel exists only to run an attempt, so the window it backs is
+    // locked from construction and is unlocked exactly once, when that attempt is over.
+    private bool _isExamLocked = true;
+    private bool _sessionReady;
+    private DispatcherTimer? _lockWatchdogTimer;
 
     public ExamViewModel(
         CameraService camera,
@@ -257,6 +276,19 @@ public class ExamViewModel : BaseViewModel
 
     public bool CanInteract => !IsSubmitting && !IsSavingFinalAnswer;
 
+    /// <summary>
+    /// True while the student must stay in the exam window: the window greys out its close button
+    /// and refuses every user-initiated close while this is set. Cleared only by
+    /// <see cref="HandleExamEnded"/> or <see cref="UnlockWindowForFailure"/> -- deliberately NOT by
+    /// IsSubmitting/IsSavingFinalAnswer, because the final answer is still being persisted then and
+    /// a turn that lands after the attempt is closed out never gets graded.
+    /// </summary>
+    public bool IsExamLocked
+    {
+        get => _isExamLocked;
+        private set => SetProperty(ref _isExamLocked, value);
+    }
+
     public bool ShowSubmittedOverlay
     {
         get => _showSubmittedOverlay;
@@ -352,6 +384,7 @@ public class ExamViewModel : BaseViewModel
             AddLog("Bài thi này không yêu cầu giám sát, bỏ qua ghi hình.");
             PrepareProctoringUi();
             await _examFlow.StartAsync(CancellationToken.None);
+            StartSessionReadyWatchdog();
             return;
         }
 
@@ -401,6 +434,28 @@ public class ExamViewModel : BaseViewModel
 
         PrepareProctoringUi();
         await _examFlow.StartAsync(CancellationToken.None);
+        StartSessionReadyWatchdog();
+    }
+
+    /// <summary>
+    /// Covers the gap between "the attempt was told to start" and <see cref="HandleSessionReady"/>.
+    /// If the realtime session never becomes ready the countdown never runs, so nothing ever
+    /// auto-submits and nothing ever raises OnExamEnded -- the window would stay locked forever.
+    /// </summary>
+    private void StartSessionReadyWatchdog()
+    {
+        // Guards against arming after the session already came up. Today StartAsync completes
+        // synchronously so this cannot happen, but that is RealtimeExamFlowService's implementation
+        // detail; if it ever becomes genuinely async, arming late would unlock a perfectly healthy
+        // exam two minutes in -- the worst failure this feature can have.
+        if (_sessionReady)
+        {
+            return;
+        }
+
+        StartLockWatchdog(
+            SessionReadyWatchdogSeconds,
+            "Không kết nối được phiên thi. Bạn có thể đóng cửa sổ và liên hệ giám thị.");
     }
 
     public void AddLog(string message, LogType type = LogType.Info)
@@ -411,6 +466,65 @@ public class ExamViewModel : BaseViewModel
             Message = message,
             Type = type
         });
+    }
+
+    /// <summary>
+    /// Releases the window lock on a path where the exam can never signal its own end -- a startup
+    /// failure, or one of the watchdogs firing. Never called on a healthy attempt.
+    /// </summary>
+    public void UnlockWindowForFailure(string reason)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            StopLockWatchdog();
+            IsSavingFinalAnswer = false;
+            IsExamLocked = false;
+            ShowErrorOverlay = true;
+            EndScreenMessage = reason;
+            AddLog(reason, LogType.Error);
+        });
+    }
+
+    /// <summary>
+    /// Arms a one-shot failsafe that unlocks the window if the exam has not moved on by the deadline.
+    /// Not a feature: without it, a flow that dies without raising OnExamEnded would seal the student
+    /// into a window whose close button does nothing at all.
+    /// </summary>
+    private void StartLockWatchdog(int seconds, string reason)
+    {
+        StopLockWatchdog();
+
+        if (!IsExamLocked)
+        {
+            return;
+        }
+
+        _lockWatchdogTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(seconds)
+        };
+        _lockWatchdogTimer.Tick += (_, _) =>
+        {
+            StopLockWatchdog();
+            if (!IsExamLocked)
+            {
+                return;
+            }
+
+            LocalFileLogger.Error(
+                "exam_window",
+                "lock_watchdog_unlocked_window",
+                new InvalidOperationException(reason),
+                new { seconds });
+            UnlockWindowForFailure(reason);
+        };
+        _lockWatchdogTimer.Start();
+    }
+
+    private void StopLockWatchdog()
+    {
+        _lockWatchdogTimer?.Stop();
+        _lockWatchdogTimer = null;
     }
 
     public Task CleanupAsync()
@@ -436,6 +550,7 @@ public class ExamViewModel : BaseViewModel
         try
         {
             _countdownTimer?.Stop();
+            StopLockWatchdog();
             await _examFlow.StopAsync();
             await _recording.StopAsync(
                 _examCompleted ? RecordingStopReason.Submitted : RecordingStopReason.UserClosed,
@@ -470,7 +585,7 @@ public class ExamViewModel : BaseViewModel
         StudentName = _sessionState.CurrentUser?.DisplayName ?? _sessionState.CurrentUser?.Login ?? "Unknown user";
         StudentId = _sessionState.CurrentUser?.UserId ?? "N/A";
         ExamTitle = string.IsNullOrWhiteSpace(_sessionState.ExamTitle)
-            ? "Ky thi van dap"
+            ? "Kỳ thi vấn đáp"
             : _sessionState.ExamTitle;
         ExamDurationText = $"Thời lượng mã đề: {FormatDuration(_sessionState.DurationSeconds)}";
         CurrentQuestion = _sessionState.CurrentQuestion?.QuestionText ?? string.Empty;
@@ -478,8 +593,8 @@ public class ExamViewModel : BaseViewModel
         TotalQuestions = _sessionState.Questions.Count;
         ApplyCurrentQuestionAsset(_sessionState.CurrentQuestion?.Asset);
 
-        LogEntries.Add(new LogEntry { Time = DateTime.Now.AddMinutes(-2), Message = "Nguoi dung da dang nhap thanh cong", Type = LogType.Success });
-        LogEntries.Add(new LogEntry { Time = DateTime.Now.AddMinutes(-1), Message = $"Thiet bi: {_sessionState.CurrentUser?.Device.DeviceName ?? "unknown"}", Type = LogType.Info });
+        LogEntries.Add(new LogEntry { Time = DateTime.Now.AddMinutes(-2), Message = "Người dùng đã đăng nhập thành công", Type = LogType.Success });
+        LogEntries.Add(new LogEntry { Time = DateTime.Now.AddMinutes(-1), Message = $"Thiết bị: {_sessionState.CurrentUser?.Device.DeviceName ?? "unknown"}", Type = LogType.Info });
     }
 
     private async Task EnsureExamLoadedAsync()
@@ -542,7 +657,14 @@ public class ExamViewModel : BaseViewModel
     // vao man hinh thi/login) hoc sinh chua the tuong tac voi AI, khong duoc tinh vao gio lam bai.
     private void HandleSessionReady()
     {
-        Application.Current.Dispatcher.Invoke(StartCountdown);
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            // The session came up, so the "could not connect" failsafe has done its job. The exam is
+            // now expected to end through OnExamEnded, which arms its own watchdog on submit.
+            _sessionReady = true;
+            StopLockWatchdog();
+            StartCountdown();
+        });
     }
 
     private void StartCountdown()
@@ -595,7 +717,7 @@ public class ExamViewModel : BaseViewModel
     {
         var remaining = TimeSpan.FromSeconds(Math.Max(0, _remainingSecondsLocal));
         TimeRemaining = _remainingSecondsLocal <= 0
-            ? "Het gio!"
+            ? "Hết giờ!"
             : remaining.ToString(@"hh\:mm\:ss");
     }
 
@@ -662,6 +784,11 @@ public class ExamViewModel : BaseViewModel
 
         IsSubmitting = true;
         _countdownTimer?.Stop();
+        // Re-arms the failsafe for the finishing phase: if CompleteAttemptAsync itself throws, the
+        // run task faults unobserved and OnExamEnded never fires.
+        StartLockWatchdog(
+            ExamEndWatchdogSeconds,
+            "Bài thi không kết thúc đúng cách. Bạn có thể đóng cửa sổ và liên hệ giám thị.");
         _ = _examFlow.SubmitNowAsync();
     }
 
@@ -687,7 +814,7 @@ public class ExamViewModel : BaseViewModel
             TotalQuestions = prompt.TotalQuestions;
             ResponseWindowText = FormatResponseWindow(prompt.MinResponseSeconds, prompt.MaxResponseSeconds);
             QuestionSpeakingTime = FormatQuestionSpeakingTime(TimeSpan.Zero, TimeSpan.FromSeconds(Math.Max(0, prompt.MaxResponseSeconds)));
-            AddLog($"Dang hien cau {prompt.QuestionNumber}: {prompt.QuestionText}", LogType.Info);
+            AddLog($"Đang hiện câu {prompt.QuestionNumber}: {prompt.QuestionText}", LogType.Info);
         });
     }
 
@@ -710,7 +837,7 @@ public class ExamViewModel : BaseViewModel
         {
             if (!string.IsNullOrWhiteSpace(reason))
             {
-                AddLog($"không thể phát media asset: {reason}", LogType.Warning);
+                AddLog($"Không thể phát media asset: {reason}", LogType.Warning);
             }
         });
         _assetPresentationCoordinator.CompleteMediaPlayback();
@@ -741,6 +868,10 @@ public class ExamViewModel : BaseViewModel
             // Defensive: the end-screen overlay must always win over the saving one, even if the
             // attempt runner somehow ended without clearing the saving state itself.
             IsSavingFinalAnswer = false;
+            // Unlocked here, before the auto-close delay below starts, so CloseWindowAfterDelayAsync's
+            // Window.Close() passes ExamWindow's Closing guard instead of being cancelled by it.
+            StopLockWatchdog();
+            IsExamLocked = false;
             ShowSubmittedOverlay = succeeded;
             ShowErrorOverlay = !succeeded;
             if (succeeded)
@@ -834,7 +965,7 @@ public class ExamViewModel : BaseViewModel
         }
         catch (Exception ex)
         {
-            AddLog($"Khong the tai asset cau hoi: {ex.Message}", LogType.Warning);
+            AddLog($"Không thể tải asset câu hỏi: {ex.Message}", LogType.Warning);
         }
     }
 
