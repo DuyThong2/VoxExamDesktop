@@ -54,6 +54,31 @@ public class RealtimeAttemptProgressClient
         }
     }
 
+    /// <summary>
+    /// Còn bao nhiêu lượt đang được Python lưu (upload S3 + phiên âm Azure) cho bài thi này.
+    ///
+    /// <para>Thay cho cửa chờ cũ nằm ngay trong app (TurnArchiveQueue.DrainAsync): từ khi audio
+    /// do Python lưu, hàng đợi bên này luôn rỗng nên chờ ở đó là chờ hư không.</para>
+    ///
+    /// <para>Trả 0 khi gọi hỏng -- KHÔNG được chặn việc nộp bài chỉ vì không hỏi được. Không biết
+    /// thì đi tiếp, đúng như hành vi trước khi có endpoint này.</para>
+    /// </summary>
+    public async Task<int> GetPendingArchiveCountAsync(Guid examAttemptId, CancellationToken ct)
+    {
+        try
+        {
+            var client = _httpClientFactory.CreateClient();
+            var url = $"{_settings.PythonBaseUrl.TrimEnd('/')}/realtime/attempts/{examAttemptId:D}/pending-archives";
+            var result = await client.GetFromJsonAsync<PendingArchivesResponse>(url, ct);
+            return result?.Pending ?? 0;
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("exam_flow", "get_pending_archives_failed", ex, new { examAttemptId });
+            return 0;
+        }
+    }
+
     public async Task<AttemptResumeState?> GetResumeStateAsync(
         Guid examAttemptId,
         Guid answerId,
@@ -96,6 +121,12 @@ public class RealtimeAttemptProgressClient
     {
         [JsonPropertyName("answer_id")]
         public string? AnswerId { get; set; }
+    }
+
+    private sealed class PendingArchivesResponse
+    {
+        [JsonPropertyName("pending")]
+        public int Pending { get; set; }
     }
 
     private sealed class ResumeStateResponse

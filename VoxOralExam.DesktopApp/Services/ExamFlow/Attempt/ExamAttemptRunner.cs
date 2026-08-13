@@ -22,6 +22,7 @@ internal sealed class ExamAttemptRunner
     private readonly IExamApiService _examApi;
     private readonly QuestionAssetPresentationCoordinator _assets;
     private readonly IProctoringService _proctoring;
+    private readonly RealtimeAttemptProgressClient _attemptProgress;
     private CancellationTokenSource? _runCancellation;
     private TurnAudioRecorder? _recorder;
     private SpeechTurnCoordinator? _speechTurns;
@@ -42,6 +43,7 @@ internal sealed class ExamAttemptRunner
         IExamApiService examApi,
         QuestionAssetPresentationCoordinator assets,
         IProctoringService proctoring,
+        RealtimeAttemptProgressClient attemptProgress,
         bool isMicMuted)
     {
         _audioUploader = audioUploader;
@@ -54,6 +56,7 @@ internal sealed class ExamAttemptRunner
         _examApi = examApi;
         _assets = assets;
         _proctoring = proctoring;
+        _attemptProgress = attemptProgress;
         _isMicMuted = isMicMuted;
     }
 
@@ -276,8 +279,28 @@ internal sealed class ExamAttemptRunner
             status,
             drainSeconds = drainTimeout.TotalSeconds
         });
-        await archiveQueue.DrainAsync(drainTimeout);
-        LocalFileLogger.Info("exam_flow", "final_drain_complete", new { status });
+        var stillPending = await archiveQueue.DrainAsync(drainTimeout);
+
+        // Chờ THẬT nằm ở đây: từ khi Python lưu audio, hàng đợi ngay trên luôn rỗng nên
+        // DrainAsync là no-op. Việc còn dang dở nằm bên Python, hỏi thẳng nó.
+        stillPending += await WaitForRemoteArchivesAsync(drainTimeout);
+
+        LocalFileLogger.Info("exam_flow", "final_drain_complete", new { status, stillPending });
+
+        if (stillPending > 0)
+        {
+            // Nộp bài với lượt chưa lưu xong KHÔNG được phép im lặng.
+            //
+            // Bài thi phải liên tục nên ở đây không chặn -- nhưng phải để lại dấu vết dứt khoát
+            // để đối chiếu sau. Kể từ khi turn_publisher publish hai pha, lượt treo ở đây gần
+            // như chắc chắn đã sang tới Java bằng pha sơ bộ; cái còn thiếu là bản ghi âm.
+            LocalFileLogger.Error(
+                "exam_flow",
+                "submitted_with_pending_archives",
+                new InvalidOperationException(
+                    $"{stillPending} lượt chưa lưu xong khi nộp bài (drain {drainTimeout.TotalSeconds}s)"),
+                new { status, stillPending, drainSeconds = drainTimeout.TotalSeconds });
+        }
 
         if (settle > TimeSpan.Zero)
         {
@@ -363,6 +386,46 @@ internal sealed class ExamAttemptRunner
         {
             _proctoringStarted = false;
         }
+    }
+
+    /// <summary>
+    /// Hỏi Python còn bao nhiêu lượt đang lưu dở, chờ tới khi hết hoặc hết giờ. Trả về số còn
+    /// lại (0 = sạch).
+    ///
+    /// <para>Đây là bản thay thế cho cửa chờ cũ của TurnArchiveQueue. Từ 2026-08-13 audio lượt
+    /// thi do Python lưu (upload S3 + phiên âm Azure), nên hàng đợi bên này không còn gì để
+    /// chờ -- chờ ở đó là chờ hư không trong khi việc thật vẫn đang chạy ở nơi khác.</para>
+    ///
+    /// <para>KHÔNG chặn nộp bài: hết giờ thì đi tiếp và ghi lại. Bài thi phải liên tục, và bản
+    /// thân lượt nói đã sang Java từ pha sơ bộ ngay lúc học sinh dứt lời -- thứ còn chờ ở đây
+    /// chỉ là bản ghi âm và bản phiên âm của Azure.</para>
+    /// </summary>
+    private async Task<int> WaitForRemoteArchivesAsync(TimeSpan timeout)
+    {
+        if (_sessionState.ExamAttemptId == Guid.Empty)
+        {
+            return 0;
+        }
+
+        var deadline = DateTime.UtcNow + timeout;
+        int pending;
+        while (true)
+        {
+            pending = await _attemptProgress.GetPendingArchiveCountAsync(
+                _sessionState.ExamAttemptId, CancellationToken.None);
+            if (pending <= 0 || DateTime.UtcNow >= deadline)
+            {
+                break;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(500));
+        }
+
+        LocalFileLogger.Info("exam_flow", "remote_archive_wait_complete", new
+        {
+            pending,
+            timeoutSeconds = timeout.TotalSeconds
+        });
+        return Math.Max(0, pending);
     }
 
     private async Task SubmitSessionStatusAsync(string status)

@@ -245,18 +245,19 @@ internal sealed class QuestionFlowRunner
                     _ => "Học sinh đã dừng nói, đang xử lý..."
                 });
 
-                if (captured.Pcm.Length > 0)
-                {
-                    _archiveQueue.Enqueue(
-                        new TurnArchiveWorkItem(
-                            answerId,
-                            paperItemId,
-                            turnOrder,
-                            currentPrompt,
-                            captured.DurationSeconds,
-                            captured.Pcm,
-                            questionContext));
-                }
+                // KHÔNG upload audio và KHÔNG gọi POST /turns/archive từ đây nữa -- Python tự lo
+                // (AttemptConnection._archive_turn), từ chính luồng PCM đã đẩy sang nó qua
+                // WebSocket của bài thi.
+                //
+                // Vì sao bỏ: đường cũ phụ thuộc mạng của học sinh -- đúng lý do mô hình này đã bị
+                // bác khi làm luyện tập (xem docstring đầu agents/src/infra/practice_session_client.py)
+                // -- và nó không hề có retry. Đo 2026-08-13: một lượt chạy quá 100 giây rồi bị cắt
+                // giữa chừng (SocketException 995), lượt khác bị huỷ đúng lúc nộp bài; cả hai chỉ
+                // thoát nạn nhờ may. Upload từ pod lên S3 nằm gọn trong AWS, không đi qua wifi
+                // phòng thi.
+                //
+                // Đã bỏ enqueue thì hàng đợi luôn rỗng, nên DrainAsync ở cuối bài thành no-op --
+                // giữ nguyên phần plumbing đó để lần chạy đầu còn revert nhanh được nếu cần.
 
                 // A salvaged turn is the student's last answer of the exam by definition, so tell
                 // Python not to hand back a follow-up: TurnProcessor clamps should_continue=false

@@ -60,7 +60,15 @@ public class TurnArchiveClient
         httpRequest.Content = content;
 
         var client = _httpClientFactory.CreateClient();
-        using var response = await client.SendAsync(httpRequest, ct);
+
+        // Trần riêng cho lời gọi này, thay vì để nguyên mặc định 100 giây của HttpClient.
+        // Dùng CTS ghép chứ không gán client.Timeout: client lấy từ factory có thể dùng chung,
+        // và ghép token giữ nguyên đường huỷ theo vòng đời phiên thi (ct) -- ArchiveAsync phân
+        // biệt được "huỷ vì thoát bài" với "hết giờ" nhờ _lifetime.IsCancellationRequested.
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(1, _settings.ArchiveRequestTimeoutSeconds)));
+
+        using var response = await client.SendAsync(httpRequest, timeout.Token);
         response.EnsureSuccessStatusCode();
         LocalFileLogger.Info("archive", "archive_turn_complete", new
         {

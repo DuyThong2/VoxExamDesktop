@@ -38,7 +38,14 @@ internal sealed class TurnArchiveQueue : IDisposable
         }
     }
 
-    public async Task DrainAsync(TimeSpan timeout)
+    /// <summary>
+    /// Chờ mọi lượt còn treo được lưu xong. Trả về SỐ LƯỢT CHƯA XONG khi hết giờ (0 = sạch).
+    ///
+    /// Trước đây trả void và nuốt kết quả, nên CompleteAttemptAsync gọi xong là đi thẳng tới
+    /// PATCH SUBMITTED bất kể còn treo hay không -- bài vẫn nộp im lặng với lượt chưa lưu.
+    /// Trả số ra ngoài để nơi gọi còn có gì mà quyết định.
+    /// </summary>
+    public async Task<int> DrainAsync(TimeSpan timeout)
     {
         Task[] pending;
         lock (_sync)
@@ -48,7 +55,7 @@ internal sealed class TurnArchiveQueue : IDisposable
         if (pending.Length == 0)
         {
             LocalFileLogger.Info("exam_flow", "archive_drain_noop", null);
-            return;
+            return 0;
         }
 
         // Timing this matters: a successful drain used to be completely silent, so there was no
@@ -63,15 +70,18 @@ internal sealed class TurnArchiveQueue : IDisposable
                 drained = pending.Length,
                 elapsedMs = (int)(DateTime.UtcNow - startedAt).TotalMilliseconds
             });
+            return 0;
         }
         catch (Exception ex)
         {
+            var stillPending = pending.Count(task => !task.IsCompleted);
             LocalFileLogger.Error("exam_flow", "pending_archives_incomplete", ex, new
             {
-                pending = pending.Length,
+                pending = stillPending,
                 timeoutSeconds = timeout.TotalSeconds,
                 elapsedMs = (int)(DateTime.UtcNow - startedAt).TotalMilliseconds
             });
+            return stillPending;
         }
     }
 

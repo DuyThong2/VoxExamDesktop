@@ -19,6 +19,7 @@ public sealed class ExamAttemptRunnerFactory
     private readonly IExamApiService _examApi;
     private readonly QuestionAssetPresentationCoordinator _assets;
     private readonly IProctoringService _proctoring;
+    private readonly RealtimeAttemptProgressClient _attemptProgress;
 
     public ExamAttemptRunnerFactory(
         TurnAudioUploader audioUploader,
@@ -30,7 +31,8 @@ public sealed class ExamAttemptRunnerFactory
         LocalAvatarSpeaker avatarSpeaker,
         IExamApiService examApi,
         QuestionAssetPresentationCoordinator assets,
-        IProctoringService proctoring)
+        IProctoringService proctoring,
+        RealtimeAttemptProgressClient attemptProgress)
     {
         _audioUploader = audioUploader;
         _archiveClient = archiveClient;
@@ -42,6 +44,7 @@ public sealed class ExamAttemptRunnerFactory
         _examApi = examApi;
         _assets = assets;
         _proctoring = proctoring;
+        _attemptProgress = attemptProgress;
     }
 
     internal ExamAttemptRunner Create(bool isMicMuted) =>
@@ -56,5 +59,6 @@ public sealed class ExamAttemptRunnerFactory
             _examApi,
             _assets,
             _proctoring,
+            _attemptProgress,
             isMicMuted);
 }

@@ -87,9 +87,26 @@ public class AppSettings
     // FINAL_ARCHIVE_DRAIN_TIMEOUT_SECONDS) if 'pending_archives_incomplete' shows up in the logs.
     public int FinalArchiveDrainTimeoutSeconds { get; set; } = 20;
 
-    // Bridge between "the archive POST returned 200" and "Java has committed the turn row":
-    // Python still has to notice the archived turn (it polls), publish to Kafka, and let Java's
-    // consumer commit. Without this the PATCH can win the race and the turn goes ungraded.
+    // Trần cho MỘT lời gọi POST /turns/archive.
+    //
+    // Trước đây không ai đặt, nên nó ăn mặc định 100 giây của HttpClient -- lớn hơn cả cửa dọn
+    // 20 giây ngay trên. Hệ quả đo được 2026-08-13: kết nối bị cắt giữa chừng lúc 10:25:35
+    // (SocketException 995) nhưng mãi 10:27:15 client mới biết, tức 100 giây sau, và lúc đó bài
+    // đã nộp xong từ lâu. Một cửa dọn 20 giây không bao giờ chờ nổi request được phép chạy 100.
+    //
+    // 25 giây đủ rộng cho Azure STT trên câu trả lời dài, mà vẫn phát hiện kết nối chết kịp để
+    // lượt sau còn xoay xở -- archive chạy ngay sau mỗi lượt nên có vài PHÚT đường băng, không
+    // phải chỉ 20 giây cuối.
+    public int ArchiveRequestTimeoutSeconds { get; set; } = 25;
+
+    // Cầu nối giữa "Python đã publish lượt" và "Java đã ghi xong dòng turn": message còn phải
+    // qua Kafka và consumer bên Java mới commit. Thiếu nó thì PATCH thắng cuộc đua và lượt
+    // không được chấm.
+    //
+    // CẬP NHẬT 2026-08-13: mốc bắt đầu của cuộc đua này đã dịch sớm hẳn lên. Trước đây phải chờ
+    // POST /turns/archive về (có khi ~90 giây) rồi mới publish; giờ turn_publisher publish pha
+    // sơ bộ ngay khi quyết định follow-up xong, tức vài giây sau khi thí sinh dứt lời. 3 giây ở
+    // đây giờ chỉ còn phải phủ chặng Kafka -> consumer, rộng rãi hơn nhiều so với lúc đặt ra.
     public int PostArchiveSettleSeconds { get; set; } = 3;
 
     // Floor for salvaging an aborted capture. TurnAudioRecorder always seeds a turn with
