@@ -1,4 +1,4 @@
-using VoxOralExam.Core.Interfaces;
+﻿using VoxOralExam.Core.Interfaces;
 using VoxOralExam.Core.Models.Dtos;
 using VoxOralExam.DesktopApp.Infra.Clients.AIService;
 using VoxOralExam.DesktopApp.Infra.Devices;
@@ -255,6 +255,20 @@ internal sealed class ExamAttemptRunner
     {
         _submitRequested = true;
         _runCancellation?.Cancel();
+    }
+
+    public async Task ReportFocusLostAsync(DateTimeOffset capturedAt)
+    {
+        try
+        {
+            await _sessionClient.SendFocusLostAsync(capturedAt, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // WS có thể đang reconnect đúng lúc thí sinh chuyển cửa sổ. Mất một cảnh báo chấp
+            // nhận được; bằng chứng vẫn nằm trong log máy trạm do WindowFocusGuard ghi.
+            LocalFileLogger.Error("exam_flow", "focus_lost_send_failed", ex);
+        }
     }
 
     public void SetMicMuted(bool muted)

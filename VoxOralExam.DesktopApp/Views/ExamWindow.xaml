@@ -7,6 +7,9 @@
         Height="700"
         Width="1200"
         WindowStartupLocation="CenterScreen"
+        WindowStyle="None"
+        ResizeMode="NoResize"
+        Topmost="True"
         WindowState="Maximized">
     <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>

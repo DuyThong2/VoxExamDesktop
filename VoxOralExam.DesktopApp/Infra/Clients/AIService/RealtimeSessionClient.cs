@@ -249,6 +249,27 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         return SendJsonAsync(payload, ct);
     }
 
+    /// <summary>
+    /// Báo thí sinh vừa rời khỏi cửa sổ thi. Python nhận rồi đẩy tiếp thành alert
+    /// WINDOW_FOCUS_LOST tới giám thị (xem attempt/connection._handle_focus_lost).
+    ///
+    /// Đi nhờ WS này thay vì gọi REST riêng vì kết nối đã mở sẵn và đã xác thực theo phiên thi
+    /// -- không phải thêm endpoint, không phải phát token thứ hai. Ngoài ra Java không hề có
+    /// client AlertService, Python là đường duy nhất tới được vox-streaming.
+    ///
+    /// Best-effort có chủ ý: mất một cảnh báo còn hơn làm gián đoạn bài thi, nên caller nuốt
+    /// lỗi và bằng chứng vẫn còn trong log máy trạm.
+    /// </summary>
+    public Task SendFocusLostAsync(DateTimeOffset capturedAt, CancellationToken ct)
+    {
+        var payload = new
+        {
+            type = "focus_lost",
+            capturedAt = capturedAt.ToUniversalTime().ToString("O")
+        };
+        return SendJsonAsync(payload, ct);
+    }
+
     public Task SendPresentQuestionAsync(string promptText, CancellationToken ct)
     {
         var payload = new

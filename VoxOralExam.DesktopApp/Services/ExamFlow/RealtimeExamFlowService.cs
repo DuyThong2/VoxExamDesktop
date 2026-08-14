@@ -1,4 +1,4 @@
-using VoxOralExam.Core.Interfaces;
+﻿using VoxOralExam.Core.Interfaces;
 using VoxOralExam.Core.Models.Dtos;
 using VoxOralExam.DesktopApp.Services.ExamFlow.Attempt;
 
@@ -72,6 +72,13 @@ public sealed class RealtimeExamFlowService : IExamFlowService
     {
         _isMicMuted = muted;
         _runner?.SetMicMuted(muted);
+    }
+
+    public Task ReportFocusLostAsync(DateTimeOffset capturedAt)
+    {
+        // Chưa vào phiên (runner null) thì không có WS để gửi -- bỏ qua, log máy trạm vẫn giữ
+        // bằng chứng.
+        return _runner?.ReportFocusLostAsync(capturedAt) ?? Task.CompletedTask;
     }
 
     private async Task RunAndUnwireAsync(
