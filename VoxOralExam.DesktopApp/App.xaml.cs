@@ -287,7 +287,6 @@ public partial class App : Application
         services.AddTransient<LoginViewModel>();
         services.AddTransient<MainViewModel>();
         services.AddTransient<OtpEntryViewModel>();
-        services.AddTransient<SystemCheckViewModel>();
         services.AddTransient<DevicePreflightViewModel>();
         services.AddTransient<ExamViewModel>();
         services.AddTransient<StreamingDemoViewModel>();

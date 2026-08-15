@@ -26,7 +26,6 @@ public sealed class ExamEntryNavigator : IExamEntryNavigator
         [ExamEntryStage.Login] = typeof(LoginViewModel),
         [ExamEntryStage.ExamList] = typeof(MainViewModel),
         [ExamEntryStage.OtpEntry] = typeof(OtpEntryViewModel),
-        [ExamEntryStage.SystemCheck] = typeof(SystemCheckViewModel),
         [ExamEntryStage.DevicePreflight] = typeof(DevicePreflightViewModel),
     };
 

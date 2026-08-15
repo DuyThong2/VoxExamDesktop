@@ -39,21 +39,6 @@
                     </TextBox.Style>
                 </TextBox>
 
-                <!-- Rotation countdown -->
-                <Grid Margin="0,14,0,0">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-                    <ProgressBar Grid.Column="0" Height="6" VerticalAlignment="Center"
-                                 Minimum="0" Maximum="{Binding RefreshSeconds}"
-                                 Value="{Binding SecondsUntilRefresh, Mode=OneWay}"
-                                 Foreground="#2563EB" />
-                    <TextBlock Grid.Column="1" Margin="12,0,0,0" VerticalAlignment="Center"
-                               FontSize="12" Foreground="#475569"
-                               Text="{Binding SecondsUntilRefresh, StringFormat='Mã đổi sau {0}s'}" />
-                </Grid>
-
                 <!-- Verifying state -->
                 <StackPanel Orientation="Horizontal" Margin="0,14,0,0"
                             Visibility="{Binding IsVerifying, Converter={StaticResource BoolToVisibility}}">

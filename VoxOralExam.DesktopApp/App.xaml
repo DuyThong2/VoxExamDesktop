@@ -17,9 +17,6 @@
         <DataTemplate DataType="{x:Type vm:OtpEntryViewModel}">
             <views:OtpEntryView />
         </DataTemplate>
-        <DataTemplate DataType="{x:Type vm:SystemCheckViewModel}">
-            <views:SystemCheckView />
-        </DataTemplate>
         <DataTemplate DataType="{x:Type vm:DevicePreflightViewModel}">
             <views:DevicePreflightView />
         </DataTemplate>

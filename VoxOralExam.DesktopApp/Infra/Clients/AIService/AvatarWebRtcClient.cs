@@ -1,4 +1,4 @@
-﻿using System.IO;
+using System.IO;
 using System.Net.Http;
 using System.Text;
 using System.Text.Json;
@@ -66,7 +66,7 @@ public sealed class AvatarWebRtcClient : IDisposable
     private RTCPeerConnection? _peerConnection;
     private VP8Codec? _vp8Decoder;
     private BufferedWaveProvider? _waveProvider;
-    private WaveOutEvent? _waveOut;
+    private WaveOut? _waveOut;
     private bool _isDisposed;
     private bool _isSpeaking;
     private int _loudStreak;
@@ -95,9 +95,9 @@ public sealed class AvatarWebRtcClient : IDisposable
         _sessionState = sessionState;
     }
 
-    /// <summary>WinMM output device indices/names, numbered the same way as WaveOutEvent.DeviceNumber
+    /// <summary>WinMM output device indices/names, numbered the same way as WaveOut.DeviceNumber
     /// (both go through NAudio's WaveOut* WinMM binding), so a device picked here is safe to hand
-    /// straight to a WaveOutEvent's DeviceNumber -- mirrors TurnAudioRecorder.ListInputDevices().</summary>
+    /// straight to a WaveOut's DeviceNumber -- mirrors TurnAudioRecorder.ListInputDevices().</summary>
     public static IReadOnlyList<(int DeviceIndex, string ProductName)> ListOutputDevices()
     {
         var devices = new List<(int DeviceIndex, string ProductName)>();
@@ -120,12 +120,11 @@ public sealed class AvatarWebRtcClient : IDisposable
         _examAttemptId = examAttemptId;
         _intentionalClose = false;
 
-        _waveProvider = new BufferedWaveProvider(new WaveFormat(RTP_AUDIO_CLOCK_RATE, 16, 1))
+        _waveProvider = new BufferedWaveProvider(new WaveFormat(RTP_AUDIO_CLOCK_RATE, 16, 1), TimeSpan.FromSeconds(5))
         {
-            DiscardOnBufferOverflow = true,
-            BufferDuration = TimeSpan.FromSeconds(5)
+            DiscardOnBufferOverflow = true
         };
-        _waveOut = new WaveOutEvent { DeviceNumber = _sessionState.SelectedAudioOutputDeviceIndex };
+        _waveOut = new WaveOut { DeviceNumber = _sessionState.SelectedAudioOutputDeviceIndex };
         _waveOut.Init(_waveProvider);
         _waveOut.Play();
 
@@ -266,7 +265,7 @@ public sealed class AvatarWebRtcClient : IDisposable
     }
 
     /// <summary>Closes just the peer connection/decoder -- not the audio output device, which
-    /// stays alive across reconnects so WaveOutEvent doesn't need to be re-initialized on every
+    /// stays alive across reconnects so WaveOut doesn't need to be re-initialized on every
     /// retry.</summary>
     private void TeardownPeerConnection()
     {

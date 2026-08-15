@@ -39,7 +39,7 @@ public sealed class LocalAvatarSpeaker
     private readonly ExamSessionState _sessionState;
     private readonly IExamApiService _examApiService;
     private readonly object _playbackSync = new();
-    private WaveOutEvent? _activeWaveOut;
+    private WaveOut? _activeWaveOut;
 
     public LocalAvatarSpeaker(AppSettings settings, ExamSessionState sessionState, IExamApiService examApiService)
     {
@@ -116,7 +116,7 @@ public sealed class LocalAvatarSpeaker
 
     public void Stop()
     {
-        WaveOutEvent? waveOut;
+        WaveOut? waveOut;
         lock (_playbackSync)
         {
             waveOut = _activeWaveOut;
@@ -199,7 +199,7 @@ public sealed class LocalAvatarSpeaker
 
         using var stream = new MemoryStream(wav);
         using var reader = new WaveFileReader(stream);
-        using var waveOut = new WaveOutEvent { DeviceNumber = _sessionState.SelectedAudioOutputDeviceIndex };
+        using var waveOut = new WaveOut { DeviceNumber = _sessionState.SelectedAudioOutputDeviceIndex };
 
         void OnPlaybackStopped(object? sender, StoppedEventArgs e)
         {

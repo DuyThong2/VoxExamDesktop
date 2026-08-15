@@ -1,5 +1,4 @@
 using System.Windows.Input;
-using System.Windows.Threading;
 using VoxOralExam.Core.Interfaces;
 using VoxOralExam.DesktopApp.Services.DomainService;
 using VoxOralExam.DesktopApp.Services.EntryFlow;
@@ -18,13 +17,10 @@ public class OtpEntryViewModel : BaseViewModel
     private readonly IExamSessionBootstrapService _sessionBootstrapService;
     private readonly AppSettings _settings;
 
-    private readonly DispatcherTimer _refreshTimer;
-
     private string _otp = string.Empty;
     private string _errorMessage = string.Empty;
     private bool _hasError;
     private bool _isVerifying;
-    private int _secondsUntilRefresh;
 
     public OtpEntryViewModel(
         IExamEntryNavigator navigator,
@@ -39,14 +35,8 @@ public class OtpEntryViewModel : BaseViewModel
         _sessionBootstrapService = sessionBootstrapService;
         _settings = settings;
 
-        _secondsUntilRefresh = RefreshSeconds;
-
         VerifyCommand = new RelayCommand(() => _ = VerifyAsync(), CanVerify);
         BackCommand = new RelayCommand(() => _navigator.Back());
-
-        _refreshTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
-        _refreshTimer.Tick += OnRefreshTick;
-        _refreshTimer.Start();
     }
 
     public string ExamTitle => _sessionState.SelectedExam?.Title ?? "(chưa chọn bài thi)";
@@ -84,27 +74,8 @@ public class OtpEntryViewModel : BaseViewModel
         set => SetProperty(ref _isVerifying, value);
     }
 
-    public int SecondsUntilRefresh
-    {
-        get => _secondsUntilRefresh;
-        private set => SetProperty(ref _secondsUntilRefresh, value);
-    }
-
-    public int RefreshSeconds => _settings.OtpRefreshSeconds;
-
     public ICommand VerifyCommand { get; }
     public ICommand BackCommand { get; }
-
-    public void Cleanup()
-    {
-        _refreshTimer.Stop();
-        _refreshTimer.Tick -= OnRefreshTick;
-    }
-
-    private void OnRefreshTick(object? sender, EventArgs e)
-    {
-        SecondsUntilRefresh = SecondsUntilRefresh <= 1 ? RefreshSeconds : SecondsUntilRefresh - 1;
-    }
 
     private bool CanVerify()
         => !IsVerifying && _otp.Length == OtpLength;
@@ -130,8 +101,7 @@ public class OtpEntryViewModel : BaseViewModel
             await _sessionBootstrapService.EnterWithTicketAsync(ticket);
             LocalFileLogger.Info("otp", "verify_success", new { examId, ticket.TicketId });
 
-            Cleanup();
-            _navigator.GoTo(ExamEntryStage.SystemCheck);
+            _navigator.GoTo(ExamEntryStage.DevicePreflight);
         }
         catch (OtpVerificationException ex)
         {

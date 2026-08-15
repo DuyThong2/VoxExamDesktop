@@ -28,8 +28,8 @@ public class DevicePreflightViewModel : BaseViewModel
     private BitmapImage? _cameraPreview;
     private AudioInputOption? _selectedAudioInput;
     private AudioOutputOption? _selectedAudioOutput;
-    private WaveInEvent? _micTestRecorder;
-    private WaveOutEvent? _outputTestPlayer;
+    private WaveIn? _micTestRecorder;
+    private WaveOut? _outputTestPlayer;
     private CameraService? _cameraTestService;
 
     public DevicePreflightViewModel(
@@ -184,7 +184,7 @@ public class DevicePreflightViewModel : BaseViewModel
         {
             _outputTestPlayer?.Dispose();
             var tone = new SignalGenerator(16_000, 1) { Type = SignalGeneratorType.Sin, Frequency = 440, Gain = 0.3 };
-            _outputTestPlayer = new WaveOutEvent { DeviceNumber = SelectedAudioOutput.DeviceIndex };
+            _outputTestPlayer = new WaveOut { DeviceNumber = SelectedAudioOutput.DeviceIndex };
             _outputTestPlayer.Init(tone.ToWaveProvider());
             _outputTestPlayer.Play();
             DeviceTestStatus = $"Âm thanh test ra: {SelectedAudioOutput.DisplayName}";
@@ -242,7 +242,7 @@ public class DevicePreflightViewModel : BaseViewModel
 
         StopMicTest();
 
-        _micTestRecorder = new WaveInEvent
+        _micTestRecorder = new WaveIn
         {
             DeviceNumber = SelectedAudioInput.DeviceIndex,
             WaveFormat = new WaveFormat(16_000, 16, 1),

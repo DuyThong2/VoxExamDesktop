@@ -1,3 +1,4 @@
+using NAudio.CoreAudioApi;
 using NAudio.Wave;
 using VoxOralExam.DesktopApp.Services;
 
@@ -12,7 +13,7 @@ namespace VoxOralExam.DesktopApp.Infra.Devices;
 /// </summary>
 public sealed class SystemAudioLoopbackCapture : IDisposable
 {
-    private WasapiLoopbackCapture? _capture;
+    private WasapiRecorder? _capture;
 
     public event Action<byte[]>? DataAvailable;
 
@@ -26,7 +27,14 @@ public sealed class SystemAudioLoopbackCapture : IDisposable
             return Task.CompletedTask;
         }
 
-        var capture = new WasapiLoopbackCapture();
+        // WithLoopbackCapture with no WithDevice() means "the default render device", which is what
+        // the old WasapiLoopbackCapture did. Deliberately system-wide rather than
+        // WithProcessLoopback(ProcessId): capturing only this app's own audio would drop everything
+        // playing elsewhere on the machine, and a student playing prepared answers out of another
+        // application is exactly the thing this track exists to catch.
+        var capture = new WasapiRecorderBuilder()
+            .WithLoopbackCapture()
+            .Build();
         capture.DataAvailable += HandleDataAvailable;
         capture.RecordingStopped += HandleRecordingStopped;
         capture.StartRecording();
@@ -57,21 +65,34 @@ public sealed class SystemAudioLoopbackCapture : IDisposable
         return Task.CompletedTask;
     }
 
-    private void HandleDataAvailable(object? sender, WaveInEventArgs e)
+    private void HandleDataAvailable(
+        ReadOnlySpan<byte> buffer,
+        AudioClientBufferFlags flags,
+        long devicePosition,
+        long qpcPosition)
     {
-        if (e.BytesRecorded == 0)
+        if (buffer.IsEmpty)
         {
             return;
         }
 
-        // WasapiLoopbackCapture reuses e.Buffer across callbacks, same as WaveInEvent -- copy out
-        // before returning.
-        DataAvailable?.Invoke(e.Buffer.AsSpan(0, e.BytesRecorded).ToArray());
+        // WASAPI documents the buffer contents as undefined when it flags a packet silent, and
+        // AudioMixer sums whatever arrives straight into the exam recording -- so hand on real
+        // zeroes rather than trusting the bytes behind the flag.
+        if ((flags & AudioClientBufferFlags.Silent) != 0)
+        {
+            DataAvailable?.Invoke(new byte[buffer.Length]);
+            return;
+        }
+
+        // The span points directly at the WASAPI buffer and is only valid for the duration of this
+        // callback, so copying out before returning is mandatory now, not merely defensive.
+        DataAvailable?.Invoke(buffer.ToArray());
     }
 
     private void HandleRecordingStopped(object? sender, StoppedEventArgs e)
     {
-        // WasapiLoopbackCapture stops itself if the default playback device changes/disappears
+        // The recorder stops itself if the default playback device changes/disappears
         // mid-recording. AudioMixer just keeps mixing mic-only from that point on -- this is not
         // fatal to the recording, so only log it.
         if (e.Exception is not null)

@@ -139,7 +139,7 @@ public class MainViewModel : BaseViewModel
                 var ticket = await _examEntryApi.StartClassTestAsync(Guid.Parse(exam.Id));
                 await _sessionBootstrapService.EnterWithTicketAsync(ticket);
                 LocalFileLogger.Info("class_test", "start_success", new { examId = exam.Id, ticket.TicketId });
-                _navigator.GoTo(ExamEntryStage.SystemCheck);
+                _navigator.GoTo(ExamEntryStage.DevicePreflight);
             }
             catch (ExamEntryRejectedException ex)
             {

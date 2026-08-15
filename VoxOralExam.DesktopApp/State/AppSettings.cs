@@ -129,9 +129,6 @@ public class AppSettings
     // Matches Java's GetExamScheduleOtpUseCase.OTP_LENGTH.
     public int OtpLength { get; set; } = 8;
 
-    // How often the proctor's OTP rotates, in seconds -- drives the countdown on the OTP screen.
-    public int OtpRefreshSeconds { get; set; } = 60;
-
     // Dev-only: true serves exam data from MockExamDataFactory; false uses ExamApiService (real
     // Java backend). Defaults true so the app runs before Java's exam endpoints exist.
     public bool UseMockData { get; set; } = true;

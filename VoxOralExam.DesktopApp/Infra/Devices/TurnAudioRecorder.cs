@@ -14,7 +14,7 @@ public sealed class TurnAudioRecorder : IDisposable
     private readonly int _deviceNumber;
     private readonly Stopwatch _turnStopwatch = new();
 
-    private WaveInEvent? _waveIn;
+    private WaveIn? _waveIn;
     private bool _isTurnActive;
     private bool _isStarted;
     private bool _isMuted;
@@ -45,7 +45,7 @@ public sealed class TurnAudioRecorder : IDisposable
             return Task.CompletedTask;
         }
 
-        _waveIn = new WaveInEvent
+        _waveIn = new WaveIn
         {
             DeviceNumber = _deviceNumber,
             WaveFormat = new WaveFormat(16_000, 16, 1),
@@ -66,14 +66,14 @@ public sealed class TurnAudioRecorder : IDisposable
 
     public static string DescribeDefaultInputDevice()
     {
-        if (WaveInEvent.DeviceCount <= 0)
+        if (WaveIn.DeviceCount <= 0)
         {
             return "No audio input device detected by NAudio.";
         }
 
         try
         {
-            var caps = WaveInEvent.GetCapabilities(0);
+            var caps = WaveIn.GetCapabilities(0);
             return $"NAudio input device 0: {caps.ProductName}";
         }
         catch (Exception ex)
@@ -85,9 +85,9 @@ public sealed class TurnAudioRecorder : IDisposable
     public static IReadOnlyList<(int DeviceIndex, string ProductName)> ListInputDevices()
     {
         var devices = new List<(int DeviceIndex, string ProductName)>();
-        for (var index = 0; index < WaveInEvent.DeviceCount; index++)
+        for (var index = 0; index < WaveIn.DeviceCount; index++)
         {
-            var caps = WaveInEvent.GetCapabilities(index);
+            var caps = WaveIn.GetCapabilities(index);
             devices.Add((index, caps.ProductName));
         }
 
@@ -96,17 +96,17 @@ public sealed class TurnAudioRecorder : IDisposable
 
     public static string DescribeInputDevice(int deviceIndex)
     {
-        if (WaveInEvent.DeviceCount <= 0)
+        if (WaveIn.DeviceCount <= 0)
         {
             return "No audio input device detected by NAudio.";
         }
 
-        if (deviceIndex < 0 || deviceIndex >= WaveInEvent.DeviceCount)
+        if (deviceIndex < 0 || deviceIndex >= WaveIn.DeviceCount)
         {
             return $"Requested audio input device {deviceIndex} is out of range.";
         }
 
-        var caps = WaveInEvent.GetCapabilities(deviceIndex);
+        var caps = WaveIn.GetCapabilities(deviceIndex);
         return $"NAudio input device {deviceIndex}: {caps.ProductName}";
     }
 

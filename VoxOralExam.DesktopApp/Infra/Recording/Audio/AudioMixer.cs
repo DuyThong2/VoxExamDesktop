@@ -108,10 +108,9 @@ public sealed class AudioMixer : IDisposable
         _clock = clock;
         _latency = latency;
         var micFormat = new WaveFormat(TargetSampleRate, 16, 1);
-        _micBuffer = new BufferedWaveProvider(micFormat)
+        _micBuffer = new BufferedWaveProvider(micFormat, TimeSpan.FromSeconds(2))
         {
             ReadFully = true,
-            BufferDuration = TimeSpan.FromSeconds(2),
             // Backstop only -- TrimToTarget is what actually bounds the backlog, and it cuts in
             // well below this. Without the flag NAudio throws InvalidOperationException("Buffer
             // full") from AddSamples, which runs on the capture device's own callback thread where
@@ -130,10 +129,9 @@ public sealed class AudioMixer : IDisposable
     /// </summary>
     public void EnableLoopback(WaveFormat loopbackFormat)
     {
-        var buffer = new BufferedWaveProvider(loopbackFormat)
+        var buffer = new BufferedWaveProvider(loopbackFormat, TimeSpan.FromSeconds(2))
         {
             ReadFully = true,
-            BufferDuration = TimeSpan.FromSeconds(2),
             // Same reason as _micBuffer's, and the same callback-thread consequence.
             DiscardOnBufferOverflow = true
         };
@@ -393,7 +391,7 @@ public sealed class AudioMixer : IDisposable
         {
             // Reading is discarding.
             var take = Math.Min(excess, readSize);
-            discarded += buffer.Read(_discardScratch, 0, take);
+            discarded += buffer.Read(_discardScratch.AsSpan(0, take));
             excess -= take;
         }
 
@@ -416,7 +414,7 @@ public sealed class AudioMixer : IDisposable
         var timestamp = TimeSpan.FromMilliseconds((_timelineOffsetFrames + _framesEmitted) * TickMilliseconds);
 
         var micChunk = new byte[_bytesPerTick];
-        _micBuffer.Read(micChunk, 0, _bytesPerTick);
+        _micBuffer.Read(micChunk);
 
         if (!_loopbackEnabled || _loopbackResampled is null)
         {
@@ -425,7 +423,7 @@ public sealed class AudioMixer : IDisposable
         }
 
         var loopbackChunk = new byte[_bytesPerTick];
-        _loopbackResampled.Read(loopbackChunk, 0, _bytesPerTick);
+        _loopbackResampled.Read(loopbackChunk);
 
         var mixed = new byte[_bytesPerTick];
         for (var i = 0; i < _bytesPerTick; i += 2)

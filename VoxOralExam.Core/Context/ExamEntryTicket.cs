@@ -2,7 +2,7 @@ namespace VoxOralExam.Core.Context;
 
 /// <summary>
 /// The result of verifying the OTP (docs/wpf-redesign-plan.md §C). The server issues this once, after
-/// a single successful OTP check; every later stage (SystemCheck, DevicePreflight, InExam) rides the
+/// a single successful OTP check; every later stage (DevicePreflight, InExam) rides the
 /// ticket instead of re-validating the (now-rotated) OTP. The ticket has its own, longer validity.
 ///
 /// Only the fields the client already needs are modelled now; the rest are TODO until the Java

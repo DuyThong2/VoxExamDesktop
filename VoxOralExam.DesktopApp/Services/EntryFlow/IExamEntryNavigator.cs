@@ -11,9 +11,19 @@ namespace VoxOralExam.DesktopApp.Services.EntryFlow;
 /// <see cref="CurrentViewModel"/>; app-level DataTemplates map each stage view model to its View, so
 /// changing stage swaps content inside one window rather than opening a new one.
 ///
-/// The entry stages (Login -> ExamList -> OtpEntry -> SystemCheck -> DevicePreflight) live inside the
+/// The entry stages (Login -> ExamList -> OtpEntry -> DevicePreflight) live inside the
 /// shell. Reaching the actual exam is a hand-off: the last stage calls <see cref="RequestStartExam"/>
 /// and App opens the exam surface.
+///
+/// There used to be a SystemCheck stage between OtpEntry and DevicePreflight. It was removed while it
+/// was still a placeholder -- it only ever rendered a TODO banner and a "continue" button, so it cost
+/// every student an extra click and bought nothing. If the lockdown work lands, it comes back here:
+/// run ISystemDetector.ScanAsync against a SERVER-SUPPLIED blocklist (never hard-coded) to detect
+/// remote-control tools, screen recorders, virtual camera/audio devices (highest priority -- they
+/// defeat camera proctoring), VM markers and monitor count; resolve the EnforcementTier via
+/// IEnforcerProbe (Service -> Helper -> DetectOnly); report tier + scan to the server and block
+/// continuing below the exam's minEnforcementTier. Detection is identical on every machine; only
+/// enforcement is tiered.
 /// TODO(Â§A): eventually fold InExam + Submitted into the shell too, so the whole exam runs in one
 /// lockdown-controlled window instead of a separate ExamWindow.
 /// </summary>
