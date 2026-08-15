@@ -27,10 +27,13 @@ namespace VoxOralExam.DesktopApp.Infra.Devices;
 /// </summary>
 public sealed class LocalAvatarSpeaker
 {
-    // PLACEHOLDER -- khớp DURATION_PRICING_PER_SECOND["azure_tts"] bên Agentic AI
-    // (config/ai_usage_pricing.py). Chưa phải giá thật, cần thay sau khi có đủ dữ liệu
-    // ai_usage_record thật để hiệu chỉnh (xem QuotaPricingProperties bên BE).
-    private const decimal TtsPricePerSecondUsd = 0.006m;
+    // S1 Neural Text To Speech Characters, region southeastasia (Azure Retail Prices API,
+    // public, không cần key -- xác nhận 2026-08-14, xem prices.azure.com/api/retail/prices).
+    // Đếm theo text.Length (text gốc TRƯỚC khi bọc SSML) -- Azure tính cả markup <prosody> vào
+    // ký tự bị charge (chỉ <speak>/<voice> được miễn), nên khi rate != null, số ký tự tính ở
+    // đây hụt nhẹ so với Azure thật (thiếu phần overhead tag <prosody rate="...">...</prosody>,
+    // ~30-40 ký tự/lần) -- chấp nhận được, không đáng để đếm chính xác từng tag SSML.
+    private const decimal TtsPricePerCharacterUsd = 0.000015m;
 
     private readonly AppSettings _settings;
     private readonly ExamSessionState _sessionState;
@@ -56,11 +59,11 @@ public sealed class LocalAvatarSpeaker
         // Chi phí đã phát sinh ngay khi Azure trả về audio -- báo cáo không phụ thuộc ct của lượt
         // phát (playback có thể bị huỷ sau đó, nhưng tiền đã tốn rồi), và không được chặn/làm hỏng
         // việc phát âm thanh nếu báo cáo lỗi.
-        _ = ReportTtsUsageBestEffortAsync(wav);
+        _ = ReportTtsUsageBestEffortAsync(text, wav);
         await PlayAsync(wav, ct).ConfigureAwait(false);
     }
 
-    private async Task ReportTtsUsageBestEffortAsync(byte[] wav)
+    private async Task ReportTtsUsageBestEffortAsync(string text, byte[] wav)
     {
         try
         {
@@ -76,6 +79,8 @@ public sealed class LocalAvatarSpeaker
             {
                 durationSeconds = reader.TotalTime.TotalSeconds;
             }
+
+            var characterCount = text.Length;
 
             var questionId = _sessionState.CurrentQuestion?.Id;
             var turnId = questionId.HasValue
@@ -94,8 +99,8 @@ public sealed class LocalAvatarSpeaker
                         Type = "DURATION",
                         Provider = "azure_tts",
                         DurationMs = (long)(durationSeconds * 1000),
-                        UnitPrice = new { amount = TtsPricePerSecondUsd, unit = "per_second", currency = "USD" },
-                        CostUsd = Math.Round((decimal)durationSeconds * TtsPricePerSecondUsd, 8),
+                        UnitPrice = new { amount = TtsPricePerCharacterUsd, unit = "per_character", currency = "USD" },
+                        CostUsd = Math.Round(characterCount * TtsPricePerCharacterUsd, 8),
                         OccurredAt = DateTimeOffset.UtcNow,
                     }
                 ],
