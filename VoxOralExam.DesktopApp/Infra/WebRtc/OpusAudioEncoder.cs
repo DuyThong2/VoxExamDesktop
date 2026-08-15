@@ -1,5 +1,5 @@
+using Concentus;
 using Concentus.Enums;
-using Concentus.Structs;
 
 namespace VoxOralExam.DesktopApp.Infra.WebRtc;
 
@@ -13,7 +13,7 @@ public sealed class OpusAudioEncoder : IDisposable
 {
     public const int FrameMilliseconds = 20;
 
-    private readonly OpusEncoder _encoder;
+    private readonly IOpusEncoder _encoder;
     private readonly int _frameSizeSamples;
     private readonly List<byte> _buffer = [];
     private readonly byte[] _outputBuffer = new byte[4000];
@@ -23,10 +23,11 @@ public sealed class OpusAudioEncoder : IDisposable
     public OpusAudioEncoder(int sampleRate = 16_000, int bitrate = 24_000)
     {
         _frameSizeSamples = sampleRate * FrameMilliseconds / 1000;
-        _encoder = new OpusEncoder(sampleRate, 1, OpusApplication.OPUS_APPLICATION_VOIP)
-        {
-            Bitrate = bitrate
-        };
+        // Via the factory rather than `new OpusEncoder(...)`: the factory hands back a native
+        // implementation where the platform has one and falls back to the managed encoder
+        // otherwise, which is why the direct constructor is obsolete.
+        _encoder = OpusCodecFactory.CreateEncoder(sampleRate, 1, OpusApplication.OPUS_APPLICATION_VOIP);
+        _encoder.Bitrate = bitrate;
     }
 
     /// <summary>
@@ -57,8 +58,8 @@ public sealed class OpusAudioEncoder : IDisposable
                 _buffer.RemoveRange(0, frameBytes);
 
                 var encodedLength = _encoder.Encode(
-                    pcmShorts, 0, _frameSizeSamples,
-                    _outputBuffer, 0, _outputBuffer.Length);
+                    pcmShorts, _frameSizeSamples,
+                    _outputBuffer, _outputBuffer.Length);
 
                 var frame = new byte[encodedLength];
                 Array.Copy(_outputBuffer, frame, encodedLength);

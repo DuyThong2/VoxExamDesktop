@@ -78,6 +78,11 @@ public class ExamViewModel : BaseViewModel
     private bool _showErrorOverlay;
     private string _endScreenMessage = string.Empty;
 
+    // Same reasoning as _isExamLocked below: the attempt is always connecting when this view model
+    // is constructed, so the overlay is up before the window's first paint rather than appearing a
+    // frame later.
+    private bool _showConnectingOverlay = true;
+
     // Defaults to true: an ExamViewModel exists only to run an attempt, so the window it backs is
     // locked from construction and is unlocked exactly once, when that attempt is over.
     private bool _isExamLocked = true;
@@ -301,11 +306,42 @@ public class ExamViewModel : BaseViewModel
         set => SetProperty(ref _showErrorOverlay, value);
     }
 
+    /// <summary>
+    /// True from construction until the attempt is ready to be interacted with, covering the exam UI
+    /// while proctoring, recording and the realtime session come up (see ExamAttemptRunner.RunAsync).
+    /// Without it the student is shown a complete-looking exam surface -- question area, mic button --
+    /// several seconds before any of it does anything.
+    ///
+    /// Cleared on all three ways out of that wait, not just the happy one: <see cref="HandleSessionReady"/>
+    /// when the session comes up, <see cref="UnlockWindowForFailure"/> when the watchdog gives up, and
+    /// defensively in <see cref="HandleExamEnded"/>. Leaving it set would bury the very message that
+    /// tells the student what went wrong, since the error overlay draws above this one but the dimmed
+    /// backdrop here would still be covering the window.
+    ///
+    /// Note this deliberately does NOT gate the exam clock -- HandleSessionReady already owns that.
+    /// This is presentation only.
+    /// </summary>
+    public bool ShowConnectingOverlay
+    {
+        get => _showConnectingOverlay;
+        private set => SetProperty(ref _showConnectingOverlay, value);
+    }
+
     public string EndScreenMessage
     {
         get => _endScreenMessage;
         set => SetProperty(ref _endScreenMessage, value);
     }
+
+    /// <summary>
+    /// Whether ExamWindow shows the behaviour-log panel. Read once from settings and never raised:
+    /// it is a build/deployment switch, not runtime state.
+    ///
+    /// <see cref="AddLog"/> keeps running either way. The entries are cheap, some are read back by
+    /// the end-screen, and everything worth diagnosing is written to LocalFileLogger regardless --
+    /// this gates the student-visible surface only.
+    /// </summary>
+    public bool ShowDebugLogPanel => _settings.ShowDebugLogPanel;
 
     public ObservableCollection<LogEntry> LogEntries { get; } = new();
     public ICommand ToggleMuteCommand { get; }
@@ -479,6 +515,9 @@ public class ExamViewModel : BaseViewModel
             StopLockWatchdog();
             IsSavingFinalAnswer = false;
             IsExamLocked = false;
+            // Must come down here too: the failure this reports is usually "never connected", which
+            // is exactly the state the connecting overlay is up for.
+            ShowConnectingOverlay = false;
             ShowErrorOverlay = true;
             EndScreenMessage = reason;
             AddLog(reason, LogType.Error);
@@ -663,6 +702,7 @@ public class ExamViewModel : BaseViewModel
             // now expected to end through OnExamEnded, which arms its own watchdog on submit.
             _sessionReady = true;
             StopLockWatchdog();
+            ShowConnectingOverlay = false;
             StartCountdown();
         });
     }
@@ -879,6 +919,9 @@ public class ExamViewModel : BaseViewModel
             // Defensive: the end-screen overlay must always win over the saving one, even if the
             // attempt runner somehow ended without clearing the saving state itself.
             IsSavingFinalAnswer = false;
+            // Same defensiveness: an attempt that ended without ever raising SessionReady (it failed
+            // during startup) would otherwise leave this covering the end screen.
+            ShowConnectingOverlay = false;
             // Unlocked here, before the auto-close delay below starts, so CloseWindowAfterDelayAsync's
             // Window.Close() passes ExamWindow's Closing guard instead of being cancelled by it.
             StopLockWatchdog();

@@ -60,7 +60,6 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     private TaskCompletionSource<bool>? _pendingExamEndAckTcs;
     private Guid _examAttemptId;
     private bool _intentionalClose;
-    private bool _forceEndRequested;
     private (Guid AnswerId, int TurnOrder)? _resumeCheckpoint;
 
     public event Action? OnVadSpeechStart;
@@ -103,7 +102,6 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     {
         _examAttemptId = examAttemptId;
         _intentionalClose = false;
-        _forceEndRequested = false;
         await ConnectCoreAsync(examAttemptId, ct);
     }
 
@@ -535,7 +533,6 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                     OnError?.Invoke(GetText(doc));
                     break;
                 case "force_end":
-                    _forceEndRequested = true;
                     _intentionalClose = true;
                     var reason = GetPropertyText(doc, "reason");
                     LocalFileLogger.Info("realtime_ws", "force_end_received", new { reason });

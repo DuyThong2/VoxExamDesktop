@@ -154,6 +154,16 @@ public class AppSettings
     // independent of UseMockData/UseDevStreamToken above.
     public bool LaunchStreamingDemo { get; set; } = false;
 
+    // Dev/QA only: shows the "Nhật ký hành vi" panel in ExamWindow. Off for students, and the
+    // default must stay false -- that panel carries proctoring-degradation detail
+    // (ExamRecordingService's "Screen recording is unavailable", "Camera recording is
+    // unavailable", "Local recording could not start", ...) plus every ProctoringEvent the server
+    // sends back. Showing a student the moment recording breaks tells them exactly when they are
+    // unobserved, and echoing violations back live lets them probe which actions get detected.
+    // Nothing is lost by hiding it: all of it already goes to LocalFileLogger
+    // (logs/desktopapp.jsonl), which is structured and survives the window closing.
+    public bool ShowDebugLogPanel { get; set; } = false;
+
     // Prototype (see task/performance.txt): Azure TTS synthesized directly on WPF via
     // Services/LocalAvatarSpeaker.cs, instead of Python synthesizing and streaming it back over
     // the avatar WebRTC audio track. Same env var names as agents/.env's AZURE_SPEECH_KEY /

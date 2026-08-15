@@ -165,10 +165,13 @@
         <Grid Grid.Row="1" Margin="16">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="*" />
-                <ColumnDefinition Width="460" />
+                <!-- Auto rather than a fixed 460 so the column collapses to nothing when the log
+                     panel is hidden (the panel itself carries the 460). Otherwise hiding it would
+                     leave a 460px hole and the exam surface would not reclaim the space. -->
+                <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
-            <Grid Grid.Column="0" Margin="0,0,16,0">
+            <Grid Grid.Column="0">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="*" />
                     <RowDefinition Height="Auto" />
@@ -412,7 +415,22 @@
                 </Border>
             </Grid>
 
-            <Border Grid.Column="1" Background="White" CornerRadius="12" BorderBrush="#E2E8F0" BorderThickness="1">
+            <!-- Dev/QA only, off for students: this panel carries proctoring-degradation detail and
+                 echoes back every violation the server reports. See AppSettings.ShowDebugLogPanel.
+                 Collapsed is the DEFAULT and visibility is opt in, deliberately: a WPF binding that
+                 fails resolves silently, and the safe direction for this particular failure is to
+                 hide the panel rather than to show it. -->
+            <Border Grid.Column="1" Width="460" Margin="16,0,0,0" Background="White" CornerRadius="12" BorderBrush="#E2E8F0" BorderThickness="1">
+                <Border.Style>
+                    <Style TargetType="Border">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding ShowDebugLogPanel}" Value="True">
+                                <Setter Property="Visibility" Value="Visible" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </Border.Style>
                 <Border.Effect>
                     <DropShadowEffect BlurRadius="10" ShadowDepth="1" Opacity="0.06" />
                 </Border.Effect>
@@ -488,6 +506,60 @@
                 </Grid>
             </Border>
         </Grid>
+
+        <!-- Shown from the moment the window opens until the attempt is ready to interact with:
+             proctoring, recording and the realtime session all come up before the first question,
+             and until they do the exam surface underneath is inert. Lowest of the overlays (saving
+             490, submitted/error 500) so anything that happens later draws on top, though the view
+             model clears this on every exit from the wait, including the failure ones. -->
+        <Border Grid.RowSpan="2"
+                Background="#E60F172A"
+                Panel.ZIndex="480">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding ShowConnectingOverlay}" Value="True">
+                            <Setter Property="Visibility" Value="Visible" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <Border Background="White"
+                    CornerRadius="20"
+                    Padding="32"
+                    Width="520"
+                    HorizontalAlignment="Center"
+                    VerticalAlignment="Center">
+                <StackPanel>
+                    <ProgressBar IsIndeterminate="True"
+                                 Height="6"
+                                 Width="260"
+                                 Margin="0,0,0,18"
+                                 Foreground="#2563EB" />
+                    <TextBlock Text="Đang chuẩn bị phiên thi"
+                               FontSize="24"
+                               FontWeight="SemiBold"
+                               Foreground="#0F172A"
+                               TextAlignment="Center"
+                               Margin="0,0,0,10" />
+                    <!-- The live step the attempt runner is on ("Đang kết nối phiên realtime...",
+                         "Đang khởi động camera...", ...), so a slow start looks like progress
+                         rather than a hang. -->
+                    <TextBlock Text="{Binding AiStatus}"
+                               FontSize="15"
+                               Foreground="#2563EB"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap"
+                               Margin="0,0,0,10" />
+                    <TextBlock Text="Thời gian làm bài chỉ bắt đầu tính khi kết nối xong. Vui lòng không đóng cửa sổ."
+                               FontSize="14"
+                               Foreground="#475569"
+                               TextAlignment="Center"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </Border>
+        </Border>
 
         <!-- Shown while the final answer is being uploaded and the session closed out. Sits below
              the submitted/error overlays (ZIndex 500) so those always win once the exam is done. -->
