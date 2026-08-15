@@ -12,6 +12,7 @@ namespace VoxOralExam.DesktopApp.Views;
 public partial class ExamWindow : Window
 {
     private readonly WindowCloseGuard _closeGuard;
+    private readonly WindowFocusGuard _focusGuard;
     private bool _isDragging;
     private bool _isClosingCleanly;
     private Point _dragStartPoint;
@@ -24,6 +25,10 @@ public partial class ExamWindow : Window
         // Constructed before SourceInitialized so the X is already greyed the first time the window
         // paints. ExamViewModel.IsExamLocked is the single source of truth, and it starts locked.
         _closeGuard = new WindowCloseGuard(this) { IsLocked = viewModel.IsExamLocked };
+        // Cùng nguồn sự thật IsExamLocked với _closeGuard: hết bài thì vừa mở được nút đóng,
+        // vừa thôi coi việc chuyển cửa sổ là vi phạm.
+        _focusGuard = new WindowFocusGuard(this) { IsLocked = viewModel.IsExamLocked };
+        _focusGuard.FocusLost += (_, capturedAt) => viewModel.ReportFocusLost(capturedAt);
         viewModel.PropertyChanged += ExamViewModel_PropertyChanged;
 
         Loaded += ExamWindow_Loaded;
@@ -54,6 +59,7 @@ public partial class ExamWindow : Window
         if (DataContext is ExamViewModel vm)
         {
             _closeGuard.IsLocked = vm.IsExamLocked;
+            _focusGuard.IsLocked = vm.IsExamLocked;
         }
     }
 
@@ -92,6 +98,7 @@ public partial class ExamWindow : Window
         }
 
         _closeGuard.Dispose();
+        _focusGuard.Dispose();
     }
 
     private async void ExamWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)

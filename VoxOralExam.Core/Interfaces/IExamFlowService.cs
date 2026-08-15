@@ -25,4 +25,9 @@ public interface IExamFlowService
     Task StopAsync();
     Task SubmitNowAsync();
     void SetMicMuted(bool muted);
+
+    /// <summary>
+    /// Thí sinh rời khỏi cửa sổ thi. Best-effort: nuốt lỗi, không được làm gián đoạn bài thi.
+    /// </summary>
+    Task ReportFocusLostAsync(DateTimeOffset capturedAt);
 }

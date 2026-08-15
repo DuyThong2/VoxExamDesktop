@@ -1,4 +1,4 @@
-using System.Collections.ObjectModel;
+﻿using System.Collections.ObjectModel;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media.Imaging;
@@ -804,6 +804,17 @@ public class ExamViewModel : BaseViewModel
                     LogType.Warning);
             }
         });
+
+
+    /// <summary>
+    /// Cửa sổ thi vừa mất focus (WindowFocusGuard). Fire-and-forget có chủ ý: đây là đường báo
+    /// cáo phụ, tuyệt đối không được chặn luồng UI hay làm gián đoạn bài thi. Mọi lỗi đã được
+    /// nuốt ở ExamAttemptRunner và ghi lại trong log máy trạm.
+    /// </summary>
+    public void ReportFocusLost(DateTimeOffset capturedAt)
+    {
+        _ = _examFlow.ReportFocusLostAsync(capturedAt);
+    }
 
     private void HandleQuestionPresented(ExamQuestionPrompt prompt)
     {
