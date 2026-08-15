@@ -7,6 +7,11 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+
+    <!-- Embedded in the .exe as a Win32 resource; WPF also falls back to it for any Window that
+         does not set Icon itself, which is all of them. Built from vox-client-web's favicon-512.png
+         at 16/24/32/48/64/128/256 so the shell never has to upscale. -->
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
