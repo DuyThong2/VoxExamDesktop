@@ -268,6 +268,50 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         return SendJsonAsync(payload, ct);
     }
 
+    /// <summary>
+    /// Báo camera đã ngừng gửi khung hình quá ngưỡng. Đi chung đường với
+    /// <see cref="SendFocusLostAsync"/> vì cùng một lý do: WS đã mở sẵn, đã xác thực theo phiên thi,
+    /// và Python là nơi DUY NHẤT trong hệ nối được tới AlertService của vox-streaming.
+    ///
+    /// <para><paramref name="capturedAt"/> là mốc khung hình CUỐI CÙNG, không phải lúc phát hiện.
+    /// Chênh lệch giữa hai mốc đúng bằng ngưỡng cảnh báo, và nếu gửi mốc phát hiện thì mọi khoảng
+    /// trống ghi trong sổ đều lệch khỏi khoảng trống thật trong bản ghi.</para>
+    /// </summary>
+    public Task SendCameraSignalLostAsync(
+        DateTimeOffset capturedAt,
+        bool neverDelivered,
+        CancellationToken ct)
+    {
+        var payload = new
+        {
+            type = "camera_signal_lost",
+            capturedAt = capturedAt.ToUniversalTime().ToString("O"),
+            neverDelivered
+        };
+        return SendJsonAsync(payload, ct);
+    }
+
+    /// <summary>
+    /// Báo khung hình đã trở lại, kèm tổng thời lượng mất.
+    ///
+    /// <para>Tồn tại để đóng KHOẢNG. "Mất camera lúc 10:32" gần như vô dụng với người chấm: hai
+    /// mươi giây hay suốt phần còn lại của bài thi là hai kết luận hoàn toàn khác nhau, và nếu
+    /// không có sự kiện này thì sổ bằng chứng chỉ có điểm bắt đầu.</para>
+    /// </summary>
+    public Task SendCameraSignalRestoredAsync(
+        DateTimeOffset capturedAt,
+        TimeSpan outage,
+        CancellationToken ct)
+    {
+        var payload = new
+        {
+            type = "camera_signal_restored",
+            capturedAt = capturedAt.ToUniversalTime().ToString("O"),
+            outageSeconds = Math.Round(outage.TotalSeconds, 1)
+        };
+        return SendJsonAsync(payload, ct);
+    }
+
     public Task SendPresentQuestionAsync(string promptText, CancellationToken ct)
     {
         var payload = new

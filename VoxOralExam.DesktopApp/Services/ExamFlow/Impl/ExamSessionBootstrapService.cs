@@ -36,6 +36,19 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
 
     public async Task EnterWithTicketAsync(ExamEntryTicket ticket, CancellationToken ct = default)
     {
+        _sessionState.EntryTicket = ticket;
+        _sessionState.ExamAttemptId = ticket.AttemptId;
+        ApplySessionIdentity(ticket);
+        var paper = await _examApi.GetExamPaperAsync(ticket.AttemptId.ToString(), ct);
+        _sessionState.LoadExamPaper(paper, ticket.AttemptId);
+        await ResumeQuestionIndexIfNeededAsync(ct);
+    }
+
+    public async Task IssueStreamAccessAsync(string? preferredStreamType, CancellationToken ct = default)
+    {
+        var ticket = _sessionState.EntryTicket
+            ?? throw new InvalidOperationException("Chưa có vé vào thi để xin quyền truy cập stream.");
+
         if (!ticket.IsMonitored)
         {
             // The exam was created with monitoring off. Asking for a stream token here is not just
@@ -44,10 +57,12 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
             {
                 ticket.AttemptId
             });
+            return;
         }
-        else if (!_settings.UseMockData)
+
+        if (!_settings.UseMockData)
         {
-            var access = await _streamAccessClient.IssueAsync(ticket.AttemptId, preferredStreamType: null, ct);
+            var access = await _streamAccessClient.IssueAsync(ticket.AttemptId, preferredStreamType, ct);
             ApplyStreamAccess(ticket, access.Token, access.ScheduleId, access.SessionId, access.StreamTypes, access.ExpiresAt);
         }
         else if (_settings.UseDevStreamToken)
@@ -60,21 +75,33 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
                 ticket.ScheduleId,
                 ticket.SessionId,
                 ticket.AttemptId.ToString("D"),
-                ticket.StreamTypes,
+                // Lựa chọn của học viên cũng phải tới được devserver, nếu không nhánh mock sẽ ghi
+                // khác nhánh thật và bug chỉ lộ ra khi chạy production.
+                ResolveDevStreamTypes(ticket, preferredStreamType),
                 TimeSpan.FromHours(2),
                 ct);
             ApplyStreamAccess(ticket, access.Token, access.ScheduleId, access.SessionId, access.StreamTypes, access.ExpiresAt);
         }
-        _sessionState.EntryTicket = ticket;
-        _sessionState.ExamAttemptId = ticket.AttemptId;
-        _sessionState.SessionId = string.IsNullOrWhiteSpace(ticket.SessionId) ? ticket.AttemptId.ToString("D") : ticket.SessionId;
-        _sessionState.ScheduleId = ticket.ScheduleId;
-        var paper = await _examApi.GetExamPaperAsync(ticket.AttemptId.ToString(), ct);
-        _sessionState.LoadExamPaper(paper, ticket.AttemptId);
-        await ResumeQuestionIndexIfNeededAsync(ct);
+
+        LocalFileLogger.Info("exam_bootstrap", "stream_access_issued", new
+        {
+            ticket.AttemptId,
+            preferredStreamType,
+            granted = ticket.StreamTypes
+        });
     }
 
-    private static void ApplyStreamAccess(
+    private static IReadOnlyList<string> ResolveDevStreamTypes(
+        ExamEntryTicket ticket,
+        string? preferredStreamType) => preferredStreamType switch
+        {
+            "CAMERA" => ["camera"],
+            "SCREEN" => ["screen"],
+            "CAMERA_AND_SCREEN" => ["camera", "screen"],
+            _ => ticket.StreamTypes
+        };
+
+    private void ApplyStreamAccess(
         ExamEntryTicket ticket,
         string token,
         string scheduleId,
@@ -87,6 +114,18 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
         ticket.SessionId = sessionId;
         ticket.StreamTypes = streamTypes;
         ticket.StreamTokenExpiresAt = expiresAt;
+        // Bắt buộc: scheduleId/sessionId chỉ TỒN TẠI trong phản hồi token -- vé vào thi không mang
+        // chúng. Từ khi bước này bị dời ra sau EnterWithTicketAsync, không đồng bộ lại ở đây nghĩa
+        // là ExamSessionState giữ mãi giá trị tạm đặt lúc nhận vé.
+        ApplySessionIdentity(ticket);
+    }
+
+    private void ApplySessionIdentity(ExamEntryTicket ticket)
+    {
+        _sessionState.SessionId = string.IsNullOrWhiteSpace(ticket.SessionId)
+            ? ticket.AttemptId.ToString("D")
+            : ticket.SessionId;
+        _sessionState.ScheduleId = ticket.ScheduleId;
     }
 
     /// <summary>

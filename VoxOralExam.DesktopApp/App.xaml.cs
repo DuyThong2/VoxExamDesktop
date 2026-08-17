@@ -211,6 +211,8 @@ public partial class App : Application
 
         services.AddSingleton<RecordingClock>();
         services.AddSingleton<CameraService>();
+        services.AddSingleton<CaptureReadinessProbe>();
+        services.AddSingleton<CameraSignalGuard>();
         services.AddSingleton<ScreenProctoringService>();
         services.AddSingleton<IDeviceContextProvider, DeviceContextProvider>();
         services.AddSingleton<MockExamDataFactory>();

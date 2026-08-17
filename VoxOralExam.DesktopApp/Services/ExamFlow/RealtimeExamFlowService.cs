@@ -86,6 +86,12 @@ public sealed class RealtimeExamFlowService : IExamFlowService
         return _runner?.ReportFocusLostAsync(capturedAt) ?? Task.CompletedTask;
     }
 
+    public Task ReportCameraSignalLostAsync(DateTimeOffset capturedAt, bool neverDelivered)
+        => _runner?.ReportCameraSignalLostAsync(capturedAt, neverDelivered) ?? Task.CompletedTask;
+
+    public Task ReportCameraSignalRestoredAsync(DateTimeOffset capturedAt, TimeSpan outage)
+        => _runner?.ReportCameraSignalRestoredAsync(capturedAt, outage) ?? Task.CompletedTask;
+
     private async Task RunAndUnwireAsync(
         ExamAttemptRunner runner,
         CancellationToken cancellationToken)

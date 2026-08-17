@@ -271,6 +271,36 @@ internal sealed class ExamAttemptRunner
         }
     }
 
+    public async Task ReportCameraSignalLostAsync(DateTimeOffset capturedAt, bool neverDelivered)
+    {
+        try
+        {
+            await _sessionClient
+                .SendCameraSignalLostAsync(capturedAt, neverDelivered, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // Cùng chính sách với focus lost: mất một cảnh báo còn hơn làm gián đoạn bài thi.
+            // CameraSignalGuard đã ghi sự việc vào log máy trạm trước khi gọi tới đây.
+            LocalFileLogger.Error("exam_flow", "camera_signal_lost_send_failed", ex);
+        }
+    }
+
+    public async Task ReportCameraSignalRestoredAsync(DateTimeOffset capturedAt, TimeSpan outage)
+    {
+        try
+        {
+            await _sessionClient
+                .SendCameraSignalRestoredAsync(capturedAt, outage, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("exam_flow", "camera_signal_restored_send_failed", ex);
+        }
+    }
+
     public void SetMicMuted(bool muted)
     {
         _isMicMuted = muted;

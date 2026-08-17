@@ -4,6 +4,8 @@ using System.Windows.Input;
 using System.Windows.Media.Imaging;
 using NAudio.Wave;
 using NAudio.Wave.SampleProviders;
+using VoxOralExam.Core.Interfaces;
+using VoxOralExam.Core.Models;
 using VoxOralExam.DesktopApp.Infra.Devices;
 using VoxOralExam.DesktopApp.Services.EntryFlow;
 using VoxOralExam.DesktopApp.State;
@@ -14,16 +16,33 @@ using VoxOralExam.DesktopApp.Infra.Recording;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
 
+/// <summary>One row of the "luồng bắt buộc" list. Rebuilt wholesale on every re-check.</summary>
+public sealed record StreamReadinessItem(string Title, string StatusText, bool IsReady);
+
+/// <summary>
+/// Một lựa chọn giám sát cho kỳ thi cho phép học viên tự chọn.
+/// </summary>
+/// <param name="Value">CAMERA / SCREEN / CAMERA_AND_SCREEN, gửi thẳng lên server làm streamType.</param>
+/// <param name="Hint">
+/// Nói theo HỆ QUẢ chứ không theo tên kỹ thuật -- giống bảng lựa chọn phía web dành cho giáo viên.
+/// Học viên đang chọn mức bằng chứng sẽ tồn tại về buổi thi của chính mình, nên họ cần biết mình
+/// đang từ bỏ điều gì.
+/// </param>
+public sealed record StreamChoiceOption(string Value, string Label, string Hint);
+
 
 public class DevicePreflightViewModel : BaseViewModel
 {
     private readonly IExamEntryNavigator _navigator;
     private readonly AppSettings _settings;
     private readonly ExamSessionState _sessionState;
+    private readonly CaptureReadinessProbe _readinessProbe;
+    private readonly IExamSessionBootstrapService _bootstrapService;
 
     private string _deviceTestStatus = "Chưa kiểm tra thiết bị";
     private bool _isMicTesting;
     private bool _isCameraTesting;
+    private bool _isCheckingStreams;
     private double _microphoneLevel;
     private BitmapImage? _cameraPreview;
     private AudioInputOption? _selectedAudioInput;
@@ -31,28 +50,105 @@ public class DevicePreflightViewModel : BaseViewModel
     private WaveIn? _micTestRecorder;
     private WaveOut? _outputTestPlayer;
     private CameraService? _cameraTestService;
+    private CancellationTokenSource? _streamCheckCts;
+    private StreamChoiceOption? _selectedStreamChoice;
+    private bool _isEnteringExam;
 
     public DevicePreflightViewModel(
         IExamEntryNavigator navigator,
         AppSettings settings,
-        ExamSessionState sessionState)
+        ExamSessionState sessionState,
+        CaptureReadinessProbe readinessProbe,
+        IExamSessionBootstrapService bootstrapService)
     {
         _navigator = navigator;
         _settings = settings;
         _sessionState = sessionState;
+        _readinessProbe = readinessProbe;
+        _bootstrapService = bootstrapService;
 
-        EnterExamCommand = new RelayCommand(EnterExam);
+        LoadStreamChoices();
+
+        EnterExamCommand = new RelayCommand(() => _ = EnterExamAsync(), () => CanEnterExam);
         BackCommand = new RelayCommand(() => _navigator.Back());
         PlayTestSoundCommand = new RelayCommand(PlayTestSound);
         ToggleMicTestCommand = new RelayCommand(ToggleMicTest);
-        ToggleCameraTestCommand = new RelayCommand(ToggleCameraTest);
+        // Blocked during a check: the probe holds the physical camera, and a second open of the
+        // same device fails on Windows -- which would look to the student like their camera broke.
+        ToggleCameraTestCommand = new RelayCommand(ToggleCameraTest, () => !IsCheckingStreams);
+        RecheckStreamsCommand = new RelayCommand(() => _ = CheckRequiredStreamsAsync(), () => !IsCheckingStreams);
 
         LoadAudioInputDevices();
         LoadAudioOutputDevices();
+        _ = CheckRequiredStreamsAsync();
     }
 
     public ObservableCollection<AudioInputOption> AudioInputDevices { get; } = [];
     public ObservableCollection<AudioOutputOption> AudioOutputDevices { get; } = [];
+
+    /// <summary>
+    /// One entry per stream type this exam requires, empty for an unmonitored exam.
+    /// </summary>
+    public ObservableCollection<StreamReadinessItem> StreamChecks { get; } = [];
+
+    /// <summary>
+    /// Lựa chọn giám sát, chỉ có nội dung khi kỳ thi cho học viên tự chọn VÀ phiên chưa chốt.
+    /// </summary>
+    public ObservableCollection<StreamChoiceOption> StreamChoices { get; } = [];
+
+    public bool HasStreamChoices => StreamChoices.Count > 0;
+
+    public StreamChoiceOption? SelectedStreamChoice
+    {
+        get => _selectedStreamChoice;
+        set
+        {
+            if (SetProperty(ref _selectedStreamChoice, value))
+            {
+                // Đổi lựa chọn thì kết quả kiểm tra cũ nói về một bộ luồng khác -- giữ lại là để
+                // học viên vào thi dựa trên bằng chứng của lựa chọn họ vừa bỏ.
+                _ = CheckRequiredStreamsAsync();
+            }
+        }
+    }
+
+    public bool IsEnteringExam
+    {
+        get => _isEnteringExam;
+        private set
+        {
+            if (SetProperty(ref _isEnteringExam, value))
+            {
+                OnPropertyChanged(nameof(CanEnterExam));
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
+    }
+
+    public bool IsCheckingStreams
+    {
+        get => _isCheckingStreams;
+        private set
+        {
+            if (SetProperty(ref _isCheckingStreams, value))
+            {
+                OnPropertyChanged(nameof(CanEnterExam));
+                CommandManager.InvalidateRequerySuggested();
+            }
+        }
+    }
+
+    public bool HasStreamChecks => StreamChecks.Count > 0;
+
+    /// <summary>
+    /// The gate. Every required stream type must have proved it produces frames on this machine
+    /// before the student is allowed in.
+    ///
+    /// <para>An exam with no monitoring configured has nothing to prove, so the list is empty and
+    /// this is trivially true -- "all of nothing" is the right answer there, not a special case.</para>
+    /// </summary>
+    public bool CanEnterExam =>
+        !IsCheckingStreams && !IsEnteringExam && StreamChecks.All(check => check.IsReady);
 
     public string DeviceTestStatus
     {
@@ -101,17 +197,148 @@ public class DevicePreflightViewModel : BaseViewModel
     public ICommand PlayTestSoundCommand { get; }
     public ICommand ToggleMicTestCommand { get; }
     public ICommand ToggleCameraTestCommand { get; }
+    public ICommand RecheckStreamsCommand { get; }
 
     public void CleanupDeviceTests()
     {
+        _streamCheckCts?.Cancel();
         StopMicTest();
         StopCameraTest();
         _outputTestPlayer?.Dispose();
         _outputTestPlayer = null;
     }
 
-    private void EnterExam()
+    /// <summary>
+    /// Probes every stream type the exam requires, one at a time, and republishes the verdicts.
+    ///
+    /// <para>Sequential rather than parallel: the camera probe and the screen probe both want the
+    /// GPU and the preflight's own camera test wants the same device, so overlapping them turns a
+    /// working machine into a failing one.</para>
+    /// </summary>
+    private async Task CheckRequiredStreamsAsync()
     {
+        // Cancel the previous check but leave DISPOSING it to that invocation's own finally: it is
+        // still awaiting on a token from that source, and CreateLinkedTokenSource on an already
+        // disposed source throws instead of simply reporting cancellation.
+        var cts = new CancellationTokenSource();
+        _streamCheckCts?.Cancel();
+        _streamCheckCts = cts;
+
+        // Releases the physical camera before the probe asks for it.
+        StopCameraTest();
+
+        IsCheckingStreams = true;
+        StreamChecks.Clear();
+        OnPropertyChanged(nameof(HasStreamChecks));
+
+        try
+        {
+            // ResolveRequestedStreamTypes chứ KHÔNG phải ResolveRecordingStreamTypes: cái sau đọc
+            // ticket.StreamTypes, mà danh sách đó chỉ được điền bởi phản hồi token -- thứ giờ đây
+            // chỉ tới sau khi bấm "Vào thi". Ở thời điểm này nó còn rỗng, và nhánh dự phòng "không
+            // chắc thì coi như cả hai" của nó sẽ lặng lẽ đè lên lựa chọn của học viên.
+            var required = _sessionState.EntryTicket
+                ?.ResolveRequestedStreamTypes(SelectedStreamChoice?.Value) ?? [];
+
+            foreach (var streamType in required)
+            {
+                var title = DescribeStreamType(streamType);
+                DeviceTestStatus = $"Đang kiểm tra {title.ToLowerInvariant()}...";
+
+                var readiness = await _readinessProbe.ProbeAsync(streamType, cts.Token);
+                StreamChecks.Add(new StreamReadinessItem(title, readiness.Message, readiness.IsReady));
+                OnPropertyChanged(nameof(HasStreamChecks));
+                OnPropertyChanged(nameof(CanEnterExam));
+                CommandManager.InvalidateRequerySuggested();
+
+                LocalFileLogger.Info("device_test", "stream_readiness_checked", new
+                {
+                    streamType = streamType.ToString(),
+                    readiness.IsReady,
+                    readiness.Message
+                });
+            }
+
+            // Reads the verdicts directly rather than CanEnterExam, which is still false here
+            // because IsCheckingStreams only drops in the finally below.
+            DeviceTestStatus = StreamChecks.Count == 0
+                ? "Bài thi này không yêu cầu giám sát."
+                : StreamChecks.All(check => check.IsReady)
+                    ? "Thiết bị giám sát đã sẵn sàng."
+                    : "Chưa thể vào thi: còn thiết bị giám sát bắt buộc chưa hoạt động.";
+        }
+        catch (OperationCanceledException)
+        {
+            // Left the screen, or a newer check superseded this one. Whoever cancelled owns the
+            // state from here.
+        }
+        finally
+        {
+            // Only the newest check may clear the flag; an older one losing the race must not
+            // re-enable the buttons underneath its successor. Clearing the field as well keeps
+            // CleanupDeviceTests from cancelling a source this line is about to dispose.
+            if (ReferenceEquals(_streamCheckCts, cts))
+            {
+                _streamCheckCts = null;
+                IsCheckingStreams = false;
+            }
+
+            cts.Dispose();
+        }
+    }
+
+    private static string DescribeStreamType(RecordingStreamType streamType) => streamType switch
+    {
+        RecordingStreamType.Camera => "Camera",
+        RecordingStreamType.Screen => "Chia sẻ màn hình",
+        _ => streamType.ToString()
+    };
+
+    /// <summary>
+    /// Chốt lựa chọn giám sát, xin stream token, rồi mới bàn giao sang phòng thi.
+    ///
+    /// <para>Đây là nơi lựa chọn của học viên trở thành vĩnh viễn: server ghi nó xuống phiên thi ở
+    /// lần phát token đầu tiên và từ chối mọi loại khác về sau. Vì vậy nó phải nằm SAU bước kiểm
+    /// tra thiết bị -- chốt sớm hơn là quyết hộ học viên trước khi biết máy họ chạy được gì.</para>
+    /// </summary>
+    private async Task EnterExamAsync()
+    {
+        // The button is disabled in this state, but a command can still be invoked directly (a
+        // keyboard accelerator, an automation peer), and this is the one gate standing between a
+        // broken camera and an exam recorded with no evidence.
+        if (!CanEnterExam)
+        {
+            return;
+        }
+
+        IsEnteringExam = true;
+        try
+        {
+            DeviceTestStatus = "Đang xin quyền ghi hình cho phiên thi...";
+            await _bootstrapService.IssueStreamAccessAsync(SelectedStreamChoice?.Value);
+        }
+        catch (Exception ex)
+        {
+            // Dừng hẳn tại đây. Đi tiếp nghĩa là thả học viên vào phòng thi với StreamJwt rỗng:
+            // ghi hình không xác thực được, upload segment hỏng, và buổi thi kết thúc mà không có
+            // một mảnh bằng chứng nào -- hỏng âm thầm hơn nhiều so với việc chặn ngay bây giờ.
+            LocalFileLogger.Error("device_test", "stream_access_failed", ex, new
+            {
+                choice = SelectedStreamChoice?.Value
+            });
+            DeviceTestStatus = $"Không xin được quyền ghi hình: {ex.Message}";
+            MessageBox.Show(
+                $"Không thể bắt đầu phiên thi: {ex.Message}",
+                "Không vào thi được",
+                MessageBoxButton.OK,
+                MessageBoxImage.Warning);
+            return;
+        }
+        finally
+        {
+            IsEnteringExam = false;
+        }
+
         // Persist the chosen mic so the exam's audio pipeline uses it (moved here from login).
         _sessionState.SelectedAudioInputDeviceIndex = SelectedAudioInput?.DeviceIndex ?? 0;
         _sessionState.SelectedAudioInputDeviceName = SelectedAudioInput?.DisplayName ?? string.Empty;
@@ -122,6 +349,40 @@ public class DevicePreflightViewModel : BaseViewModel
 
         CleanupDeviceTests();
         _navigator.RequestStartExam();
+    }
+
+    /// <summary>
+    /// Dựng danh sách lựa chọn, hoặc để trống khi kỳ thi không cho chọn.
+    ///
+    /// <para>"Cả hai" đứng đầu và là mặc định: quyền tự chọn nghĩa là được phép giám sát ít hơn,
+    /// không phải bị buộc chọn một -- nên mức bằng chứng cao nhất phải là thứ xảy ra khi học viên
+    /// không đụng gì vào.</para>
+    /// </summary>
+    private void LoadStreamChoices()
+    {
+        StreamChoices.Clear();
+        if (_sessionState.EntryTicket?.AllowsStreamTypeChoice != true)
+        {
+            OnPropertyChanged(nameof(HasStreamChoices));
+            return;
+        }
+
+        StreamChoices.Add(new StreamChoiceOption(
+            "CAMERA_AND_SCREEN",
+            "Cả camera và màn hình",
+            "Mức giám sát đầy đủ nhất."));
+        StreamChoices.Add(new StreamChoiceOption(
+            "CAMERA",
+            "Chỉ camera",
+            "Không có bằng chứng về những gì diễn ra trên màn hình của bạn."));
+        StreamChoices.Add(new StreamChoiceOption(
+            "SCREEN",
+            "Chỉ màn hình",
+            "Không có bằng chứng xác nhận ai đang ngồi trước máy."));
+
+        _selectedStreamChoice = StreamChoices[0];
+        OnPropertyChanged(nameof(SelectedStreamChoice));
+        OnPropertyChanged(nameof(HasStreamChoices));
     }
 
     private void LoadAudioInputDevices()
@@ -325,6 +586,13 @@ public class DevicePreflightViewModel : BaseViewModel
 
     private async void StartCameraTest()
     {
+        // The probe is holding the device right now; opening it a second time would fail and read
+        // as a hardware fault to the student.
+        if (IsCheckingStreams)
+        {
+            return;
+        }
+
         try
         {
             StopCameraTest();
