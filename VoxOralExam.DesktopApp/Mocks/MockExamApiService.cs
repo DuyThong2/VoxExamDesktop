@@ -1,5 +1,6 @@
 using VoxOralExam.Core.Models;
 
+using VoxOralExam.DesktopApp.Dtos;
 using VoxOralExam.DesktopApp.Dtos.Requests;
 using VoxOralExam.DesktopApp.Services.DomainService;
 
@@ -30,6 +31,10 @@ public class MockExamApiService : IExamApiService
 
     public Task UpdateRemainingTimeAsync(Guid sessionId, int remainingSeconds, CancellationToken ct = default)
         => Task.CompletedTask;
+
+    /// <summary>Chạy mock thì không có giám thị nào để mà cấm -- luôn báo chưa bị chặn.</summary>
+    public Task<ExamSessionGuard?> GetSessionGuardAsync(Guid sessionId, CancellationToken ct = default)
+        => Task.FromResult<ExamSessionGuard?>(new ExamSessionGuard("IN_PROGRESS", false, false));
 
     public Task ReportAiUsageAsync(Guid sessionId, ReportAiUsageRequestDto request, CancellationToken ct = default)
         => Task.CompletedTask;

@@ -74,6 +74,11 @@ public sealed class RealtimeExamFlowService : IExamFlowService
         _runner?.SetMicMuted(muted);
     }
 
+    /// <summary>
+    /// Chưa vào phiên (runner null) thì không có gì để dừng -- người gọi vẫn tự đóng màn thi.
+    /// </summary>
+    public void ForceEndFromServer(string reason) => _runner?.ForceEndFromServer(reason);
+
     public Task ReportFocusLostAsync(DateTimeOffset capturedAt)
     {
         // Chưa vào phiên (runner null) thì không có WS để gửi -- bỏ qua, log máy trạm vẫn giữ

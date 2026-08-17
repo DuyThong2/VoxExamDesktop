@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using VoxOralExam.Core.Models;
+using VoxOralExam.DesktopApp.Dtos;
 using VoxOralExam.DesktopApp.Dtos.Requests;
 using VoxOralExam.DesktopApp.Services.DomainService;
 using VoxOralExam.DesktopApp.State;
@@ -69,6 +70,33 @@ public class ExamApiService : IExamApiService
         await SendAsync<object>(request, ct);
     }
 
+    /// <summary>
+    /// Hỏi qua GraphQL vì REST không có endpoint đọc chi tiết phiên -- <c>/api/v1/exam-sessions</c>
+    /// chỉ có <c>/{id}/paper</c>. Query <c>examSession</c> cho phép cả vai STUDENT và trả sẵn
+    /// <c>candidateBlocked</c>, nên không phải thêm gì bên Java.
+    /// </summary>
+    public async Task<ExamSessionGuard?> GetSessionGuardAsync(Guid sessionId, CancellationToken ct = default)
+    {
+        using var request = BuildRequest(HttpMethod.Post, "/graphql");
+        request.Content = JsonContent.Create(new
+        {
+            query = "query($id: ID!) { examSession(id: $id) { status flagged candidateBlocked } }",
+            variables = new { id = sessionId.ToString("D") }
+        });
+
+        var client = _httpClientFactory.CreateClient();
+        using var response = await client.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+        var payload = await response.Content.ReadFromJsonAsync<GraphQlResponse<ExamSessionGuardData>>(JsonOptions, ct);
+        // GraphQL trả 200 kèm mảng errors khi query hỏng. Coi đó là "không biết" (null) chứ đừng
+        // trả về một guard rỗng -- guard rỗng có CandidateBlocked=false, nhìn y hệt "chưa bị cấm".
+        if (payload?.Errors is { Count: > 0 })
+        {
+            return null;
+        }
+        return payload?.Data?.ExamSession;
+    }
+
     public async Task ReportAiUsageAsync(Guid sessionId, ReportAiUsageRequestDto request, CancellationToken ct = default)
     {
         using var httpRequest = BuildRequest(HttpMethod.Post, $"/api/v1/exam-sessions/{sessionId:D}/ai-usage");
@@ -102,6 +130,24 @@ public class ExamApiService : IExamApiService
         where T : class
     {
         public T? Data { get; set; }
+    }
+
+    private sealed class GraphQlResponse<T>
+        where T : class
+    {
+        public T? Data { get; set; }
+
+        public List<GraphQlError>? Errors { get; set; }
+    }
+
+    private sealed class GraphQlError
+    {
+        public string? Message { get; set; }
+    }
+
+    private sealed class ExamSessionGuardData
+    {
+        public ExamSessionGuard? ExamSession { get; set; }
     }
 
     private sealed class PageResponse<T>

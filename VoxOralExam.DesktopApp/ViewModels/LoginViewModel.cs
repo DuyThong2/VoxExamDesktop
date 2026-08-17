@@ -35,7 +35,11 @@ public class LoginViewModel : BaseViewModel
         _deviceContextProvider = deviceContextProvider;
         _sessionState = sessionState;
         _navigator = navigator;
-        Email = "student1a.demosch01@vox.demo";
+        // Email để trống: mỗi thí sinh đăng nhập bằng tài khoản của chính mình, điền sẵn một
+        // địa chỉ demo chỉ khiến người dùng thật phải xoá đi trước khi gõ.
+        //
+        // Mật khẩu vẫn điền sẵn theo yêu cầu -- tiện cho demo, vì toàn bộ tài khoản seed đều
+        // dùng chung DEMO_DATA_PASSWORD. GỠ dòng dưới trước khi giao máy cho kỳ thi thật.
         Password = "Password@123";
         LoginCommand = new RelayCommand(ExecuteLogin, CanLogin);
     }

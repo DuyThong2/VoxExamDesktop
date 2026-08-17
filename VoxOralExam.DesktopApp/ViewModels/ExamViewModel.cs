@@ -60,6 +60,9 @@ public class ExamViewModel : BaseViewModel
     private int _remainingSecondsLocal;
     private DateTime _lastCheckpointAt;
     private bool _checkpointInFlight;
+    private DateTime _lastForceEndPollAt;
+    private bool _forceEndPollInFlight;
+    private bool _forceEndHandled;
     private BitmapImage? _cameraPreview;
     private BitmapImage? _avatarVideoFrame;
     private bool _isAvatarSpeaking;
@@ -715,6 +718,7 @@ public class ExamViewModel : BaseViewModel
             _sessionState.RemainingSeconds
                 ?? (_sessionState.DurationSeconds > 0 ? _sessionState.DurationSeconds : 30 * 60));
         _lastCheckpointAt = DateTime.UtcNow;
+        _lastForceEndPollAt = DateTime.UtcNow;
         RefreshRemainingTime();
 
         _countdownTimer = new DispatcherTimer
@@ -740,6 +744,14 @@ public class ExamViewModel : BaseViewModel
                 _ = CheckpointRemainingTimeBestEffortAsync();
             }
 
+            // Lưới an toàn cho lệnh buộc kết thúc: xem PollForceEndAsync.
+            if (DateTime.UtcNow - _lastForceEndPollAt
+                >= TimeSpan.FromSeconds(Math.Max(1, _settings.ForceEndPollIntervalSeconds)))
+            {
+                _lastForceEndPollAt = DateTime.UtcNow;
+                _ = PollForceEndAsync();
+            }
+
             if (_remainingSecondsLocal <= 0)
             {
                 _countdownTimer.Stop();
@@ -759,6 +771,67 @@ public class ExamViewModel : BaseViewModel
         TimeRemaining = _remainingSecondsLocal <= 0
             ? "Hết giờ!"
             : remaining.ToString(@"hh\:mm\:ss");
+    }
+
+    /// <summary>
+    /// Hỏi server xem giám thị đã buộc kết thúc chưa, vì tin <c>force_end</c> qua WebSocket không
+    /// đáng tin.
+    ///
+    /// <para>Lệnh cấm đi Kafka rồi mới tới pod Python đang giữ WebSocket của thí sinh. Consumer
+    /// group giao partition cho MỘT pod, còn WebSocket nằm ở pod nào thì không ai biết trước — hai
+    /// phép gán độc lập nhau. Một pod thì luôn trùng nên chạy đúng suốt; đo được 2026-08-17 khi hệ
+    /// tự scale lên 2 pod: lệnh cấm rơi vào pod không giữ kết nối, chỉ ghi log "no local realtime
+    /// connection" rồi bỏ qua, và thí sinh thi tiếp tới hết bài.
+    ///
+    /// <para>Vì sao không suy từ mốc thời gian còn lại: buộc kết thúc đặt phiên sang INTERRUPTED,
+    /// mà trạng thái đó vẫn thuộc RESUMABLE nên endpoint checkpoint nhận bình thường, không hề báo
+    /// lỗi gì để mà bắt.</para>
+    ///
+    /// <para>Chỉ dừng khi server nói RÕ <c>candidateBlocked</c>. Không hỏi được thì thi tiếp: dừng
+    /// bài của thí sinh vì một cú nghẽn mạng còn tệ hơn hẳn lỗi đang vá.</para>
+    /// </summary>
+    private async Task PollForceEndAsync()
+    {
+        if (_forceEndPollInFlight || _forceEndHandled || _isCleaningUp
+            || _sessionState.ExamAttemptId == Guid.Empty)
+        {
+            return;
+        }
+
+        _forceEndPollInFlight = true;
+        try
+        {
+            var guard = await _examApi.GetSessionGuardAsync(
+                _sessionState.ExamAttemptId,
+                CancellationToken.None);
+            if (guard is null || !guard.CandidateBlocked)
+            {
+                return;
+            }
+
+            // Đặt cờ TRƯỚC khi gọi xuống để nhịp sau không bắn lại, kể cả khi runner mất thời
+            // gian dừng.
+            _forceEndHandled = true;
+            LocalFileLogger.Info("exam_timer", "force_end_detected_by_poll", new
+            {
+                sessionId = _sessionState.ExamAttemptId,
+                status = guard.Status
+            });
+            AddLog("Bài thi đã bị giám thị buộc kết thúc.", LogType.Warning);
+            _examFlow.ForceEndFromServer("Giám thị đã buộc kết thúc bài thi.");
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error(
+                "exam_timer",
+                "force_end_poll_failed",
+                ex,
+                new { sessionId = _sessionState.ExamAttemptId });
+        }
+        finally
+        {
+            _forceEndPollInFlight = false;
+        }
     }
 
     private async Task CheckpointRemainingTimeBestEffortAsync()

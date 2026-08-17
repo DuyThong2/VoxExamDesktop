@@ -501,8 +501,31 @@ internal sealed class ExamAttemptRunner
         }
     }
 
+    /// <summary>
+    /// Cửa vào từ đường HỎI SERVER (ExamViewModel poll mỗi vài giây), song song với tin
+    /// <c>force_end</c> của WebSocket. Cùng gọi một hàm nên hai đường không thể lệch nhau.
+    ///
+    /// <para>Gọi lại nhiều lần vô hại: <c>_forceEndRequested</c> đã bật, còn
+    /// <c>_runCancellation.Cancel()</c> vốn idempotent. Poll bắn trùng với tin WebSocket cũng
+    /// không sao.</para>
+    /// </summary>
+    public void ForceEndFromServer(string reason)
+    {
+        LocalFileLogger.Info("exam_flow", "force_end_detected_by_poll", new { reason });
+        HandleForceEnded(reason);
+    }
+
+    /// <summary>
+    /// Chạy đúng MỘT lần cho mỗi phiên, dù bị gọi từ cả hai đường: tin <c>force_end</c> của
+    /// WebSocket và vòng hỏi server của ExamViewModel. Cả hai đều còn sống nên chuyện gọi trùng
+    /// là bình thường, không phải ngoại lệ -- đường nào tới trước thì đường đó làm.
+    /// </summary>
     private void HandleForceEnded(string reason)
     {
+        if (_forceEndRequested)
+        {
+            return;
+        }
         _forceEndRequested = true;
         _speechTurns?.CloseSpeechWindow();
         _avatarSpeaker.Stop();

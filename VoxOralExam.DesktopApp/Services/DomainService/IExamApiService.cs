@@ -1,4 +1,5 @@
 using VoxOralExam.Core.Models;
+using VoxOralExam.DesktopApp.Dtos;
 using VoxOralExam.DesktopApp.Dtos.Requests;
 
 namespace VoxOralExam.DesktopApp.Services.DomainService;
@@ -18,6 +19,17 @@ public interface IExamApiService
     Task UpdateSessionStatusAsync(Guid sessionId, string status, CancellationToken ct = default);
 
     Task UpdateRemainingTimeAsync(Guid sessionId, int remainingSeconds, CancellationToken ct = default);
+
+    /// <summary>
+    /// Phiên này có bị giám thị buộc kết thúc chưa. Trả <c>null</c> khi không hỏi được (mạng lỗi,
+    /// server lỗi) -- người gọi PHẢI coi null là "không biết" và thi tiếp, tuyệt đối không được
+    /// dừng bài. Dừng bài vì một cú nghẽn mạng còn tệ hơn lỗi đang vá.
+    ///
+    /// <para>Không dùng được mốc thời gian còn lại để suy ra: buộc kết thúc đặt phiên sang
+    /// INTERRUPTED, mà trạng thái đó vẫn nằm trong RESUMABLE nên endpoint checkpoint vẫn nhận
+    /// bình thường, không hề báo lỗi.</para>
+    /// </summary>
+    Task<ExamSessionGuard?> GetSessionGuardAsync(Guid sessionId, CancellationToken ct = default);
 
     /// <summary>
     /// Báo cáo chi phí AI phát sinh ngay trên máy học viên (vd TTS qua LocalAvatarSpeaker) --

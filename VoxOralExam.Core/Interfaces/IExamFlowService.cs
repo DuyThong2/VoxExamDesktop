@@ -27,6 +27,21 @@ public interface IExamFlowService
     void SetMicMuted(bool muted);
 
     /// <summary>
+    /// Dừng bài vì giám thị đã buộc kết thúc, khi biết được qua đường HỎI SERVER chứ không phải
+    /// qua tin <c>force_end</c> của WebSocket.
+    ///
+    /// <para>Cần có vì đường WebSocket không đáng tin: lệnh cấm đi Kafka rồi mới tới pod Python
+    /// giữ kết nối, mà consumer group giao partition cho MỘT pod trong khi WebSocket của thí sinh
+    /// nằm ở pod nào thì không biết trước. Đo được 2026-08-17: hệ có 2 pod, lệnh cấm rơi vào pod
+    /// không giữ kết nối, bị ghi log "no local realtime connection" rồi bỏ qua — bài thi chạy
+    /// tiếp như không có gì.</para>
+    ///
+    /// <para>Chạy đúng nhánh mà tin <c>force_end</c> vẫn chạy, nên không có đường xử lý thứ hai
+    /// để mà lệch nhau.</para>
+    /// </summary>
+    void ForceEndFromServer(string reason);
+
+    /// <summary>
     /// Thí sinh rời khỏi cửa sổ thi. Best-effort: nuốt lỗi, không được làm gián đoạn bài thi.
     /// </summary>
     Task ReportFocusLostAsync(DateTimeOffset capturedAt);

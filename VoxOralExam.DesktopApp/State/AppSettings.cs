@@ -77,6 +77,15 @@ public class AppSettings
     // graded, and after a force_end Python has already closed the socket so the send fails fast.
     public int InterruptTurnEndGraceSeconds { get; set; } = 5;
 
+    // Nhịp hỏi server xem giám thị đã buộc kết thúc chưa -- lưới an toàn cho tin force_end của
+    // WebSocket, vốn có thể rơi vào pod Python không giữ kết nối rồi mất luôn (xem
+    // ExamViewModel.PollForceEndAsync).
+    //
+    // Trễ tệ nhất = nhịp này + một lượt gọi server (~0.3s). Để 3 giây thì dừng bài trong ~3.3s.
+    // Hạ thêm được, nhưng mỗi lần hỏi là vài truy vấn DB bên Java (phiên + thí sinh + kỳ thi +
+    // quyền), nên dưới 2 giây là bắt đầu đáng cân nhắc khi đông thí sinh.
+    public int ForceEndPollIntervalSeconds { get; set; } = 3;
+
     // Ceiling for exam_end + its farewell utterance. Previously unbounded (CancellationToken.None
     // over a 180s ack ceiling plus a 60s avatar wait = 240s of a student watching nothing).
     public int SubmitFarewellTimeoutSeconds { get; set; } = 20;
