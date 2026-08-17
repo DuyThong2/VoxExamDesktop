@@ -115,6 +115,17 @@ public class AppSettings
     public int MinimumSalvageAudioMilliseconds { get; set; } = 800;
     public int TurnAudioPreRollMilliseconds { get; set; } = 400;
     public int TurnAudioTailMilliseconds { get; set; } = 500;
+    // How long CaptureReadinessProbe waits for the first frame before declaring a device dead.
+    // Generous on purpose: a cold webcam takes a second or two to expose and white-balance before
+    // it delivers anything, and a false "camera hỏng" that blocks a student out of their exam is a
+    // far more expensive mistake than a few extra seconds on the preflight screen.
+    public int CaptureReadinessTimeoutSeconds { get; set; } = 8;
+
+    // Hai ngưỡng của CameraSignalGuard. Ngưỡng 1 chỉ hiện banner cho học viên: đủ ngắn để họ kịp
+    // cắm lại dây, đủ dài để bỏ qua USB tái liệt kê và driver reset (thường dưới 3 giây). Ngưỡng 2
+    // mới sinh cảnh báo tới giám thị -- dài hơn hẳn vì mỗi lần bắn là một lần ai đó phải nhìn.
+    public int CameraSignalInterruptSeconds { get; set; } = 4;
+    public int CameraSignalLostSeconds { get; set; } = 20;
     public int CameraDeviceIndex { get; set; } = 0;
     public int CameraWidth { get; set; } = 640;
     public int CameraHeight { get; set; } = 480;

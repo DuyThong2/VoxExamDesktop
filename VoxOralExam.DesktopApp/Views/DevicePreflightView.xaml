@@ -18,6 +18,138 @@
                     <TextBlock Text="Kiểm tra camera, microphone và âm thanh trước khi vào thi."
                                FontSize="13" Foreground="Gray" Margin="0,4,0,16" />
 
+                    <!-- Lựa chọn giám sát, chỉ hiện với kỳ thi cho học viên tự chọn và phiên chưa
+                         chốt. Đặt TRÊN phần kiểm tra thiết bị vì nó quyết định thiết bị nào sẽ được
+                         kiểm tra; đảo thứ tự thì học viên đọc kết quả trước khi biết nó nói về
+                         cái gì. -->
+                    <Border Background="#EFF6FF" BorderBrush="#BFDBFE" BorderThickness="1"
+                            CornerRadius="8" Padding="14,12" Margin="0,0,0,12">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasStreamChoices}" Value="False">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <StackPanel>
+                            <TextBlock Text="Bạn muốn chia sẻ gì trong buổi thi?"
+                                       FontSize="12" FontWeight="SemiBold" Margin="0,0,0,2" />
+                            <TextBlock Text="Kỳ thi này cho phép bạn tự chọn. Lựa chọn được chốt khi bấm Vào thi và không đổi được sau đó."
+                                       FontSize="11" Foreground="#475569" TextWrapping="Wrap"
+                                       Margin="0,0,0,8" />
+                            <!-- ListBox + SelectedItem chứ không phải ItemsControl + RadioButton:
+                                 ràng buộc IsChecked của từng radio về một thuộc tính "mục đang
+                                 chọn" cần converter so sánh, còn ListBox vốn đã có sẵn khái niệm
+                                 đó. ControlTemplate chỉ đổi hình dáng container thành radio. -->
+                            <ListBox ItemsSource="{Binding StreamChoices}"
+                                     SelectedItem="{Binding SelectedStreamChoice, Mode=TwoWay}"
+                                     BorderThickness="0"
+                                     Background="Transparent"
+                                     HorizontalContentAlignment="Stretch"
+                                     ScrollViewer.VerticalScrollBarVisibility="Disabled"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListBox.ItemContainerStyle>
+                                    <Style TargetType="ListBoxItem">
+                                        <Setter Property="Template">
+                                            <Setter.Value>
+                                                <ControlTemplate TargetType="ListBoxItem">
+                                                    <RadioButton GroupName="StreamChoice"
+                                                                 Margin="0,0,0,6"
+                                                                 IsChecked="{Binding IsSelected,
+                                                                                     RelativeSource={RelativeSource TemplatedParent},
+                                                                                     Mode=TwoWay}">
+                                                        <ContentPresenter />
+                                                    </RadioButton>
+                                                </ControlTemplate>
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </ListBox.ItemContainerStyle>
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <StackPanel Margin="4,0,0,0">
+                                            <TextBlock Text="{Binding Label}" FontSize="13" />
+                                            <TextBlock Text="{Binding Hint}" FontSize="11"
+                                                       Foreground="#64748B" TextWrapping="Wrap" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+                        </StackPanel>
+                    </Border>
+
+                    <!-- Thiết bị giám sát bắt buộc. Đặt trên cùng vì đây là phần DUY NHẤT quyết định
+                         học viên có được vào thi hay không; mic/loa bên dưới chỉ là tiện nghi. -->
+                    <Border Background="#F8FAFC" BorderBrush="#E2E8F0" BorderThickness="1"
+                            CornerRadius="8" Padding="14,12" Margin="0,0,0,4">
+                        <Border.Style>
+                            <Style TargetType="Border">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding HasStreamChecks}" Value="False">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Border.Style>
+                        <StackPanel>
+                            <TextBlock Text="Thiết bị giám sát bắt buộc"
+                                       FontSize="12" FontWeight="SemiBold" Margin="0,0,0,8" />
+
+                            <ItemsControl ItemsSource="{Binding StreamChecks}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="0,0,0,6">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="Auto" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Grid.Column="0" FontSize="14" FontWeight="Bold"
+                                                       VerticalAlignment="Top" Margin="0,0,8,0">
+                                                <TextBlock.Style>
+                                                    <Style TargetType="TextBlock">
+                                                        <Setter Property="Text" Value="✕" />
+                                                        <Setter Property="Foreground" Value="#DC2626" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsReady}" Value="True">
+                                                                <Setter Property="Text" Value="✓" />
+                                                                <Setter Property="Foreground" Value="#16A34A" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </TextBlock.Style>
+                                            </TextBlock>
+                                            <StackPanel Grid.Column="1">
+                                                <TextBlock Text="{Binding Title}" FontSize="13" FontWeight="SemiBold" />
+                                                <TextBlock Text="{Binding StatusText}" FontSize="12"
+                                                           Foreground="#475569" TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <Button Content="Kiểm tra lại" HorizontalAlignment="Left"
+                                    Command="{Binding RecheckStreamsCommand}"
+                                    Padding="10,6" Margin="0,6,0,0" />
+                        </StackPanel>
+                    </Border>
+
+                    <TextBlock Text="Đang kiểm tra thiết bị giám sát..."
+                               FontSize="12" Foreground="#475569" Margin="0,8,0,0">
+                        <TextBlock.Style>
+                            <Style TargetType="TextBlock">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsCheckingStreams}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
+
                     <TextBlock Text="Microphone cho bài thi"
                                FontSize="12" FontWeight="SemiBold" Margin="0,4,0,6" />
                     <ComboBox ItemsSource="{Binding AudioInputDevices}"
@@ -94,8 +226,22 @@
                     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,20,0,0">
                         <Button Content="Quay lại" Command="{Binding BackCommand}"
                                 Padding="16,8" Margin="0,0,10,0" />
+                        <!-- Bị vô hiệu hoá qua EnterExamCommand.CanExecute khi còn thiết bị giám sát
+                             chưa đạt. Phải đổi cả màu: một nút xanh lá vẫn trông như bấm được, và
+                             học viên sẽ tưởng ứng dụng treo chứ không hiểu là mình đang bị chặn. -->
                         <Button Content="Vào thi" Command="{Binding EnterExamCommand}"
-                                Padding="20,8" Background="#16A34A" Foreground="White" BorderThickness="0" />
+                                Padding="20,8" Foreground="White" BorderThickness="0">
+                            <Button.Style>
+                                <Style TargetType="Button">
+                                    <Setter Property="Background" Value="#16A34A" />
+                                    <Style.Triggers>
+                                        <Trigger Property="IsEnabled" Value="False">
+                                            <Setter Property="Background" Value="#94A3B8" />
+                                        </Trigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Button.Style>
+                        </Button>
                     </StackPanel>
                 </StackPanel>
             </ScrollViewer>

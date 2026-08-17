@@ -1,3 +1,5 @@
+using VoxOralExam.Core.Models;
+
 namespace VoxOralExam.Core.Context;
 
 /// <summary>
@@ -51,8 +53,95 @@ public class ExamEntryTicket
     public string? StreamTypePermission { get; set; }
 
     /// <summary>
+    /// What this session already locked onto, or null if no stream token has been issued for it yet.
+    ///
+    /// <para>Only ever set for a resumed attempt. The server locks the choice on the FIRST token it
+    /// issues and answers 403 for any other type afterwards, so re-entering an interrupted attempt
+    /// must show the locked choice rather than ask again -- otherwise the student picks freely,
+    /// sits through the whole device check, and is rejected at the last step.</para>
+    /// </summary>
+    public string? ChosenStreamType { get; set; }
+
+    /// <summary>
+    /// True when the exam lets the student choose which stream(s) to share. Requires BOTH that the
+    /// exam accepts either one and that this session has not already locked a choice.
+    /// </summary>
+    public bool AllowsStreamTypeChoice =>
+        string.Equals(RequiredStreamType, "CAMERA_AND_SCREEN", StringComparison.OrdinalIgnoreCase)
+        && string.Equals(StreamTypePermission, "ANY", StringComparison.OrdinalIgnoreCase)
+        && string.IsNullOrWhiteSpace(ChosenStreamType);
+
+    /// <summary>
+    /// The stream types to verify and record BEFORE a token exists, given the student's choice.
+    ///
+    /// <para>Distinct from <see cref="ResolveRecordingStreamTypes"/>, which reads
+    /// <see cref="StreamTypes"/> -- that list is filled by the token response, so during the device
+    /// preflight it is still empty and its "unsure, so assume both" fallback would quietly override
+    /// a student who picked camera only.</para>
+    /// </summary>
+    public IReadOnlyList<RecordingStreamType> ResolveRequestedStreamTypes(string? preferredStreamType)
+    {
+        if (!IsMonitored)
+        {
+            return [];
+        }
+
+        var effective = preferredStreamType
+            ?? (string.IsNullOrWhiteSpace(ChosenStreamType) ? RequiredStreamType : ChosenStreamType);
+
+        return effective?.Trim().ToUpperInvariant() switch
+        {
+            "CAMERA" => [RecordingStreamType.Camera],
+            "SCREEN" => [RecordingStreamType.Screen],
+            _ => [RecordingStreamType.Camera, RecordingStreamType.Screen]
+        };
+    }
+
+    /// <summary>
     /// False means: skip the stream token request, and record nothing. Distinct from an empty
     /// <see cref="StreamTypes"/>, which just means "the token has not been issued yet".
     /// </summary>
     public bool IsMonitored => !string.IsNullOrWhiteSpace(RequiredStreamType);
+
+    /// <summary>
+    /// The stream types this attempt must actually produce.
+    ///
+    /// <para>Deliberately shared by the device preflight (which decides whether the student may
+    /// start at all) and by the exam window (which decides what to record). These two MUST agree:
+    /// a preflight that clears the camera while the exam records screen -- or vice versa -- is a
+    /// gate that proves nothing, and the two would drift the moment either side's copy of this
+    /// mapping was edited alone.</para>
+    ///
+    /// <para><see cref="StreamTypes"/> is the authority because it is what the server actually
+    /// locked onto the session when it issued the token; <see cref="RequiredStreamType"/> is only
+    /// what the exam asks for in general. Falling back to both types when the list is empty is the
+    /// conservative reading for both callers: unsure what is required means check (and record)
+    /// everything, never nothing.</para>
+    /// </summary>
+    /// <exception cref="InvalidOperationException">
+    /// A stream type the client does not know how to capture. Fails loudly rather than being
+    /// skipped: silently ignoring it would record less than the exam demanded.
+    /// </exception>
+    public IReadOnlyList<RecordingStreamType> ResolveRecordingStreamTypes()
+    {
+        if (!IsMonitored)
+        {
+            return [];
+        }
+
+        if (StreamTypes.Count == 0)
+        {
+            return [RecordingStreamType.Camera, RecordingStreamType.Screen];
+        }
+
+        return [.. StreamTypes
+            .Select(value => value.Trim().ToLowerInvariant())
+            .Select(value => value switch
+            {
+                "camera" => RecordingStreamType.Camera,
+                "screen" => RecordingStreamType.Screen,
+                _ => throw new InvalidOperationException($"Unsupported stream type: {value}")
+            })
+            .Distinct()];
+    }
 }

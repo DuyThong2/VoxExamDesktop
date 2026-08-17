@@ -194,10 +194,23 @@ public sealed class ExamRecordingService : IExamRecordingService, IAsyncDisposab
                 }
             }
 
-            if (_startedStreams.Count == 0)
+            // EVERY requested stream, not merely one of them. The old check ("at least one source
+            // started") let an exam configured for camera + screen run on screen alone, and the
+            // caller's RequireRecording gate read that as a healthy recording -- so the one
+            // configuration that demands the most evidence was also the one that silently accepted
+            // half of it. Which half went missing is not knowable later either: a stream that never
+            // started uploads nothing, so the gap looks identical to a stream that was never asked
+            // for.
+            var missingStreams = context.StreamTypes
+                .Distinct()
+                .Where(streamType => !_startedStreams.Contains(streamType))
+                .ToArray();
+            if (missingStreams.Length > 0)
             {
                 await StopCoreAsync(RecordingStopReason.CaptureFailure, CancellationToken.None);
-                throw new InvalidOperationException("No local recording source could be started.");
+                throw new InvalidOperationException(
+                    "Local recording could not start for: " +
+                    string.Join(", ", missingStreams.Select(streamType => streamType.ToString())));
             }
 
             // Best-effort, independent of local recording: a failure to connect/stream live must

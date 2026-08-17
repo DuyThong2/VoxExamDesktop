@@ -30,4 +30,16 @@ public interface IExamFlowService
     /// Thí sinh rời khỏi cửa sổ thi. Best-effort: nuốt lỗi, không được làm gián đoạn bài thi.
     /// </summary>
     Task ReportFocusLostAsync(DateTimeOffset capturedAt);
+
+    /// <summary>
+    /// Camera ngừng gửi khung hình quá ngưỡng cảnh báo. <paramref name="capturedAt"/> là mốc khung
+    /// hình cuối cùng, không phải lúc phát hiện. Best-effort như trên.
+    /// </summary>
+    Task ReportCameraSignalLostAsync(DateTimeOffset capturedAt, bool neverDelivered);
+
+    /// <summary>
+    /// Khung hình trở lại sau một lần mất ĐÃ được cảnh báo, đóng lại khoảng trống trong sổ bằng
+    /// chứng. Không gọi cho những lần gián đoạn ngắn chưa từng sinh cảnh báo.
+    /// </summary>
+    Task ReportCameraSignalRestoredAsync(DateTimeOffset capturedAt, TimeSpan outage);
 }

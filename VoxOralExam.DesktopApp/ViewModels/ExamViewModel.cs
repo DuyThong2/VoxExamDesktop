@@ -33,6 +33,7 @@ public class ExamViewModel : BaseViewModel
     private const int ExamEndWatchdogSeconds = 180;
 
     private readonly CameraService _camera;
+    private readonly CameraSignalGuard _cameraSignalGuard;
     private readonly IProctoringService _proctoring;
     private readonly ExamSessionState _sessionState;
     private readonly IExamFlowService _examFlow;
@@ -65,6 +66,11 @@ public class ExamViewModel : BaseViewModel
     private bool _isAvatarSpeaking;
     private bool _isStudentSpeaking;
     private bool _isCameraOn;
+    private string _cameraSignalMessage = string.Empty;
+    private bool _isCameraSignalLost;
+    // Đã gửi cảnh báo mất tín hiệu cho lần mất đang diễn ra. Quyết định có gửi sự kiện phục hồi hay
+    // không: một gián đoạn ngắn chưa từng báo cho ai thì cũng không có khoảng nào để đóng lại.
+    private bool _cameraOutageReported;
     private bool _isCleaningUp;
     private bool _examCompleted;
     private Task? _cleanupTask;
@@ -91,6 +97,7 @@ public class ExamViewModel : BaseViewModel
 
     public ExamViewModel(
         CameraService camera,
+        CameraSignalGuard cameraSignalGuard,
         IProctoringService proctoring,
         ExamSessionState sessionState,
         IExamFlowService examFlow,
@@ -101,6 +108,7 @@ public class ExamViewModel : BaseViewModel
         AppSettings settings)
     {
         _camera = camera;
+        _cameraSignalGuard = cameraSignalGuard;
         _proctoring = proctoring;
         _sessionState = sessionState;
         _examFlow = examFlow;
@@ -187,6 +195,27 @@ public class ExamViewModel : BaseViewModel
     {
         get => _cameraStatus;
         set => SetProperty(ref _cameraStatus, value);
+    }
+
+    /// <summary>
+    /// Nội dung banner mất tín hiệu camera; rỗng nghĩa là không hiện gì.
+    ///
+    /// <para>Tách khỏi <see cref="CameraStatus"/> vì hai thứ khác hẳn nhau: CameraStatus là trạng
+    /// thái thường trực nằm cạnh khung preview, còn đây là thứ phải cắt ngang tầm mắt học viên --
+    /// họ là người DUY NHẤT cắm lại được sợi dây, nên nếu họ không thấy thì cả chuỗi cảnh báo phía
+    /// sau chỉ ghi lại một sự cố mà lẽ ra đã được sửa trong mười giây.</para>
+    /// </summary>
+    public string CameraSignalMessage
+    {
+        get => _cameraSignalMessage;
+        private set => SetProperty(ref _cameraSignalMessage, value);
+    }
+
+    /// <summary>Đã vượt ngưỡng cảnh báo (đã báo giám thị) -- banner chuyển từ vàng sang đỏ.</summary>
+    public bool IsCameraSignalLost
+    {
+        get => _isCameraSignalLost;
+        private set => SetProperty(ref _isCameraSignalLost, value);
     }
 
     public int QuestionNumber
@@ -428,18 +457,10 @@ public class ExamViewModel : BaseViewModel
         {
             var ticket = _sessionState.EntryTicket
                 ?? throw new InvalidOperationException("Exam entry ticket is missing.");
-            RecordingStreamType[] streamTypes = ticket.StreamTypes.Count == 0
-                ? [RecordingStreamType.Camera, RecordingStreamType.Screen]
-                : ticket.StreamTypes
-                    .Select(value => value.Trim().ToLowerInvariant())
-                    .Select(value => value switch
-                    {
-                        "camera" => RecordingStreamType.Camera,
-                        "screen" => RecordingStreamType.Screen,
-                        _ => throw new InvalidOperationException($"Unsupported stream type: {value}")
-                    })
-                    .Distinct()
-                    .ToArray();
+            // Same call DevicePreflightViewModel gates on, on purpose: the set this exam records
+            // has to be exactly the set the preflight proved working, or clearing the preflight
+            // means nothing.
+            RecordingStreamType[] streamTypes = [.. ticket.ResolveRecordingStreamTypes()];
 
             await _recording.StartAsync(
                 new RecordingSessionContext(
@@ -590,6 +611,10 @@ public class ExamViewModel : BaseViewModel
         {
             _countdownTimer?.Stop();
             StopLockWatchdog();
+            // Trước khi dừng luồng thi và ghi hình: quá trình tắt tự nó làm khung hình ngừng lại,
+            // và một cảnh báo "mất camera" sinh ra lúc bài thi đang kết thúc bình thường là cảnh
+            // báo sai -- đúng loại nhiễu khiến người ta ngừng tin vào cả những cảnh báo thật.
+            StopCameraSignalGuard();
             await _examFlow.StopAsync();
             await _recording.StopAsync(
                 _examCompleted ? RecordingStopReason.Submitted : RecordingStopReason.UserClosed,
@@ -617,6 +642,16 @@ public class ExamViewModel : BaseViewModel
         {
             _isCleaningUp = false;
         }
+    }
+
+    private void StopCameraSignalGuard()
+    {
+        _cameraSignalGuard.Stop();
+        _cameraSignalGuard.Interrupted -= HandleCameraSignalInterrupted;
+        _cameraSignalGuard.Lost -= HandleCameraSignalLost;
+        _cameraSignalGuard.Restored -= HandleCameraSignalRestored;
+        CameraSignalMessage = string.Empty;
+        IsCameraSignalLost = false;
     }
 
     private void LoadSessionData()
@@ -656,6 +691,81 @@ public class ExamViewModel : BaseViewModel
         _proctoring.OnStatusChanged += HandleProctoringStatusChanged;
         _proctoring.OnProctoringEvent += HandleProctoringEvent;
         CameraStatus = "Đang khởi động camera...";
+        StartCameraSignalGuardIfRequired();
+    }
+
+    /// <summary>
+    /// Canh tín hiệu camera, nhưng CHỈ khi kỳ thi thật sự yêu cầu camera.
+    ///
+    /// <para>Bài chỉ ghi màn hình vẫn mở camera cho AI giám sát, nhưng ở đó camera không phải bằng
+    /// chứng bắt buộc -- báo động giám thị vì một thứ kỳ thi không đòi hỏi là đúng nghĩa nhiễu.</para>
+    ///
+    /// <para>Bật ngay tại đây dù thiết bị còn chưa mở (ExamAttemptRunner mở nó muộn hơn): guard tự
+    /// nằm im khi camera chưa chạy, và đo từ mốc mở thiết bị chứ không phải mốc này -- nhờ vậy nó
+    /// bắt được cả ca camera mở lên rồi KHÔNG BAO GIỜ gửi nổi khung nào, thứ mà cổng preflight
+    /// không thể thấy vì lúc đó thiết bị còn tốt.</para>
+    /// </summary>
+    private void StartCameraSignalGuardIfRequired()
+    {
+        IReadOnlyList<RecordingStreamType> required;
+        try
+        {
+            required = _sessionState.EntryTicket?.ResolveRecordingStreamTypes() ?? [];
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("camera_signal", "required_streams_unreadable", ex);
+            return;
+        }
+
+        if (!required.Contains(RecordingStreamType.Camera))
+        {
+            return;
+        }
+
+        _cameraSignalGuard.Interrupted += HandleCameraSignalInterrupted;
+        _cameraSignalGuard.Lost += HandleCameraSignalLost;
+        _cameraSignalGuard.Restored += HandleCameraSignalRestored;
+        _cameraSignalGuard.Start();
+    }
+
+    private void HandleCameraSignalInterrupted(CameraSignalOutage outage) =>
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            IsCameraSignalLost = false;
+            CameraSignalMessage = "Mất tín hiệu camera — hãy kiểm tra dây cắm hoặc nắp che ống kính.";
+        });
+
+    private void HandleCameraSignalLost(CameraSignalOutage outage)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            IsCameraSignalLost = true;
+            CameraSignalMessage = outage.NeverDelivered
+                ? "Camera chưa gửi được hình ảnh nào từ đầu buổi thi. Giám thị đã được thông báo."
+                : "Camera đã mất tín hiệu. Giám thị đã được thông báo. Hãy cắm lại camera ngay.";
+        });
+
+        _cameraOutageReported = true;
+        // Không await: bài thi không được dừng lại chờ một cảnh báo, và runner đã tự nuốt lỗi.
+        _ = _examFlow.ReportCameraSignalLostAsync(outage.StoppedAt, outage.NeverDelivered);
+    }
+
+    private void HandleCameraSignalRestored(CameraSignalOutage outage)
+    {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            IsCameraSignalLost = false;
+            CameraSignalMessage = string.Empty;
+        });
+
+        if (!_cameraOutageReported)
+        {
+            return;
+        }
+
+        _cameraOutageReported = false;
+        _ = _examFlow.ReportCameraSignalRestoredAsync(outage.StoppedAt, outage.Duration);
     }
 
     private void HandlePreviewFrame(BitmapImage bitmapImage)

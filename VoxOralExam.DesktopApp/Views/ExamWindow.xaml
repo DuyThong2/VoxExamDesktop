@@ -117,6 +117,39 @@
             </Grid>
         </Border>
 
+        <!-- Banner mất tín hiệu camera. Nổi trên cùng (ZIndex cao hơn cả khung preview) và cắt ngang
+             tầm mắt có chủ ý: học viên là người DUY NHẤT cắm lại được sợi dây, nên đây là chỗ duy
+             nhất trong cả chuỗi cảnh báo có thể khiến sự cố được sửa thay vì chỉ được ghi lại.
+             IsHitTestVisible=False để nó không chắn thao tác làm bài phía dưới. -->
+        <Border Grid.Row="1"
+                Panel.ZIndex="200"
+                HorizontalAlignment="Stretch"
+                VerticalAlignment="Top"
+                Margin="0"
+                Padding="20,12"
+                IsHitTestVisible="False">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility" Value="Visible" />
+                    <Setter Property="Background" Value="#B45309" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding CameraSignalMessage}" Value="">
+                            <Setter Property="Visibility" Value="Collapsed" />
+                        </DataTrigger>
+                        <DataTrigger Binding="{Binding IsCameraSignalLost}" Value="True">
+                            <Setter Property="Background" Value="#B91C1C" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
+            <TextBlock Text="{Binding CameraSignalMessage}"
+                       Foreground="White"
+                       FontSize="14"
+                       FontWeight="SemiBold"
+                       TextWrapping="Wrap"
+                       HorizontalAlignment="Center" />
+        </Border>
+
         <Border Grid.Row="0" Background="#1E293B" Padding="16,12">
             <Grid>
                 <Grid.ColumnDefinitions>
