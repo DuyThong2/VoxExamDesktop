@@ -39,19 +39,25 @@
                     </TextBox.Style>
                 </TextBox>
 
-                <!-- Verifying state -->
-                <StackPanel Orientation="Horizontal" Margin="0,14,0,0"
-                            Visibility="{Binding IsVerifying, Converter={StaticResource BoolToVisibility}}">
-                    <ProgressBar IsIndeterminate="True" Width="120" Height="4" />
-                    <TextBlock Text="Đang xác thực..." Foreground="Gray" FontSize="12" Margin="10,0,0,0" />
-                </StackPanel>
+                <!-- Verifying / error status. The two are mutually exclusive (VerifyAsync clears
+                     HasError before setting IsVerifying), so they share one slot. MinHeight reserves
+                     it while idle: without that the card grows when verification starts, and since it
+                     is centred every field jumps as the student hits Xác nhận. -->
+                <Grid MinHeight="36" Margin="0,14,0,0">
+                    <StackPanel VerticalAlignment="Center"
+                                Visibility="{Binding IsVerifying, Converter={StaticResource BoolToVisibility}}">
+                        <ProgressBar IsIndeterminate="True" Height="4" Foreground="#2563EB"
+                                     Background="#E2E8F0" BorderThickness="0" />
+                        <TextBlock Text="Đang xác thực..." Foreground="#64748B" FontSize="12"
+                                   HorizontalAlignment="Center" Margin="0,9,0,0" />
+                    </StackPanel>
 
-                <!-- Error -->
-                <TextBlock Text="{Binding ErrorMessage}" Foreground="#DC2626" FontSize="13"
-                           TextWrapping="Wrap" Margin="0,12,0,0"
-                           Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}" />
+                    <TextBlock Text="{Binding ErrorMessage}" Foreground="#DC2626" FontSize="13"
+                               TextWrapping="Wrap" VerticalAlignment="Center"
+                               Visibility="{Binding HasError, Converter={StaticResource BoolToVisibility}}" />
+                </Grid>
 
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,24,0,0">
+                <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,14,0,0">
                     <Button Content="Quay lại" Command="{Binding BackCommand}"
                             Padding="16,8" Margin="0,0,10,0" />
                     <Button Content="Xác nhận" Command="{Binding VerifyCommand}"
