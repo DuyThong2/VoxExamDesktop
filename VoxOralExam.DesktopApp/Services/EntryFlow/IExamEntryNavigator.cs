@@ -6,7 +6,7 @@ namespace VoxOralExam.DesktopApp.Services.EntryFlow;
 
 /// <summary>
 /// Single source of truth for "which entry stage are we in" and the owner of every transition
-/// (see docs/wpf-redesign-plan.md Â§A). Replaces the old scattered navigation where each screen was
+/// (see docs/wpf-redesign-plan.md §A). Replaces the old scattered navigation where each screen was
 /// its own Window and moved with Show()/Close(). The shell (ShellWindow) binds a ContentControl to
 /// <see cref="CurrentViewModel"/>; app-level DataTemplates map each stage view model to its View, so
 /// changing stage swaps content inside one window rather than opening a new one.
@@ -24,7 +24,7 @@ namespace VoxOralExam.DesktopApp.Services.EntryFlow;
 /// IEnforcerProbe (Service -> Helper -> DetectOnly); report tier + scan to the server and block
 /// continuing below the exam's minEnforcementTier. Detection is identical on every machine; only
 /// enforcement is tiered.
-/// TODO(Â§A): eventually fold InExam + Submitted into the shell too, so the whole exam runs in one
+/// TODO(§A): eventually fold InExam + Submitted into the shell too, so the whole exam runs in one
 /// lockdown-controlled window instead of a separate ExamWindow.
 /// </summary>
 public interface IExamEntryNavigator : INotifyPropertyChanged

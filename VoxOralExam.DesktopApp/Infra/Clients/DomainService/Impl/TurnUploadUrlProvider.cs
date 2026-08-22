@@ -10,7 +10,7 @@ namespace VoxOralExam.DesktopApp.Infra.Clients.DomainService.Impl;
 /// <summary>
 /// Default <see cref="ITurnUploadUrlProvider"/>: requests a presigned turn-audio upload target from
 /// the Java backend, authenticated with the current user's access token. The exact endpoint shape
-/// is a flagged cross-repo dependency (see docs/wpf-redesign-plan.md Â§D/Â§F) -- Java must expose
+/// is a flagged cross-repo dependency (see docs/wpf-redesign-plan.md §D/§F) -- Java must expose
 /// GET /api/v1/exam-turns/upload-url returning { uploadUrl, audioRef }.
 /// </summary>
 public class TurnUploadUrlProvider : ITurnUploadUrlProvider

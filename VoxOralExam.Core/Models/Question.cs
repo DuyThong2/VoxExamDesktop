@@ -18,7 +18,7 @@ public class Question
     public string SectionInstruction { get; set; } = string.Empty;
     public QuestionAsset? Asset { get; set; }
 
-    // Mirrors Java's Question.type (QuestionType enum) â€” same entity, same position.
+    // Mirrors Java's Question.type (QuestionType enum) — same entity, same position.
     public QuestionType Type { get; set; }
 
     // No Java equivalent (Question.java has no difficulty field; vox's only difficulty concept

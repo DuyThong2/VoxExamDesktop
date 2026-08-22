@@ -193,6 +193,32 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
         _sessionState.ResumeSpokenSeconds =
             Math.Max(0, resumeState?.ElapsedSpeechSeconds ?? 0);
 
+        // HOÀN GIỜ khi bị ngắt giữa câu mà chưa trả lời lượt nào: vào lại thì media phát LẠI TỪ ĐẦU
+        // và thời gian chuẩn bị cũng chạy lại (QuestionFlowRunner: PresentInitialAsync rồi
+        // RunPreparationAsync), nên phần đã tiêu ở lần vào trước phải trả lại -- không trả thì thí
+        // sinh mất giờ hai lần cho cùng một đoạn băng và cùng một khoảng chuẩn bị.
+        //
+        // Server chỉ trả mốc này ở nhánh CHƯA có lượt nào xong. Đã có lượt thì vào lại đi nhánh
+        // resume: media không phát lại, chuẩn bị không chạy lại, nên không có gì để hoàn và mốc là
+        // null.
+        //
+        // Math.Max chứ không gán đè: mốc luôn ≥ checkpoint hiện tại vì nó được ghi sớm hơn. Lấy max
+        // để một mốc cũ bất thường (client cũ, hoặc dữ liệu lạ) không bao giờ CƯỚP thêm giờ của thí
+        // sinh -- xấu nhất là không hoàn, chứ không phải trừ oan.
+        if (resumeState?.RemainingSecondsAtQuestionStart is int markedRemaining and > 0)
+        {
+            var restored = Math.Max(_sessionState.RemainingSeconds ?? 0, markedRemaining);
+            LocalFileLogger.Info("exam_bootstrap", "restoring_remaining_time_for_replay", new
+            {
+                _sessionState.ExamAttemptId,
+                currentAnswerId,
+                checkpointed = _sessionState.RemainingSeconds,
+                markedRemaining,
+                restored
+            });
+            _sessionState.RemainingSeconds = restored;
+        }
+
         if (resumeState?.HasFollowUp == true)
         {
             _sessionState.ResumeTurnOrder = resumeState.TurnOrder;

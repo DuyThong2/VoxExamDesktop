@@ -1,4 +1,5 @@
 using System.IO;
+using System.Net;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -48,6 +49,38 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     // old catch in SendAudioFrameAsync), dropping mic audio without any visible error. This
     // semaphore serializes every send instead of relying on timing luck.
     private readonly SemaphoreSlim _sendLock = new(1, 1);
+
+    // Giữ cookie qua MỌI lần reconnect của cùng một bài thi.
+    //
+    // ALB của cả agents lẫn vox bật sticky bằng cookie (charts/*/templates/ingress.yaml:
+    // stickiness.enabled=true, lb_cookie.duration_seconds=7200) vì trạng thái phiên nằm trong RAM
+    // của từng pod. Nhưng ClientWebSocket.Options.Cookies mặc định là null: cookie AWSALB trả về ở
+    // lần bắt tay đầu bị vứt đi, và mỗi ConnectAsync sau đó không gửi cookie nào -- ALB chia lại
+    // theo vòng, hoàn toàn có thể rơi sang pod khác. Cấu hình sticky ở cụm vì thế KHÔNG có tác dụng
+    // với máy thi (trình duyệt thì có, vì nó tự quản cookie).
+    //
+    // agents chạy autoscaling 1-3 pod nên đây là chuyện thật khi có tải. Một container dùng chung
+    // cho cả vòng đời client là đủ: nó tự lưu cookie từ response bắt tay và gửi lại ở lần sau.
+    private readonly CookieContainer _cookies = new();
+
+    /// <summary>
+    /// Trả PCM đã thu được của lượt ĐANG DỞ, tính từ offset truyền vào; mảng rỗng nếu không có lượt
+    /// nào đang chạy. ExamAttemptRunner gắn vào, trỏ tới TurnAudioRecorder.PeekTurnBufferFrom.
+    /// </summary>
+    public Func<int, byte[]>? CurrentTurnAudioProvider { get; set; }
+
+    /// <summary>
+    /// Số giây đồng hồ còn lại NGAY LÚC NÀY, hoặc null nếu chưa chạy đồng hồ.
+    /// </summary>
+    /// <remarks>
+    /// Gửi kèm mỗi <c>question_start</c> để Python chốt mốc theo câu hỏi. Thí sinh bị ngắt giữa câu
+    /// mà chưa trả lời lượt nào thì lúc vào lại cả media lẫn thời gian chuẩn bị đều chạy LẠI TỪ ĐẦU
+    /// -- không có mốc này thì phần đã tiêu ở lần vào trước bị tính thêm lần nữa.
+    /// Xem <c>archive_store.persist_question_snapshot</c>.
+    /// </remarks>
+    public Func<int?>? CurrentRemainingSecondsProvider { get; set; }
+
+    private volatile bool _audioResyncInProgress;
 
     private ClientWebSocket? _webSocket;
     private CancellationTokenSource? _receiveLoopCts;
@@ -112,6 +145,8 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         var uri = new Uri($"{scheme}://{baseUri.Authority}{_settings.RealtimeWebSocketPath.TrimEnd('/')}/{examAttemptId:D}");
 
         _webSocket = new ClientWebSocket();
+        // Xem chú thích ở _cookies: không có dòng này thì sticky của ALB vô hiệu với máy thi.
+        _webSocket.Options.Cookies = _cookies;
         await _webSocket.ConnectAsync(uri, ct);
         LocalFileLogger.Info("realtime_ws", "connected", new { examAttemptId, uri = uri.ToString() });
 
@@ -208,8 +243,71 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
             await SendJsonAsync(new { type = "exam_end" }, CancellationToken.None);
         }
 
+        await ResyncTurnAudioAsync();
+
         LocalFileLogger.Info("realtime_ws", "reconnected", new { _examAttemptId, lastArchivedTurnOrder });
         OnReconnected?.Invoke(lastArchivedTurnOrder);
+    }
+
+    /// <summary>
+    /// Chép ngược toàn bộ PCM của lượt đang dở lên kết nối vừa lập lại.
+    /// </summary>
+    /// <remarks>
+    /// Vì sao cần: bộ đệm audio của lượt nằm trong RAM của MỘT đối tượng AttemptConnection bên
+    /// Python, mà mỗi lần accept WebSocket nó dựng đối tượng MỚI (realtime_controller.py) -- bộ đệm
+    /// mới luôn rỗng. Cộng với việc SendAudioFrameAsync âm thầm bỏ khung khi socket không mở, đứt
+    /// mạng giữa lượt làm mất TOÀN BỘ audio của lượt đó, kể cả phần đã gửi trước khi đứt.
+    ///
+    /// <para>Hậu quả đã gặp thật (agents/src/realtime/attempt/connection.py, sự cố 2026-08-18:
+    /// "15 giây, 37 từ, audio_url null"): transcript vẫn có vì Voice Live ghi thẳng xuống Postgres,
+    /// nên bài vẫn chấm được -- nhưng KHÔNG còn bản ghi âm để đối chiếu lúc phúc khảo.</para>
+    ///
+    /// <para>Vòng lặp đuổi bắt chứ không chụp một phát: mic vẫn thu trong lúc đang gửi, nên sau mỗi
+    /// đợt phải hỏi lại phần mới thu thêm. Cờ _audioResyncInProgress chặn khung trực tiếp suốt thời
+    /// gian đó để audio không bị đảo thứ tự; hạ cờ khi không còn phần dư nào.</para>
+    ///
+    /// <para>Không cần đổi giao thức: Python nối các khung nhị phân vào đúng bộ đệm lượt như bình
+    /// thường, và bộ đệm mới đang rỗng nên nối vào chính là nạp lại.</para>
+    /// </remarks>
+    private async Task ResyncTurnAudioAsync()
+    {
+        var provider = CurrentTurnAudioProvider;
+        if (provider is null)
+        {
+            return;
+        }
+
+        var offset = 0;
+        _audioResyncInProgress = true;
+        try
+        {
+            // Chặn trên để một lượt bất thường (mic kẹt, provider trả hoài) không giữ cờ mãi mãi --
+            // giữ cờ là chặn luôn audio trực tiếp, tức hỏng đúng thứ đang đi cứu.
+            for (var pass = 0; pass < 50; pass++)
+            {
+                var chunk = provider(offset);
+                if (chunk.Length == 0)
+                {
+                    break;
+                }
+
+                offset += chunk.Length;
+                await SendAudioFrameCoreAsync(chunk);
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("realtime_ws", "turn_audio_resync_failed", ex, new { _examAttemptId });
+        }
+        finally
+        {
+            _audioResyncInProgress = false;
+        }
+
+        if (offset > 0)
+        {
+            LocalFileLogger.Info("realtime_ws", "turn_audio_resynced", new { _examAttemptId, bytes = offset });
+        }
     }
 
     private async Task<int> SendResumeAndAwaitAckAsync(Guid answerId, int turnOrder)
@@ -242,7 +340,9 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
             question,
             language,
             prompt_text = promptText,
-            section_instruction = sectionInstruction
+            section_instruction = sectionInstruction,
+            // Mốc đồng hồ để hoàn giờ khi bị ngắt giữa câu -- xem CurrentRemainingSecondsProvider.
+            remaining_seconds_at_question_start = CurrentRemainingSecondsProvider?.Invoke()
         };
         return SendJsonAsync(payload, ct);
     }
@@ -264,6 +364,25 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         {
             type = "focus_lost",
             capturedAt = capturedAt.ToUniversalTime().ToString("O")
+        };
+        return SendJsonAsync(payload, ct);
+    }
+
+    /// <summary>
+    /// Tài nguyên audio/video của câu hỏi không phát được, kể cả sau một lần thử lại.
+    ///
+    /// <para>Đi nhờ WS sẵn có như <see cref="SendFocusLostAsync"/>, nhưng Python CHỈ GHI LOG chứ
+    /// không đẩy thành cảnh báo giám thị: đây là lỗi kỹ thuật, không phải hành vi của thí sinh.
+    /// Mục đích là để lại dấu vết ở phía server cho người chấm truy được khi thí sinh khiếu nại
+    /// "em không nghe thấy gì" -- log trên máy trạm thì không ai đọc tới.</para>
+    /// </summary>
+    public Task SendAssetPlaybackFailedAsync(string reason, int questionNumber, CancellationToken ct)
+    {
+        var payload = new
+        {
+            type = "asset_playback_failed",
+            reason,
+            questionNumber
         };
         return SendJsonAsync(payload, ct);
     }
@@ -449,6 +568,20 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     }
 
     public async Task SendAudioFrameAsync(byte[] pcm)
+    {
+        // Đang chép ngược bộ đệm lượt lên server thì bỏ khung trực tiếp: chúng đã nằm trong bộ đệm
+        // của TurnAudioRecorder rồi, và vòng lặp đuổi bắt trong ResyncTurnAudioAsync sẽ gửi nốt.
+        // Không chặn ở đây thì khung trực tiếp chen vào giữa phần chép ngược, audio bị đảo thứ tự.
+        if (_audioResyncInProgress)
+        {
+            return;
+        }
+
+        await SendAudioFrameCoreAsync(pcm);
+    }
+
+    /// <summary>Gửi thật, KHÔNG qua cổng chặn resync -- chính vòng resync dùng đường này.</summary>
+    private async Task SendAudioFrameCoreAsync(byte[] pcm)
     {
         var socket = _webSocket;
         if (socket is null || socket.State != WebSocketState.Open)

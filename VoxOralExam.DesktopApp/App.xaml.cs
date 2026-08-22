@@ -131,7 +131,7 @@ public partial class App : Application
         // The entry flow finished (device pre-flight passed) and asked to start the exam. Hand off to
         // the exam surface, then close the shell so ShutdownMode=OnLastWindowClose still exits the app
         // when the exam window closes.
-        // TODO(Â§A): fold InExam into the shell (single lockdown-controlled window) instead of opening
+        // TODO(§A): fold InExam into the shell (single lockdown-controlled window) instead of opening
         // a separate ExamWindow here.
         LocalFileLogger.Info("app", "launch_exam_window");
         var examWindow = _services.GetRequiredService<Views.ExamWindow>();

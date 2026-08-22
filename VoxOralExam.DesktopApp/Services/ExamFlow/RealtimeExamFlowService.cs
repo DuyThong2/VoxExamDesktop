@@ -27,6 +27,7 @@ public sealed class RealtimeExamFlowService : IExamFlowService
     public event Action<bool>? OnExamEnded;
     public event Action<bool>? OnStudentSpeakingChanged;
     public event Action<bool>? OnAvatarSpeakingChanged;
+    public event Action<string>? OnAvatarUtteranceChanged;
     public event Action<TimeSpan, TimeSpan>? OnQuestionSpeakingTimeChanged;
     public event Action<bool>? OnFinalSaveStateChanged;
 
@@ -92,6 +93,9 @@ public sealed class RealtimeExamFlowService : IExamFlowService
     public Task ReportCameraSignalRestoredAsync(DateTimeOffset capturedAt, TimeSpan outage)
         => _runner?.ReportCameraSignalRestoredAsync(capturedAt, outage) ?? Task.CompletedTask;
 
+    public Task ReportAssetPlaybackFailedAsync(string reason, int questionNumber)
+        => _runner?.ReportAssetPlaybackFailedAsync(reason, questionNumber) ?? Task.CompletedTask;
+
     private async Task RunAndUnwireAsync(
         ExamAttemptRunner runner,
         CancellationToken cancellationToken)
@@ -132,6 +136,7 @@ public sealed class RealtimeExamFlowService : IExamFlowService
         runner.ExamEnded += HandleExamEnded;
         runner.StudentSpeakingChanged += HandleStudentSpeakingChanged;
         runner.AvatarSpeakingChanged += HandleAvatarSpeakingChanged;
+        runner.AvatarUtteranceChanged += HandleAvatarUtteranceChanged;
         runner.QuestionSpeakingTimeChanged += HandleQuestionSpeakingTimeChanged;
         runner.FinalSaveStateChanged += HandleFinalSaveStateChanged;
     }
@@ -145,6 +150,7 @@ public sealed class RealtimeExamFlowService : IExamFlowService
         runner.ExamEnded -= HandleExamEnded;
         runner.StudentSpeakingChanged -= HandleStudentSpeakingChanged;
         runner.AvatarSpeakingChanged -= HandleAvatarSpeakingChanged;
+        runner.AvatarUtteranceChanged -= HandleAvatarUtteranceChanged;
         runner.QuestionSpeakingTimeChanged -= HandleQuestionSpeakingTimeChanged;
         runner.FinalSaveStateChanged -= HandleFinalSaveStateChanged;
     }
@@ -167,6 +173,9 @@ public sealed class RealtimeExamFlowService : IExamFlowService
 
     private void HandleAvatarSpeakingChanged(bool value) =>
         OnAvatarSpeakingChanged?.Invoke(value);
+
+    private void HandleAvatarUtteranceChanged(string value) =>
+        OnAvatarUtteranceChanged?.Invoke(value);
 
     private void HandleQuestionSpeakingTimeChanged(
         TimeSpan elapsed,

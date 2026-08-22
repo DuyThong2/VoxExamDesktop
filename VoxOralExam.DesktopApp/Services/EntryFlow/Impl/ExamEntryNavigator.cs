@@ -19,7 +19,7 @@ public sealed class ExamEntryNavigator : IExamEntryNavigator
     private readonly Stack<ExamEntryStage> _history = new();
 
     // InExam / Submitted / Error are intentionally absent: InExam is a hand-off to ExamWindow via
-    // ExamStartRequested, not a content-swap stage yet. TODO(Â§A): add them here once the exam surface
+    // ExamStartRequested, not a content-swap stage yet. TODO(§A): add them here once the exam surface
     // is folded into the shell.
     private static readonly Dictionary<ExamEntryStage, Type> StageViewModels = new()
     {
@@ -45,7 +45,7 @@ public sealed class ExamEntryNavigator : IExamEntryNavigator
 
     public void GoTo(ExamEntryStage stage)
     {
-        // TODO(Â§A): make transitions conditional on the entry ticket's deliveryMode -- a take-home
+        // TODO(§A): make transitions conditional on the entry ticket's deliveryMode -- a take-home
         // exam (no live proctor) must skip OtpEntry and the live-monitor assumptions entirely, while a
         // proctored lab exam walks the full chain. For now every exam walks Login -> ... -> InExam.
         if (CurrentViewModel is not null)
