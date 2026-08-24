@@ -117,6 +117,7 @@ internal sealed class QuestionFlowRunner
                 currentPrompt = resumePrompt!.Trim();
                 _sessionClient.SetResumeCheckpoint(answerId, turnOrder - 1);
                 avatarSpoke = await _presentation.PresentResumeAsync(
+                    question,
                     answerId,
                     paperItemId,
                     questionContext,
@@ -377,7 +378,10 @@ internal sealed class QuestionFlowRunner
             await _sessionClient.SendSpeechBudgetProgressAsync(
                 answerId,
                 budget.ElapsedSeconds);
-            _presentation.Clear();
+            // KHÔNG Clear() ở đây nữa: asset phải nằm lại tới khi CHUYỂN SANG CÂU KHÁC, mà việc
+            // dọn đó do _presentation.Clear() ở đầu RunAsync lo. Dọn tại đây là ẩn asset ngay
+            // giây câu hỏi kết thúc, kể cả trên đường huỷ/buộc kết thúc -- và trên nhánh vào lại
+            // thì nó chính là chỗ làm ảnh "nháy lên rồi biến mất".
             budget.ProgressChanged -= HandleBudgetProgress;
         }
     }

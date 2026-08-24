@@ -9,7 +9,7 @@ namespace VoxOralExam.DesktopApp.Services.ExamFlow;
 /// <summary>
 /// WAV-encodes a turn's raw PCM buffer and uploads it via a server-issued presigned PUT URL.
 /// The client no longer holds AWS credentials or talks to S3 directly (that static-credential model
-/// was a security hole -- see docs/wpf-redesign-plan.md Â§D): it asks ITurnUploadUrlProvider (server)
+/// was a security hole -- see docs/wpf-redesign-plan.md §D): it asks ITurnUploadUrlProvider (server)
 /// for a short-lived upload target scoped to (attemptAnswerId, turnOrder), PUTs the WAV there, and
 /// returns the server-provided audioRef for the downstream /turns/archive call.
 /// </summary>

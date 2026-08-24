@@ -12,7 +12,13 @@ public sealed record AttemptResumeState(
     string? ActivePromptText,
     bool HasFollowUp,
     Guid? PaperItemId,
-    double ElapsedSpeechSeconds);
+    double ElapsedSpeechSeconds,
+    /// <summary>
+    /// Mốc đồng hồ lúc câu hỏi này bắt đầu; null nếu server chưa ghi (client cũ) hoặc câu đã có
+    /// lượt hoàn thành. Chỉ có ở nhánh CHƯA lượt nào xong -- đúng lúc vào lại sẽ chạy lại cả media
+    /// lẫn thời gian chuẩn bị, nên phần đã tiêu ở lần vào trước phải được hoàn.
+    /// </summary>
+    int? RemainingSecondsAtQuestionStart);
 
 /// <summary>
 /// GET /realtime/attempts/{examAttemptId}/current-answer (agents/src/controller/realtime_controller.py)
@@ -104,7 +110,8 @@ public class RealtimeAttemptProgressClient
                     && Guid.TryParse(rawPaperItemId, out var paperItemId)
                         ? paperItemId
                         : null,
-                Math.Max(0, result.ElapsedSpeechSeconds));
+                Math.Max(0, result.ElapsedSpeechSeconds),
+                result.RemainingSecondsAtQuestionStart);
         }
         catch (Exception ex)
         {
@@ -145,6 +152,9 @@ public class RealtimeAttemptProgressClient
 
         [JsonPropertyName("elapsedSpeechSeconds")]
         public double ElapsedSpeechSeconds { get; set; }
+
+        [JsonPropertyName("remainingSecondsAtQuestionStart")]
+        public int? RemainingSecondsAtQuestionStart { get; set; }
     }
 }
 

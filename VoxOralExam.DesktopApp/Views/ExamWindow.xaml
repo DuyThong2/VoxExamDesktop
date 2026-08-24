@@ -301,12 +301,46 @@
                             </Border>
                         </Grid>
 
-                        <TextBlock Grid.Row="2"
-                                   Text="{Binding CurrentQuestion}"
-                                   FontSize="16"
-                                   TextWrapping="Wrap"
-                                   LineHeight="24"
-                                   Margin="0,0,0,16" />
+                        <!-- Đề bài gốc và câu AI vừa nói là HAI khối tách bạch, không gộp:
+                             đề bài đứng yên suốt câu làm mỏ neo, còn khối dưới chạy theo từng
+                             lượt (follow-up, nhắc lại, thông báo chuẩn bị). Gộp lại thì tới
+                             lượt follow-up đầu tiên là thí sinh mất ngữ cảnh đề bài. -->
+                        <StackPanel Grid.Row="2" Margin="0,0,0,16">
+                            <TextBlock Text="{Binding CurrentQuestion}"
+                                       FontSize="16"
+                                       TextWrapping="Wrap"
+                                       LineHeight="24" />
+
+                            <Border Margin="0,10,0,0"
+                                    Padding="12,10"
+                                    Background="#EEF2FF"
+                                    BorderBrush="#C7D2FE"
+                                    BorderThickness="1"
+                                    CornerRadius="10">
+                                <Border.Style>
+                                    <Style TargetType="Border">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding HasLastAiUtterance}" Value="True">
+                                                <Setter Property="Visibility" Value="Visible" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <StackPanel>
+                                    <TextBlock Text="AI VỪA NÓI"
+                                               FontSize="10.5"
+                                               FontWeight="Bold"
+                                               Foreground="#4F46E5" />
+                                    <TextBlock Text="{Binding LastAiUtterance}"
+                                               Margin="0,4,0,0"
+                                               FontSize="14.5"
+                                               TextWrapping="Wrap"
+                                               LineHeight="22"
+                                               Foreground="#312E81" />
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
 
                         <Border Grid.Row="3"
                                 Margin="0,0,0,16"
@@ -371,17 +405,13 @@
                                                Foreground="#0F172A" />
                                 </ScrollViewer>
 
-                                <MediaElement x:Name="QuestionAssetMedia"
-                                              LoadedBehavior="Manual"
-                                              UnloadedBehavior="Stop"
-                                              Stretch="Uniform"
-                                              Source="{Binding CurrentQuestionMediaSource, NotifyOnTargetUpdated=True, UpdateSourceTrigger=PropertyChanged}"
-                                              TargetUpdated="QuestionAssetMedia_TargetUpdated"
-                                              MediaEnded="QuestionAssetMedia_MediaEnded"
-                                              MediaFailed="QuestionAssetMedia_MediaFailed"
-                                              MaxHeight="260">
-                                    <MediaElement.Style>
-                                        <Style TargetType="MediaElement">
+                                <!-- MediaElement với nguồn AUDIO không vẽ gì cả, nên riêng nó thì
+                                     thí sinh chỉ thấy một hộp xám rỗng nằm suốt câu hỏi. Dòng mô tả
+                                     bên trên mới là thứ nói cho họ biết sắp nghe gì, dài bao nhiêu,
+                                     và đang ở trạng thái nào. Quan trọng vì chỉ được nghe MỘT lần. -->
+                                <StackPanel>
+                                    <StackPanel.Style>
+                                        <Style TargetType="StackPanel">
                                             <Setter Property="Visibility" Value="Collapsed" />
                                             <Style.Triggers>
                                                 <DataTrigger Binding="{Binding HasMediaAsset}" Value="True">
@@ -389,8 +419,29 @@
                                                 </DataTrigger>
                                             </Style.Triggers>
                                         </Style>
-                                    </MediaElement.Style>
-                                </MediaElement>
+                                    </StackPanel.Style>
+
+                                    <TextBlock Text="{Binding AssetMediaCaption}"
+                                               FontSize="13"
+                                               FontWeight="SemiBold"
+                                               Foreground="#0F172A"
+                                               TextWrapping="Wrap" />
+                                    <TextBlock Text="{Binding AssetMediaStatusText}"
+                                               Margin="0,2,0,0"
+                                               FontSize="11.5"
+                                               Foreground="#64748B" />
+
+                                    <MediaElement x:Name="QuestionAssetMedia"
+                                                  LoadedBehavior="Manual"
+                                                  UnloadedBehavior="Stop"
+                                                  Stretch="Uniform"
+                                                  Margin="0,8,0,0"
+                                                  Source="{Binding CurrentQuestionMediaSource, NotifyOnTargetUpdated=True, UpdateSourceTrigger=PropertyChanged}"
+                                                  TargetUpdated="QuestionAssetMedia_TargetUpdated"
+                                                  MediaEnded="QuestionAssetMedia_MediaEnded"
+                                                  MediaFailed="QuestionAssetMedia_MediaFailed"
+                                                  MaxHeight="260" />
+                                </StackPanel>
                             </Grid>
                         </Border>
 

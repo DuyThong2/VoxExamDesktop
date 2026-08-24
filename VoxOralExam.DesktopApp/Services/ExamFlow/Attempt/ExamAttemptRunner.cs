@@ -67,6 +67,8 @@ internal sealed class ExamAttemptRunner
     public event Action<bool>? ExamEnded;
     public event Action<bool>? StudentSpeakingChanged;
     public event Action<bool>? AvatarSpeakingChanged;
+    /// <summary>Lời avatar vừa bắt đầu đọc -- xem QuestionPresentationService.AvatarUtteranceStarted.</summary>
+    public event Action<string>? AvatarUtteranceChanged;
     public event Action<TimeSpan, TimeSpan>? QuestionSpeakingTimeChanged;
 
     /// <summary>
@@ -115,6 +117,14 @@ internal sealed class ExamAttemptRunner
         _recorder = recorder;
         _speechTurns = speechTurns;
         recorder.IsMuted = _isMicMuted;
+        // Đứt mạng giữa lượt là bộ đệm audio phía Python mất sạch (nó nằm trong RAM của một
+        // AttemptConnection, mỗi lần nối lại dựng đối tượng mới rỗng). Máy trạm là nơi duy nhất còn
+        // giữ đủ audio, nên cho client nối lại tự chép ngược lên -- xem
+        // RealtimeSessionClient.ResyncTurnAudioAsync.
+        _sessionClient.CurrentTurnAudioProvider = recorder.PeekTurnBufferFrom;
+        // ExamViewModel giữ ExamSessionState.RemainingSeconds luôn khớp đồng hồ đang chạy, nên đọc
+        // thẳng ở đây là ra số hiện tại -- dùng làm mốc hoàn giờ khi bị ngắt giữa câu.
+        _sessionClient.CurrentRemainingSecondsProvider = () => _sessionState.RemainingSeconds;
         WireRuntimeEvents(speechTurns, presentation, questionRunner);
         WireTransportEvents();
         presentation.Start();
@@ -240,6 +250,9 @@ internal sealed class ExamAttemptRunner
             AvatarSpeakingChanged?.Invoke(false);
             _speechTurns = null;
             _recorder = null;
+            // Recorder sắp bị Dispose; giữ delegate trỏ vào nó là chép ngược từ một đối tượng đã chết.
+            _sessionClient.CurrentTurnAudioProvider = null;
+            _sessionClient.CurrentRemainingSecondsProvider = null;
             _runCancellation.Dispose();
             _runCancellation = null;
         }
@@ -298,6 +311,20 @@ internal sealed class ExamAttemptRunner
         catch (Exception ex)
         {
             LocalFileLogger.Error("exam_flow", "camera_signal_restored_send_failed", ex);
+        }
+    }
+
+    public async Task ReportAssetPlaybackFailedAsync(string reason, int questionNumber)
+    {
+        try
+        {
+            await _sessionClient
+                .SendAssetPlaybackFailedAsync(reason, questionNumber, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("exam_flow", "asset_playback_failed_send_failed", ex);
         }
     }
 
@@ -609,6 +636,8 @@ internal sealed class ExamAttemptRunner
         speechTurns.StudentSpeakingChanged += HandleStudentSpeakingChanged;
         presentation.StatusChanged += HandleStatusChanged;
         presentation.AvatarSpeakingChanged += HandleAvatarSpeakingChanged;
+        presentation.AvatarUtteranceStarted += HandleAvatarUtteranceStarted;
+        _assets.MediaPlaybackStateChanged += HandleAssetMediaPlaybackChanged;
         questionRunner.StatusChanged += HandleStatusChanged;
         questionRunner.TranscriptAppended += HandleTranscriptAppended;
         questionRunner.SpeakingTimeChanged += HandleSpeakingTimeChanged;
@@ -623,6 +652,8 @@ internal sealed class ExamAttemptRunner
         speechTurns.StudentSpeakingChanged -= HandleStudentSpeakingChanged;
         presentation.StatusChanged -= HandleStatusChanged;
         presentation.AvatarSpeakingChanged -= HandleAvatarSpeakingChanged;
+        presentation.AvatarUtteranceStarted -= HandleAvatarUtteranceStarted;
+        _assets.MediaPlaybackStateChanged -= HandleAssetMediaPlaybackChanged;
         questionRunner.StatusChanged -= HandleStatusChanged;
         questionRunner.TranscriptAppended -= HandleTranscriptAppended;
         questionRunner.SpeakingTimeChanged -= HandleSpeakingTimeChanged;
@@ -645,6 +676,29 @@ internal sealed class ExamAttemptRunner
 
     private void HandleAvatarSpeakingChanged(bool value) =>
         AvatarSpeakingChanged?.Invoke(value);
+
+    private void HandleAvatarUtteranceStarted(string value) =>
+        AvatarUtteranceChanged?.Invoke(value);
+
+    /// <summary>
+    /// Tắt mic trong lúc asset audio/video đang phát, để tiếng loa không bị chép thành lời thí sinh.
+    ///
+    /// <para>Mic thu LIÊN TỤC bất kể lượt nói có mở hay không (xem
+    /// <c>TurnAudioRecorder.StreamChunkAvailable</c>), Python nhồi thẳng vào bộ đệm lượt, và
+    /// <c>WaveIn</c> không khử vọng -- nên mọi thứ loa phát ra giữa <c>question_start</c> và
+    /// <c>turn_end</c> đều nằm trong transcript lượt đó và trong file WAV dùng chấm phát âm.</para>
+    ///
+    /// <para>Khi hết phát thì trả về đúng lựa chọn của thí sinh (<c>_isMicMuted</c>), KHÔNG phải
+    /// <c>false</c> -- nếu không thì thí sinh đang tự tắt mic sẽ bị bật lại sau mỗi đoạn nghe.</para>
+    /// </summary>
+    private void HandleAssetMediaPlaybackChanged(bool isPlaying)
+    {
+        if (_recorder is null)
+        {
+            return;
+        }
+        _recorder.IsMuted = isPlaying || _isMicMuted;
+    }
 
     private void HandleStatusChanged(string value) =>
         StatusChanged?.Invoke(value);

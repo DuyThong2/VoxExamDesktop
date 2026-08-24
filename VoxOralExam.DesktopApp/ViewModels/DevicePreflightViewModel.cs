@@ -38,6 +38,7 @@ public class DevicePreflightViewModel : BaseViewModel
     private readonly ExamSessionState _sessionState;
     private readonly CaptureReadinessProbe _readinessProbe;
     private readonly IExamSessionBootstrapService _bootstrapService;
+    private readonly IQuestionAssetCache _assetCache;
 
     private string _deviceTestStatus = "Chưa kiểm tra thiết bị";
     private bool _isMicTesting;
@@ -59,13 +60,15 @@ public class DevicePreflightViewModel : BaseViewModel
         AppSettings settings,
         ExamSessionState sessionState,
         CaptureReadinessProbe readinessProbe,
-        IExamSessionBootstrapService bootstrapService)
+        IExamSessionBootstrapService bootstrapService,
+        IQuestionAssetCache assetCache)
     {
         _navigator = navigator;
         _settings = settings;
         _sessionState = sessionState;
         _readinessProbe = readinessProbe;
         _bootstrapService = bootstrapService;
+        _assetCache = assetCache;
 
         LoadStreamChoices();
 
@@ -347,8 +350,88 @@ public class DevicePreflightViewModel : BaseViewModel
         _sessionState.SelectedAudioOutputDeviceName = SelectedAudioOutput?.DisplayName ?? string.Empty;
 
 
+        if (!await EnsureAssetsDownloadedAsync())
+        {
+            return;
+        }
+
         CleanupDeviceTests();
         _navigator.RequestStartExam();
+    }
+
+    /// <summary>
+    /// Cổng cuối trước phòng thi: tài nguyên phải nằm sẵn trên đĩa mới cho vào.
+    ///
+    /// <para>Phần lớn tệp đã tải xong nhờ lượt chạy nền khởi động từ lúc nhận đề, nên bình thường
+    /// hàm này trả về gần như tức thì. Nó chỉ thật sự chờ khi mạng chậm -- và chờ ở đây là đúng
+    /// chỗ: chờ trong phòng chờ thì không mất gì, còn tải giữa bài thì đồng hồ thi vẫn trừ và
+    /// hỏng mạng lúc đó là học sinh nhận câu hỏi về tài nguyên không hiện ra.</para>
+    ///
+    /// <para>Tải hỏng hẳn thì KHÔNG chặn cứng, mà hỏi học sinh. Chặn cứng nghe có vẻ an toàn hơn
+    /// nhưng thực ra tệ hơn: một URL hỏng vĩnh viễn (quên upload tệp, tệp bị xoá) sẽ khoá luôn cả
+    /// bài thi, không ai vào được, mà đó lại là lỗi của người soạn đề chứ không phải của học sinh.
+    /// Đi tiếp thì vẫn còn đường tải trực tiếp lúc tới câu đó.</para>
+    /// </summary>
+    /// <returns><c>true</c> nếu được phép vào thi.</returns>
+    private async Task<bool> EnsureAssetsDownloadedAsync()
+    {
+        var assets = _sessionState.Questions
+            .Select(question => question.Asset)
+            .Where(asset => asset is not null)
+            .Select(asset => asset!)
+            .ToList();
+
+        if (assets.Count == 0)
+        {
+            return true;
+        }
+
+        IsEnteringExam = true;
+        try
+        {
+            DeviceTestStatus = "Đang tải tài nguyên câu hỏi...";
+            var failed = await _assetCache.PrefetchAsync(
+                assets,
+                (done, total) => DeviceTestStatus = $"Đang tải tài nguyên câu hỏi... {done}/{total}");
+
+            if (failed.Count == 0)
+            {
+                DeviceTestStatus = "Đã tải xong tài nguyên câu hỏi.";
+                return true;
+            }
+
+            LocalFileLogger.Info("device_test", "asset_prefetch_incomplete", new
+            {
+                failedCount = failed.Count,
+                total = assets.Count
+            });
+            DeviceTestStatus = $"Còn {failed.Count} tài nguyên chưa tải được.";
+
+            var choice = MessageBox.Show(
+                $"Không tải trước được {failed.Count}/{assets.Count} tài nguyên câu hỏi.\n\n"
+                    + "Vào thi bây giờ thì những tài nguyên đó sẽ được tải khi tới câu hỏi, và có "
+                    + "thể không hiện ra nếu mạng vẫn lỗi.\n\n"
+                    + "Báo giám thị trước khi tiếp tục. Vẫn vào thi?",
+                "Chưa tải đủ tài nguyên",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            return choice == MessageBoxResult.Yes;
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("device_test", "asset_prefetch_failed", ex);
+            DeviceTestStatus = $"Không tải được tài nguyên câu hỏi: {ex.Message}";
+            return MessageBox.Show(
+                $"Không tải trước được tài nguyên câu hỏi: {ex.Message}\n\nVẫn vào thi?",
+                "Chưa tải đủ tài nguyên",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) == MessageBoxResult.Yes;
+        }
+        finally
+        {
+            IsEnteringExam = false;
+        }
     }
 
     /// <summary>

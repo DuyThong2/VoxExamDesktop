@@ -344,7 +344,7 @@ public sealed class AvatarWebRtcClient : IDisposable
             // bigger gap means something upstream stalled (network jitter, or the Python-side
             // event-loop freeze this was written to guard against -- see AttemptReconnectAsync).
             // If that backlog is just appended once the stall clears, BufferedWaveProvider plays
-            // it back-to-back far faster than real time -- audibly a burst/garble ("rÃ¨") rather
+            // it back-to-back far faster than real time -- audibly a burst/garble ("rè") rather
             // than a clean gap. Dropping the stale backlog and resuming live from the freshest
             // frame trades a brief silence for avoiding that garble.
             var now = DateTime.UtcNow;

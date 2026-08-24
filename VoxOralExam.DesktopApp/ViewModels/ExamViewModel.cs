@@ -42,11 +42,13 @@ public class ExamViewModel : BaseViewModel
     private readonly QuestionAssetPresentationCoordinator _assetPresentationCoordinator;
     private readonly IExamRecordingService _recording;
     private readonly AppSettings _settings;
+    private readonly IQuestionAssetCache _assetCache;
 
     private string _studentName = string.Empty;
     private string _studentId = string.Empty;
     private string _examTitle = string.Empty;
     private string _currentQuestion = string.Empty;
+    private string _lastAiUtterance = string.Empty;
     private string _timeRemaining = "00:00:00";
     private string _examDurationText = "Thời lượng bài thi: 30 phút";
     private string _questionSpeakingTime = "00:00 / --:--";
@@ -77,6 +79,9 @@ public class ExamViewModel : BaseViewModel
     private bool _isCleaningUp;
     private bool _examCompleted;
     private Task? _cleanupTask;
+    private bool _isAssetMediaPlaying;
+    private bool _hasAssetMediaFinished;
+    private bool _assetMediaRetryUsed;
     private QuestionAsset? _currentQuestionAsset;
     private BitmapImage? _currentQuestionAssetImage;
     private Uri? _currentQuestionMediaSource;
@@ -108,7 +113,8 @@ public class ExamViewModel : BaseViewModel
         IExamApiService examApi,
         QuestionAssetPresentationCoordinator assetPresentationCoordinator,
         IExamRecordingService recording,
-        AppSettings settings)
+        AppSettings settings,
+        IQuestionAssetCache assetCache)
     {
         _camera = camera;
         _cameraSignalGuard = cameraSignalGuard;
@@ -120,6 +126,7 @@ public class ExamViewModel : BaseViewModel
         _assetPresentationCoordinator = assetPresentationCoordinator;
         _recording = recording;
         _settings = settings;
+        _assetCache = assetCache;
 
         LoadSessionData();
 
@@ -130,9 +137,12 @@ public class ExamViewModel : BaseViewModel
         _examFlow.OnExamEnded += HandleExamEnded;
         _examFlow.OnStudentSpeakingChanged += HandleStudentSpeakingChanged;
         _examFlow.OnAvatarSpeakingChanged += HandleAvatarSpeakingChanged;
+        _examFlow.OnAvatarUtteranceChanged += HandleAvatarUtteranceChanged;
         _examFlow.OnQuestionSpeakingTimeChanged += HandleQuestionSpeakingTimeChanged;
         _examFlow.OnFinalSaveStateChanged += HandleFinalSaveStateChanged;
         _assetPresentationCoordinator.OnAssetDisplayRequested += HandleAssetDisplayRequested;
+        _assetPresentationCoordinator.MediaPlaybackStateChanged += HandleAssetMediaPlaybackChanged;
+        _assetPresentationCoordinator.MediaStopRequested += HandleAssetMediaStopRequested;
         _avatarClient.OnVideoFrame += HandleAvatarVideoFrame;
         _recording.StatusChanged += HandleRecordingStatusChanged;
         _isMicMuted = _examFlow.IsMicMuted;
@@ -158,11 +168,40 @@ public class ExamViewModel : BaseViewModel
         set => SetProperty(ref _examTitle, value);
     }
 
+    /// <summary>
+    /// Bảo View dừng hẳn <c>MediaElement</c> khi lượt phát chạm trần an toàn. Đi qua đây vì
+    /// MediaElement là đối tượng của View, ViewModel không cầm được nó.
+    /// </summary>
+    public event Action? MediaStopRequested;
+
+    /// <summary>Phát lại media sau một lần <c>MediaFailed</c> -- xem NotifyQuestionAssetMediaFailed.</summary>
+    public event Action? MediaRetryRequested;
+
     public string CurrentQuestion
     {
         get => _currentQuestion;
         set => SetProperty(ref _currentQuestion, value);
     }
+
+    /// <summary>
+    /// Câu AI vừa nói. Tách khỏi <see cref="CurrentQuestion"/> có chủ đích: câu hỏi gốc là mỏ neo
+    /// đứng yên suốt câu, còn khối này chạy theo từng lượt (follow-up, nhắc lại, thông báo chuẩn
+    /// bị). Gộp hai thứ vào một chỗ thì thí sinh mất ngữ cảnh đề bài ngay lượt follow-up đầu tiên
+    /// -- rõ nhất lúc vào lại sau khi bị cấm, vì câu đầu tiên nghe được đã là follow-up.
+    /// </summary>
+    public string LastAiUtterance
+    {
+        get => _lastAiUtterance;
+        set
+        {
+            if (SetProperty(ref _lastAiUtterance, value))
+            {
+                OnPropertyChanged(nameof(HasLastAiUtterance));
+            }
+        }
+    }
+
+    public bool HasLastAiUtterance => !string.IsNullOrWhiteSpace(LastAiUtterance);
 
     public string TimeRemaining
     {
@@ -389,6 +428,7 @@ public class ExamViewModel : BaseViewModel
                 OnPropertyChanged(nameof(HasImageAsset));
                 OnPropertyChanged(nameof(HasMediaAsset));
                 OnPropertyChanged(nameof(HasTextPassageAsset));
+                OnPropertyChanged(nameof(AssetMediaCaption));
             }
         }
     }
@@ -413,6 +453,74 @@ public class ExamViewModel : BaseViewModel
             if (SetProperty(ref _currentQuestionMediaSource, value))
             {
                 OnPropertyChanged(nameof(HasMediaAsset));
+            }
+        }
+    }
+
+    /// <summary>
+    /// Dòng mô tả cho khung audio/video. Cần thiết vì <c>MediaElement</c> với nguồn AUDIO
+    /// <b>không vẽ gì cả</b> -- không có dòng này thì thí sinh chỉ thấy một hộp xám rỗng nằm suốt
+    /// câu hỏi. Và vì audio chỉ được phát MỘT lần, họ cần biết clip dài bao nhiêu TRƯỚC khi nó chạy.
+    /// </summary>
+    public string AssetMediaCaption
+    {
+        get
+        {
+            var asset = CurrentQuestionAsset;
+            if (asset is null)
+            {
+                return string.Empty;
+            }
+
+            var label = asset.Type switch
+            {
+                QuestionAssetType.Audio => "Đoạn nghe",
+                QuestionAssetType.Video => "Đoạn phim",
+                _ => string.Empty
+            };
+            if (label.Length == 0)
+            {
+                return string.Empty;
+            }
+
+            var title = asset.Title?.Trim();
+            if (!string.IsNullOrEmpty(title))
+            {
+                label = $"{label} · {title}";
+            }
+            if (asset.DurationSeconds is > 0 and var seconds)
+            {
+                label = $"{label} · {TimeSpan.FromSeconds(seconds):m\\:ss}";
+            }
+            return label;
+        }
+    }
+
+    /// <summary>Trạng thái phát. Luật là phát đúng một lần nên không có nút bấm nào ở đây.</summary>
+    public string AssetMediaStatusText => IsAssetMediaPlaying
+        ? "Đang phát — chỉ phát một lần"
+        : HasAssetMediaFinished ? "Đã phát xong" : "Sắp phát";
+
+    public bool IsAssetMediaPlaying
+    {
+        get => _isAssetMediaPlaying;
+        private set
+        {
+            if (SetProperty(ref _isAssetMediaPlaying, value))
+            {
+                OnPropertyChanged(nameof(AssetMediaStatusText));
+            }
+        }
+    }
+
+    public bool HasAssetMediaFinished
+    {
+        get => _hasAssetMediaFinished;
+        private set
+        {
+            if (SetProperty(ref _hasAssetMediaFinished, value))
+            {
+                OnPropertyChanged(nameof(AssetMediaStatusText));
             }
         }
     }
@@ -632,9 +740,12 @@ public class ExamViewModel : BaseViewModel
             _examFlow.OnExamEnded -= HandleExamEnded;
             _examFlow.OnStudentSpeakingChanged -= HandleStudentSpeakingChanged;
             _examFlow.OnAvatarSpeakingChanged -= HandleAvatarSpeakingChanged;
+            _examFlow.OnAvatarUtteranceChanged -= HandleAvatarUtteranceChanged;
             _examFlow.OnQuestionSpeakingTimeChanged -= HandleQuestionSpeakingTimeChanged;
             _examFlow.OnFinalSaveStateChanged -= HandleFinalSaveStateChanged;
             _assetPresentationCoordinator.OnAssetDisplayRequested -= HandleAssetDisplayRequested;
+            _assetPresentationCoordinator.MediaPlaybackStateChanged -= HandleAssetMediaPlaybackChanged;
+            _assetPresentationCoordinator.MediaStopRequested -= HandleAssetMediaStopRequested;
             _avatarClient.OnVideoFrame -= HandleAvatarVideoFrame;
             _camera.OnPreviewFrame -= HandlePreviewFrame;
             _proctoring.OnStatusChanged -= HandleProctoringStatusChanged;
@@ -668,7 +779,9 @@ public class ExamViewModel : BaseViewModel
         CurrentQuestion = _sessionState.CurrentQuestion?.QuestionText ?? string.Empty;
         QuestionNumber = _sessionState.QuestionIndex + 1;
         TotalQuestions = _sessionState.Questions.Count;
-        ApplyCurrentQuestionAsset(_sessionState.CurrentQuestion?.Asset);
+        // Dựng màn hình lần đầu, luồng thi chưa chạy: chỉ hiện, KHÔNG phát. Lượt phát thật do
+        // QuestionAssetPresentationCoordinator.PresentAsync kích hoạt khi câu hỏi bắt đầu.
+        ApplyCurrentQuestionAsset(_sessionState.CurrentQuestion?.Asset, autoPlay: false);
 
         LogEntries.Add(new LogEntry { Time = DateTime.Now.AddMinutes(-2), Message = "Người dùng đã đăng nhập thành công", Type = LogType.Success });
         LogEntries.Add(new LogEntry { Time = DateTime.Now.AddMinutes(-1), Message = $"Thiết bị: {_sessionState.CurrentUser?.Device.DeviceName ?? "unknown"}", Type = LogType.Info });
@@ -788,6 +901,13 @@ public class ExamViewModel : BaseViewModel
         Application.Current.Dispatcher.Invoke(() => IsAvatarSpeaking = isSpeaking);
     }
 
+    // Bắn từ luồng nhận WebSocket (RealtimeSessionClient đọc frame `speak` ở đó), nên bắt buộc
+    // qua Dispatcher -- gán thẳng property từ luồng đó sẽ ném ngay ở binding.
+    private void HandleAvatarUtteranceChanged(string utterance)
+    {
+        Application.Current.Dispatcher.Invoke(() => LastAiUtterance = utterance?.Trim() ?? string.Empty);
+    }
+
     private void HandleStudentSpeakingChanged(bool isSpeaking)
     {
         Application.Current.Dispatcher.Invoke(() => IsStudentSpeaking = isSpeaking);
@@ -842,10 +962,20 @@ public class ExamViewModel : BaseViewModel
             // bao trum dung moi lan _avatarSpeaker.SpeakAsync chay (xem
             // RealtimeExamFlowService.EventHandlers.cs). Van tru binh thuong trong luc hoc sinh
             // chuan bi (im lang) va luc hoc sinh dang tra loi.
+            // CỐ Ý vẫn trừ trong lúc phát audio/video: đồng hồ khởi tạo bằng
+            // paper.timeDurationSeconds, mà cột đó ĐÃ cộng thời lượng media. Dừng ở đây là cấp thừa
+            // đúng phần media và làm buổi thi tràn quá độ dài ca đã đặt theo cùng con số đó.
+            //
+            // Trường hợp bị ngắt giữa lúc đang phát được xử lý bằng cách HOÀN LẠI số giây đã xem
+            // lúc vào lại, không phải bằng cách dừng đồng hồ -- xem RestoreQuestionStartRemaining.
             if (_remainingSecondsLocal > 0 && !IsAvatarSpeaking)
             {
                 _remainingSecondsLocal--;
             }
+            // Giữ state dùng chung khớp đồng hồ đang chạy: ExamAttemptRunner đọc đúng chỗ này để
+            // gửi mốc kèm question_start (CurrentRemainingSecondsProvider). Chỉ gán trong bộ nhớ,
+            // không phải lời gọi mạng -- checkpoint lên server vẫn là nhánh 10 giây bên dưới.
+            _sessionState.RemainingSeconds = _remainingSecondsLocal;
             RefreshRemainingTime();
 
             if (DateTime.UtcNow - _lastCheckpointAt >= TimeSpan.FromSeconds(10))
@@ -1044,6 +1174,9 @@ public class ExamViewModel : BaseViewModel
         Application.Current.Dispatcher.Invoke(() =>
         {
             CurrentQuestion = prompt.QuestionText;
+            // Câu mới thì lời AI của câu trước không còn nghĩa gì. Để nguyên là thí sinh đọc
+            // follow-up của câu cũ ngay dưới đề bài câu mới.
+            LastAiUtterance = string.Empty;
             QuestionNumber = prompt.QuestionNumber;
             TotalQuestions = prompt.TotalQuestions;
             ResponseWindowText = FormatResponseWindow(prompt.MinResponseSeconds, prompt.MaxResponseSeconds);
@@ -1065,15 +1198,50 @@ public class ExamViewModel : BaseViewModel
         _assetPresentationCoordinator.CompleteMediaPlayback();
     }
 
+    /// <summary>
+    /// Media không phát được. Cho phát lại ĐÚNG MỘT lần rồi mới bỏ qua.
+    ///
+    /// <para>Luật của bài thi là audio/video chỉ phát một lần, nhưng luật đó nói về việc thí sinh
+    /// KHÔNG được nghe lại thứ họ ĐÃ nghe. File hỏng thì họ chưa nghe gì cả -- bỏ qua luôn nghĩa là
+    /// bắt họ trả lời về đoạn ghi âm chưa từng được phát. Đây là đường lỗi, không phải nới luật.</para>
+    ///
+    /// <para>Trước bản này hàm chỉ ghi một dòng log rồi gọi thẳng CompleteMediaPlayback, tức luồng
+    /// thi đi tiếp y như đã phát thành công, và người chấm không có cách nào biết.</para>
+    /// </summary>
     public void NotifyQuestionAssetMediaFailed(string? reason = null)
     {
+        var retrying = false;
         Application.Current.Dispatcher.Invoke(() =>
         {
-            if (!string.IsNullOrWhiteSpace(reason))
+            if (!_assetMediaRetryUsed && CurrentQuestionMediaSource is not null)
             {
-                AddLog($"Không thể phát media asset: {reason}", LogType.Warning);
+                _assetMediaRetryUsed = true;
+                retrying = true;
+                AddLog($"Không phát được tài nguyên câu hỏi, đang thử lại: {reason}", LogType.Warning);
+                return;
             }
+
+            AddLog(
+                $"Không phát được tài nguyên câu hỏi sau khi thử lại: {reason}. Hãy báo giám thị.",
+                LogType.Warning);
         });
+
+        LocalFileLogger.Error(
+            "exam_flow",
+            retrying ? "asset_media_failed_retrying" : "asset_media_failed_giving_up",
+            new Exception(reason ?? "unknown"),
+            new { questionNumber = QuestionNumber, assetType = CurrentQuestionAsset?.Type.ToString() });
+
+        if (retrying)
+        {
+            MediaRetryRequested?.Invoke();
+            return;
+        }
+
+        // Bằng chứng cho người chấm: đi nhờ WebSocket sẵn có để Python ghi vào log pod, đúng mẫu
+        // ReportFocusLostAsync. CỐ Ý không đẩy vào kênh cảnh báo giám thị -- kênh đó dành cho hành
+        // vi của thí sinh, nhét lỗi kỹ thuật vào là làm loãng đúng thứ cần được tin.
+        _ = _examFlow.ReportAssetPlaybackFailedAsync(reason ?? "unknown", QuestionNumber);
         _assetPresentationCoordinator.CompleteMediaPlayback();
     }
 
@@ -1116,6 +1284,10 @@ public class ExamViewModel : BaseViewModel
                 AiStatus = "Đã hoàn thành bài thi";
                 EndScreenMessage = "Bài thi đã được nộp thành công. Hệ thống sẽ đóng sau ít giây nữa.";
                 AddLog("Bài thi vấn đáp đã hoàn thành", LogType.Success);
+                // Chỉ dọn đệm tài nguyên khi bài thi ĐÃ NỘP THÀNH CÔNG. Nhánh thất bại giữ nguyên
+                // đệm là có chủ đích: thi hỏng thường kéo theo một lần vào lại, mà vào lại thì đệm
+                // chính là thứ giúp không phải tải lại từ đầu -- đúng lúc mạng đang tệ nhất.
+                _assetCache.Clear();
             }
             else
             {
@@ -1155,16 +1327,51 @@ public class ExamViewModel : BaseViewModel
         }
     }
 
-    private void HandleAssetDisplayRequested(QuestionAsset? asset)
+    private void HandleAssetDisplayRequested(QuestionAsset? asset, bool autoPlay)
     {
-        Application.Current.Dispatcher.Invoke(() => ApplyCurrentQuestionAsset(asset));
+        Application.Current.Dispatcher.Invoke(() => ApplyCurrentQuestionAsset(asset, autoPlay));
     }
 
-    private void ApplyCurrentQuestionAsset(QuestionAsset? asset)
+    private void HandleAssetMediaPlaybackChanged(bool isPlaying)
     {
+        Application.Current.Dispatcher.Invoke(() =>
+        {
+            IsAssetMediaPlaying = isPlaying;
+            if (isPlaying)
+            {
+                HasAssetMediaFinished = false;
+            }
+            else if (CurrentQuestionMediaSource is not null)
+            {
+                HasAssetMediaFinished = true;
+            }
+        });
+    }
+
+    private void HandleAssetMediaStopRequested()
+    {
+        Application.Current.Dispatcher.Invoke(() => MediaStopRequested?.Invoke());
+    }
+
+    /// <summary>
+    /// Cờ đọc bởi <c>ExamWindow.QuestionAssetMedia_TargetUpdated</c>: đổi nguồn media KHÔNG đồng
+    /// nghĩa với được phát. Vào lại giữa câu sau khi đã trả lời thì chỉ hiện lại khung của thứ đã
+    /// nghe xong, xem <c>QuestionAssetPresentationCoordinator.ShowWithoutWaiting</c>.
+    /// </summary>
+    public bool AutoPlayAssetMedia { get; private set; } = true;
+
+    private void ApplyCurrentQuestionAsset(QuestionAsset? asset, bool autoPlay)
+    {
+        // Đặt TRƯỚC khi gán nguồn: gán nguồn là thứ kích hoạt TargetUpdated, mà handler đó đọc cờ này.
+        AutoPlayAssetMedia = autoPlay;
+
         CurrentQuestionAsset = asset;
         CurrentQuestionAssetImage = null;
         CurrentQuestionMediaSource = null;
+        // Không được phát nghĩa là thứ này đã nghe xong từ lần vào trước -- nhãn phải nói đúng vậy,
+        // chứ để "Sắp phát" thì thí sinh ngồi chờ một đoạn băng không bao giờ chạy.
+        HasAssetMediaFinished = !autoPlay;
+        _assetMediaRetryUsed = false;
 
         if (asset is null)
         {
@@ -1183,12 +1390,14 @@ public class ExamViewModel : BaseViewModel
 
         try
         {
+            var source = ResolveAssetUri(asset.Url);
+
             if (asset.Type == QuestionAssetType.Image)
             {
                 var image = new BitmapImage();
                 image.BeginInit();
                 image.CacheOption = BitmapCacheOption.OnLoad;
-                image.UriSource = new Uri(asset.Url, UriKind.Absolute);
+                image.UriSource = source;
                 image.EndInit();
                 image.Freeze();
                 CurrentQuestionAssetImage = image;
@@ -1197,13 +1406,33 @@ public class ExamViewModel : BaseViewModel
 
             if (asset.Type == QuestionAssetType.Video || asset.Type == QuestionAssetType.Audio)
             {
-                CurrentQuestionMediaSource = new Uri(asset.Url, UriKind.Absolute);
+                CurrentQuestionMediaSource = source;
             }
         }
         catch (Exception ex)
         {
             AddLog($"Không thể tải asset câu hỏi: {ex.Message}", LogType.Warning);
         }
+    }
+
+    /// <summary>
+    /// Ưu tiên tệp đã tải sẵn trên đĩa, không có thì mới lấy thẳng từ S3.
+    ///
+    /// <para>Tệp cục bộ tốt hơn ở hai điểm, không chỉ ở tốc độ: mất mạng giữa bài không còn làm
+    /// tài nguyên biến mất, và <c>BitmapImage</c> nạp từ tệp thì giải mã xong ngay trong
+    /// <c>EndInit()</c> -- <c>Freeze()</c> ngay sau đó luôn hợp lệ. Với URI từ xa, ảnh tải bất
+    /// đồng bộ nên <c>Freeze()</c> có thể ném đúng vào khối catch bên trên và ảnh không bao giờ
+    /// hiện ra.</para>
+    ///
+    /// <para>Vẫn giữ đường lấy thẳng từ S3 làm lưới đỡ: học sinh có thể đã bấm bỏ qua ở màn kiểm
+    /// tra thiết bị khi tải trước thất bại.</para>
+    /// </summary>
+    private Uri ResolveAssetUri(string url)
+    {
+        var localPath = _assetCache.TryGetLocalPath(url);
+        return localPath is not null
+            ? new Uri(localPath, UriKind.Absolute)
+            : new Uri(url, UriKind.Absolute);
     }
 
     private void ToggleMute()

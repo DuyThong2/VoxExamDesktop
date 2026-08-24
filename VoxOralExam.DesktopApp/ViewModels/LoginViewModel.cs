@@ -10,7 +10,7 @@ namespace VoxOralExam.DesktopApp.ViewModels;
 
 /// <summary>
 /// Stage: Login. Authenticates the student against Java and advances to the exam list. Device tests
-/// used to live here; they moved to DevicePreflight (after OTP) -- see docs/wpf-redesign-plan.md Â§A.
+/// used to live here; they moved to DevicePreflight (after OTP) -- see docs/wpf-redesign-plan.md §A.
 /// </summary>
 public class LoginViewModel : BaseViewModel
 {

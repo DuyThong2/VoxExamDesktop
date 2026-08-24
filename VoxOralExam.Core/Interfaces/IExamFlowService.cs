@@ -11,6 +11,16 @@ public interface IExamFlowService
     event Action<bool>? OnExamEnded;
     event Action<bool>? OnStudentSpeakingChanged;
     event Action<bool>? OnAvatarSpeakingChanged;
+
+    /// <summary>
+    /// Lời avatar vừa bắt đầu đọc, để màn thi hiện nguyên văn câu AI đang nói bên cạnh đề bài gốc.
+    ///
+    /// <para>Khác <see cref="OnTranscriptAppended"/>: cái đó chỉ có follow-up và chỉ để ghi log.
+    /// Sự kiện này bám frame <c>speak</c> nên bắt được MỌI lời avatar nói, kể cả lời dẫn section
+    /// và thông báo chuẩn bị.</para>
+    /// </summary>
+    event Action<string>? OnAvatarUtteranceChanged;
+
     event Action<TimeSpan, TimeSpan>? OnQuestionSpeakingTimeChanged;
 
     /// <summary>
@@ -57,4 +67,16 @@ public interface IExamFlowService
     /// chứng. Không gọi cho những lần gián đoạn ngắn chưa từng sinh cảnh báo.
     /// </summary>
     Task ReportCameraSignalRestoredAsync(DateTimeOffset capturedAt, TimeSpan outage);
+
+    /// <summary>
+    /// Tài nguyên audio/video của câu hỏi không phát được, kể cả sau một lần thử lại. Thí sinh sẽ
+    /// bị hỏi về đoạn ghi âm họ chưa từng nghe, nên phải để lại dấu vết ở phía server cho người
+    /// chấm truy được -- log máy trạm thì không ai đọc.
+    ///
+    /// <para>Cố ý KHÔNG đi vào kênh cảnh báo giám thị: kênh đó dành cho hành vi của thí sinh, và
+    /// trộn lỗi kỹ thuật vào là cách nhanh nhất để người ta ngừng tin những cảnh báo thật.</para>
+    ///
+    /// <para>Best-effort như các Report* khác: nuốt lỗi, không được làm gián đoạn bài thi.</para>
+    /// </summary>
+    Task ReportAssetPlaybackFailedAsync(string reason, int questionNumber);
 }

@@ -62,6 +62,15 @@ internal sealed class QuestionPresentationService : IDisposable
     public event Action<string>? StatusChanged;
     public event Action<bool>? AvatarSpeakingChanged;
 
+    /// <summary>
+    /// Lời avatar SẮP đọc, bắn ngay trước khi phát tiếng để chữ và tiếng tới cùng lúc.
+    ///
+    /// <para>Móc ở đây chứ không ở <c>decision.NextPromptText</c> bên QuestionFlowRunner vì mọi
+    /// lời avatar nói đều đi qua frame <c>speak</c> của Python -- lời dẫn section, đề bài, thông
+    /// báo chuẩn bị, "I am recording now", follow-up, lời chào kết. Đường kia chỉ có follow-up.</para>
+    /// </summary>
+    public event Action<string>? AvatarUtteranceStarted;
+
     public void Start()
     {
         if (_started)
@@ -84,7 +93,8 @@ internal sealed class QuestionPresentationService : IDisposable
         Func<Task> getSpeechStartedTask,
         CancellationToken cancellationToken)
     {
-        _assets.Clear();
+        // KHÔNG Clear() ở đây: QuestionFlowRunner.RunAsync đã dọn asset của câu trước ngay đầu
+        // mỗi câu. Gọi lần nữa chỉ thừa, và là một trong những chỗ từng làm ảnh chớp tắt.
         var sectionInstruction = GetSectionInstruction(question);
         await WaitForAvatarAfterAsync(
             token => _sessionClient.SendQuestionStartAsync(
@@ -102,31 +112,48 @@ internal sealed class QuestionPresentationService : IDisposable
             await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
         }
 
+        // Thứ tự giữa HƯỚNG DẪN và TÀI NGUYÊN phụ thuộc loại tài nguyên, vì hai nhóm chiếm giác
+        // quan khác nhau:
+        //
+        //   IMAGE, TEXT_PASSAGE -- chiếm MẮT. Hiện ra tức thì rồi nằm nguyên trên màn hình suốt
+        //     câu hỏi. Hiện TRƯỚC rồi mới đọc hướng dẫn: học sinh vừa nhìn vừa nghe, đúng như
+        //     "Look at the picture, then describe it" mô tả.
+        //
+        //   AUDIO, VIDEO -- chiếm TAI, và chỉ phát MỘT LẦN. Đọc hướng dẫn TRƯỚC rồi mới phát.
+        //     Trước bản này hai việc chạy song song bằng Task.WhenAll, nghĩa là giọng AI đọc đè
+        //     lên mấy giây đầu bản ghi -- mà hướng dẫn của chính những câu đó lại là "You will
+        //     hear the recording once only", nên phần bị đè không có cách nào nghe lại.
+        //
+        // Ba nhánh này gộp được thành một chuỗi tuần tự, không cần Task.WhenAll: với ảnh và đoạn
+        // văn thì PresentAsync trả về ngay, nên "chờ" nó không tốn gì.
         var hasInstruction = !string.IsNullOrWhiteSpace(question.InstructionText);
-        if (hasInstruction || question.Asset is not null)
-        {
-            var instructionTask = hasInstruction
-                ? WaitForAvatarAfterAsync(
-                    token => _sessionClient.SendPresentQuestionAsync(
-                        question.InstructionText,
-                        token),
-                    cancellationToken)
-                : Task.FromResult(true);
+        var asset = question.Asset;
+        var assetPlaysOverTime =
+            asset is not null
+            && (asset.Type == QuestionAssetType.Audio || asset.Type == QuestionAssetType.Video);
 
-            if (question.Asset is not null)
-            {
-                StatusChanged?.Invoke("Đang hiển thị tài nguyên câu hỏi...");
-                await Task.WhenAll(
-                    instructionTask,
-                    _assets.PresentAsync(
-                        question.Asset,
-                        question.PreparationTimeSeconds,
-                        cancellationToken));
-            }
-            else
-            {
-                await instructionTask;
-            }
+        if (asset is not null)
+        {
+            StatusChanged?.Invoke("Đang hiển thị tài nguyên câu hỏi...");
+        }
+
+        if (asset is not null && !assetPlaysOverTime)
+        {
+            await _assets.PresentAsync(asset, cancellationToken);
+        }
+
+        if (hasInstruction)
+        {
+            await WaitForAvatarAfterAsync(
+                token => _sessionClient.SendPresentQuestionAsync(
+                    question.InstructionText,
+                    token),
+                cancellationToken);
+        }
+
+        if (asset is not null && assetPlaysOverTime)
+        {
+            await _assets.PresentAsync(asset, cancellationToken);
         }
 
         openSpeechWindow();
@@ -148,13 +175,21 @@ internal sealed class QuestionPresentationService : IDisposable
     }
 
     public async Task<bool> PresentResumeAsync(
+        ExamQuestion question,
         Guid answerId,
         Guid paperItemId,
         QuestionContextDto context,
         string activePrompt,
         CancellationToken cancellationToken)
     {
-        _assets.Clear();
+        // Hiện LẠI asset thay vì dọn nó đi. Trước bản này nhánh vào lại gọi _assets.Clear() rồi
+        // không bao giờ hiện lại, nên thí sinh bị cấm giữa câu tả tranh khi quay lại sẽ nghe AI
+        // hỏi tiếp về tấm ảnh mà trên màn hình không còn ảnh nào -- trong khi Python VẪN nhận đủ
+        // asset qua question_start. AI biết tấm ảnh, thí sinh thì không.
+        if (question.Asset is not null)
+        {
+            _assets.ShowWithoutWaiting(question.Asset);
+        }
         await WaitForAvatarAfterAsync(
             token => _sessionClient.SendQuestionStartAsync(
                 answerId,
@@ -295,6 +330,7 @@ internal sealed class QuestionPresentationService : IDisposable
             if (hasSpeech)
             {
                 AvatarSpeakingChanged?.Invoke(true);
+                AvatarUtteranceStarted?.Invoke(text);
             }
             await _avatarSpeaker.SpeakAsync(text, rate, CancellationToken.None);
         }

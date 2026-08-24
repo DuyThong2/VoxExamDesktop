@@ -204,6 +204,35 @@ public sealed class TurnAudioRecorder : IDisposable
         }
     }
 
+    /// <summary>
+    /// Ảnh chụp KHÔNG phá huỷ phần PCM của lượt đang dở, từ <paramref name="offset"/> tới hết.
+    /// Trả mảng rỗng khi chưa có gì mới hoặc không có lượt nào đang chạy.
+    /// </summary>
+    /// <remarks>
+    /// Dùng để nạp lại bộ đệm audio phía server sau khi WebSocket đứt giữa lượt: bộ đệm đó nằm trong
+    /// RAM của MỘT đối tượng AttemptConnection bên Python, mà mỗi lần nối lại nó dựng đối tượng mới
+    /// với bộ đệm rỗng. Máy trạm là nơi duy nhất còn giữ đủ audio của lượt.
+    ///
+    /// <para>Có tham số offset để gọi được nhiều lần theo kiểu đuổi bắt: mic vẫn thu trong lúc đang
+    /// gửi, nên phải hỏi lại phần vừa thu thêm cho tới khi hết -- xem
+    /// <c>RealtimeSessionClient.ResyncTurnAudioAsync</c>.</para>
+    /// </remarks>
+    public byte[] PeekTurnBufferFrom(int offset)
+    {
+        lock (_syncLock)
+        {
+            if (!_isTurnActive || offset >= _turnBuffer.Count)
+            {
+                return [];
+            }
+
+            var start = Math.Max(0, offset);
+            var buffer = new byte[_turnBuffer.Count - start];
+            _turnBuffer.CopyTo(start, buffer, 0, buffer.Length);
+            return buffer;
+        }
+    }
+
     public byte[] GetTurnBufferAndReset()
     {
         lock (_syncLock)

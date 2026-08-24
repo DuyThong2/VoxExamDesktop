@@ -30,6 +30,8 @@ public partial class ExamWindow : Window
         _focusGuard = new WindowFocusGuard(this) { IsLocked = viewModel.IsExamLocked };
         _focusGuard.FocusLost += (_, capturedAt) => viewModel.ReportFocusLost(capturedAt);
         viewModel.PropertyChanged += ExamViewModel_PropertyChanged;
+        viewModel.MediaStopRequested += ExamViewModel_MediaStopRequested;
+        viewModel.MediaRetryRequested += ExamViewModel_MediaRetryRequested;
 
         Loaded += ExamWindow_Loaded;
         Closing += ExamWindow_Closing;
@@ -95,6 +97,8 @@ public partial class ExamWindow : Window
         if (DataContext is ExamViewModel vm)
         {
             vm.PropertyChanged -= ExamViewModel_PropertyChanged;
+            vm.MediaStopRequested -= ExamViewModel_MediaStopRequested;
+            vm.MediaRetryRequested -= ExamViewModel_MediaRetryRequested;
         }
 
         _closeGuard.Dispose();
@@ -205,7 +209,56 @@ public partial class ExamWindow : Window
 
         mediaElement.Stop();
         mediaElement.Position = TimeSpan.Zero;
+
+        // Vào lại giữa câu sau khi ĐÃ trả lời ít nhất một lượt thì chỉ hiện lại khung, KHÔNG phát.
+        //
+        // Nhánh đó (QuestionPresentationService.PresentResumeAsync) chỉ chạy khi câu hỏi đã có lượt
+        // hoàn thành, mà lượt chỉ mở được sau khi media chạy hết -- tức thí sinh CHẮC CHẮN đã nghe.
+        // Phát lại ở đây là cho nghe lần hai, phá luật "audio/video đúng một lần" và khai thác được
+        // bằng cách cố tình để bị cấm. Nặng hơn: đường đó không bắn MediaPlaybackStateChanged nên
+        // mic KHÔNG bị tắt trong lúc phát, mà mic không khử vọng -- tiếng loa đi thẳng vào transcript.
+        //
+        // Ngắt đúng lúc media đang phát dở thì KHÔNG rơi vào đây: chưa lượt nào xong nên luồng đi
+        // nhánh PresentInitialAsync, phát lại từ đầu và chờ hết như bình thường.
+        if (DataContext is ExamViewModel { AutoPlayAssetMedia: false })
+        {
+            return;
+        }
+
         mediaElement.Play();
+    }
+
+    /// <summary>
+    /// Lượt phát chạm trần an toàn mà media vẫn chạy. Không dừng ở đây thì nó kêu chồng lên tiếng
+    /// AI đọc đề bài, đúng lúc mic sắp mở -- và mic thì không có khử vọng.
+    /// </summary>
+    private void ExamViewModel_MediaStopRequested()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            _ = Dispatcher.BeginInvoke(new Action(ExamViewModel_MediaStopRequested));
+            return;
+        }
+
+        QuestionAssetMedia.Stop();
+    }
+
+    /// <summary>
+    /// Thử phát lại sau một lần <c>MediaFailed</c>. Gọi <c>Close()</c> trước <c>Play()</c> để
+    /// MediaElement thả bộ giải mã đang hỏng và mở lại nguồn từ đầu -- gọi thẳng <c>Play()</c> trên
+    /// một element vừa lỗi thường lỗi lại ngay mà không hề chạm tới mạng.
+    /// </summary>
+    private void ExamViewModel_MediaRetryRequested()
+    {
+        if (!Dispatcher.CheckAccess())
+        {
+            _ = Dispatcher.BeginInvoke(new Action(ExamViewModel_MediaRetryRequested));
+            return;
+        }
+
+        QuestionAssetMedia.Close();
+        QuestionAssetMedia.Position = TimeSpan.Zero;
+        QuestionAssetMedia.Play();
     }
 
     private void QuestionAssetMedia_MediaEnded(object sender, RoutedEventArgs e)
