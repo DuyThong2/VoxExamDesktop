@@ -17,6 +17,7 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
     private readonly StudentStreamAccessClient _streamAccessClient;
     private readonly DevStreamTokenClient _devStreamTokenClient;
     private readonly AppSettings _settings;
+    private readonly IQuestionAssetCache _assetCache;
 
     public ExamSessionBootstrapService(
         IExamApiService examApi,
@@ -24,8 +25,10 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
         RealtimeAttemptProgressClient attemptProgressClient,
         StudentStreamAccessClient streamAccessClient,
         DevStreamTokenClient devStreamTokenClient,
-        AppSettings settings)
+        AppSettings settings,
+        IQuestionAssetCache assetCache)
     {
+        _assetCache = assetCache;
         _examApi = examApi;
         _sessionState = sessionState;
         _attemptProgressClient = attemptProgressClient;
@@ -41,7 +44,45 @@ public class ExamSessionBootstrapService : IExamSessionBootstrapService
         ApplySessionIdentity(ticket);
         var paper = await _examApi.GetExamPaperAsync(ticket.AttemptId.ToString(), ct);
         _sessionState.LoadExamPaper(paper, ticket.AttemptId);
+        StartAssetPrefetchInBackground();
         await ResumeQuestionIndexIfNeededAsync(ct);
+    }
+
+    /// <summary>
+    /// Bắt đầu tải tài nguyên ngay khi vừa có đề, chạy nền trong lúc học sinh kiểm tra camera/mic.
+    ///
+    /// <para>KHÔNG chờ ở đây: chờ là chặn đường sang màn kiểm tra thiết bị, biến một việc vốn ẩn
+    /// sau thao tác của học sinh thành một màn hình đứng im. Cổng chờ-cho-xong nằm ở
+    /// <c>DevicePreflightViewModel.EnterExamAsync</c>, ngay trước lúc vào phòng thi -- tới đó thì
+    /// phần lớn tệp đã tải xong nhờ lượt nền này.</para>
+    ///
+    /// <para>Nuốt mọi lỗi: lượt nền chỉ để làm ấm đệm. Tải hỏng thì cổng kia tải lại và báo lỗi
+    /// đàng hoàng, chứ một ngoại lệ không ai bắt ở đây sẽ giết tiến trình.</para>
+    /// </summary>
+    private void StartAssetPrefetchInBackground()
+    {
+        var assets = _sessionState.Questions
+            .Select(question => question.Asset)
+            .Where(asset => asset is not null)
+            .Select(asset => asset!)
+            .ToList();
+
+        if (assets.Count == 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                await _assetCache.PrefetchAsync(assets);
+            }
+            catch (Exception ex)
+            {
+                LocalFileLogger.Error("exam_bootstrap", "asset_prefetch_background_failed", ex);
+            }
+        });
     }
 
     public async Task IssueStreamAccessAsync(string? preferredStreamType, CancellationToken ct = default)

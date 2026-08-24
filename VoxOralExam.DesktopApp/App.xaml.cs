@@ -10,6 +10,7 @@ using VoxOralExam.DesktopApp.Infra.Clients.DomainService.Impl;
 using VoxOralExam.DesktopApp.Infra.Devices;
 using VoxOralExam.DesktopApp.Infra.Devices.Impl;
 using VoxOralExam.DesktopApp.Infra.Clients.StreamService;
+using VoxOralExam.DesktopApp.Infra.Media;
 using VoxOralExam.DesktopApp.Infra.Recording;
 using VoxOralExam.DesktopApp.Infra.Recording.Storage;
 using VoxOralExam.DesktopApp.Mocks;
@@ -244,6 +245,8 @@ public partial class App : Application
             client.Timeout = TimeSpan.FromSeconds(30);
         });
         services.AddSingleton<IExamSessionBootstrapService, ExamSessionBootstrapService>();
+        // Singleton: đệm nằm trên đĩa nên vào lại sau khi bị ngắt vẫn dùng chung đúng thư mục đó.
+        services.AddSingleton<IQuestionAssetCache, QuestionAssetCache>();
 
         services.AddHttpClient<IAuthApiService, AuthApiService>(client =>
         {

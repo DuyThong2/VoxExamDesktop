@@ -42,6 +42,7 @@ public class ExamViewModel : BaseViewModel
     private readonly QuestionAssetPresentationCoordinator _assetPresentationCoordinator;
     private readonly IExamRecordingService _recording;
     private readonly AppSettings _settings;
+    private readonly IQuestionAssetCache _assetCache;
 
     private string _studentName = string.Empty;
     private string _studentId = string.Empty;
@@ -112,7 +113,8 @@ public class ExamViewModel : BaseViewModel
         IExamApiService examApi,
         QuestionAssetPresentationCoordinator assetPresentationCoordinator,
         IExamRecordingService recording,
-        AppSettings settings)
+        AppSettings settings,
+        IQuestionAssetCache assetCache)
     {
         _camera = camera;
         _cameraSignalGuard = cameraSignalGuard;
@@ -124,6 +126,7 @@ public class ExamViewModel : BaseViewModel
         _assetPresentationCoordinator = assetPresentationCoordinator;
         _recording = recording;
         _settings = settings;
+        _assetCache = assetCache;
 
         LoadSessionData();
 
@@ -1281,6 +1284,10 @@ public class ExamViewModel : BaseViewModel
                 AiStatus = "Đã hoàn thành bài thi";
                 EndScreenMessage = "Bài thi đã được nộp thành công. Hệ thống sẽ đóng sau ít giây nữa.";
                 AddLog("Bài thi vấn đáp đã hoàn thành", LogType.Success);
+                // Chỉ dọn đệm tài nguyên khi bài thi ĐÃ NỘP THÀNH CÔNG. Nhánh thất bại giữ nguyên
+                // đệm là có chủ đích: thi hỏng thường kéo theo một lần vào lại, mà vào lại thì đệm
+                // chính là thứ giúp không phải tải lại từ đầu -- đúng lúc mạng đang tệ nhất.
+                _assetCache.Clear();
             }
             else
             {
@@ -1383,12 +1390,14 @@ public class ExamViewModel : BaseViewModel
 
         try
         {
+            var source = ResolveAssetUri(asset.Url);
+
             if (asset.Type == QuestionAssetType.Image)
             {
                 var image = new BitmapImage();
                 image.BeginInit();
                 image.CacheOption = BitmapCacheOption.OnLoad;
-                image.UriSource = new Uri(asset.Url, UriKind.Absolute);
+                image.UriSource = source;
                 image.EndInit();
                 image.Freeze();
                 CurrentQuestionAssetImage = image;
@@ -1397,13 +1406,33 @@ public class ExamViewModel : BaseViewModel
 
             if (asset.Type == QuestionAssetType.Video || asset.Type == QuestionAssetType.Audio)
             {
-                CurrentQuestionMediaSource = new Uri(asset.Url, UriKind.Absolute);
+                CurrentQuestionMediaSource = source;
             }
         }
         catch (Exception ex)
         {
             AddLog($"Không thể tải asset câu hỏi: {ex.Message}", LogType.Warning);
         }
+    }
+
+    /// <summary>
+    /// Ưu tiên tệp đã tải sẵn trên đĩa, không có thì mới lấy thẳng từ S3.
+    ///
+    /// <para>Tệp cục bộ tốt hơn ở hai điểm, không chỉ ở tốc độ: mất mạng giữa bài không còn làm
+    /// tài nguyên biến mất, và <c>BitmapImage</c> nạp từ tệp thì giải mã xong ngay trong
+    /// <c>EndInit()</c> -- <c>Freeze()</c> ngay sau đó luôn hợp lệ. Với URI từ xa, ảnh tải bất
+    /// đồng bộ nên <c>Freeze()</c> có thể ném đúng vào khối catch bên trên và ảnh không bao giờ
+    /// hiện ra.</para>
+    ///
+    /// <para>Vẫn giữ đường lấy thẳng từ S3 làm lưới đỡ: học sinh có thể đã bấm bỏ qua ở màn kiểm
+    /// tra thiết bị khi tải trước thất bại.</para>
+    /// </summary>
+    private Uri ResolveAssetUri(string url)
+    {
+        var localPath = _assetCache.TryGetLocalPath(url);
+        return localPath is not null
+            ? new Uri(localPath, UriKind.Absolute)
+            : new Uri(url, UriKind.Absolute);
     }
 
     private void ToggleMute()

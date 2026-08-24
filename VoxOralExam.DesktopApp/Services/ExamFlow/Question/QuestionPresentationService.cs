@@ -112,28 +112,48 @@ internal sealed class QuestionPresentationService : IDisposable
             await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken);
         }
 
+        // Thứ tự giữa HƯỚNG DẪN và TÀI NGUYÊN phụ thuộc loại tài nguyên, vì hai nhóm chiếm giác
+        // quan khác nhau:
+        //
+        //   IMAGE, TEXT_PASSAGE -- chiếm MẮT. Hiện ra tức thì rồi nằm nguyên trên màn hình suốt
+        //     câu hỏi. Hiện TRƯỚC rồi mới đọc hướng dẫn: học sinh vừa nhìn vừa nghe, đúng như
+        //     "Look at the picture, then describe it" mô tả.
+        //
+        //   AUDIO, VIDEO -- chiếm TAI, và chỉ phát MỘT LẦN. Đọc hướng dẫn TRƯỚC rồi mới phát.
+        //     Trước bản này hai việc chạy song song bằng Task.WhenAll, nghĩa là giọng AI đọc đè
+        //     lên mấy giây đầu bản ghi -- mà hướng dẫn của chính những câu đó lại là "You will
+        //     hear the recording once only", nên phần bị đè không có cách nào nghe lại.
+        //
+        // Ba nhánh này gộp được thành một chuỗi tuần tự, không cần Task.WhenAll: với ảnh và đoạn
+        // văn thì PresentAsync trả về ngay, nên "chờ" nó không tốn gì.
         var hasInstruction = !string.IsNullOrWhiteSpace(question.InstructionText);
-        if (hasInstruction || question.Asset is not null)
-        {
-            var instructionTask = hasInstruction
-                ? WaitForAvatarAfterAsync(
-                    token => _sessionClient.SendPresentQuestionAsync(
-                        question.InstructionText,
-                        token),
-                    cancellationToken)
-                : Task.FromResult(true);
+        var asset = question.Asset;
+        var assetPlaysOverTime =
+            asset is not null
+            && (asset.Type == QuestionAssetType.Audio || asset.Type == QuestionAssetType.Video);
 
-            if (question.Asset is not null)
-            {
-                StatusChanged?.Invoke("Đang hiển thị tài nguyên câu hỏi...");
-                await Task.WhenAll(
-                    instructionTask,
-                    _assets.PresentAsync(question.Asset, cancellationToken));
-            }
-            else
-            {
-                await instructionTask;
-            }
+        if (asset is not null)
+        {
+            StatusChanged?.Invoke("Đang hiển thị tài nguyên câu hỏi...");
+        }
+
+        if (asset is not null && !assetPlaysOverTime)
+        {
+            await _assets.PresentAsync(asset, cancellationToken);
+        }
+
+        if (hasInstruction)
+        {
+            await WaitForAvatarAfterAsync(
+                token => _sessionClient.SendPresentQuestionAsync(
+                    question.InstructionText,
+                    token),
+                cancellationToken);
+        }
+
+        if (asset is not null && assetPlaysOverTime)
+        {
+            await _assets.PresentAsync(asset, cancellationToken);
         }
 
         openSpeechWindow();
