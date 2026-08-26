@@ -11,6 +11,11 @@
         ResizeMode="NoResize"
         Topmost="True"
         WindowState="Maximized">
+    <Window.Resources>
+        <!-- Khai tại chỗ: khoá cùng tên bên ExamListView.xaml chỉ sống trong view đó, tham chiếu
+             sang đây sẽ ném XamlParseException ngay lúc mở cửa sổ thi. -->
+        <BooleanToVisibilityConverter x:Key="BoolToVisibility" />
+    </Window.Resources>
     <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto" />
@@ -181,6 +186,20 @@
                                Foreground="#CBD5E1"
                                FontSize="11"
                                HorizontalAlignment="Center" />
+                    <!-- Đặt ngay dưới đồng hồ CÓ CHỦ ĐÍCH: đây chính là lời giải thích cho việc
+                         đồng hồ đang đứng yên. Tách khỏi AiStatus vì dòng đó bị luồng thi ghi đè
+                         liên tục và chỉ báo mất kết nối ở đó sẽ biến mất sau một nhịp. -->
+                    <Border Background="#7F1D1D"
+                            CornerRadius="4"
+                            Padding="8,3"
+                            Margin="0,6,0,0"
+                            HorizontalAlignment="Center"
+                            Visibility="{Binding IsRealtimeDisconnected, Converter={StaticResource BoolToVisibility}}">
+                        <TextBlock Text="Mất kết nối — đồng hồ đã tạm dừng, đang kết nối lại..."
+                                   Foreground="White"
+                                   FontSize="11"
+                                   FontWeight="SemiBold" />
+                    </Border>
                 </StackPanel>
 
                 <StackPanel Grid.Column="2" HorizontalAlignment="Right" VerticalAlignment="Center">
@@ -431,7 +450,12 @@
                                                FontSize="11.5"
                                                Foreground="#64748B" />
 
+                                    <!-- Volume="1" là BẮT BUỘC ghi rõ: MediaElement của WPF mặc định
+                                         0.5, tức mất thẳng 6 dB so với giọng AI (đi qua NAudio
+                                         WaveOut, mặc định 1.0). Đó là lý do bản ghi nghe nhỏ hẳn so
+                                         với lời AI đọc đề. -->
                                     <MediaElement x:Name="QuestionAssetMedia"
+                                                  Volume="1"
                                                   LoadedBehavior="Manual"
                                                   UnloadedBehavior="Stop"
                                                   Stretch="Uniform"

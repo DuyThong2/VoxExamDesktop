@@ -33,6 +33,9 @@ public sealed class RealtimeExamFlowService : IExamFlowService
 
     public bool IsMicMuted => _runner?.IsMicMuted ?? _isMicMuted;
 
+    // Chưa có runner = chưa vào lượt thi nào; coi là còn sống để đồng hồ không bị chặn oan.
+    public bool IsRealtimeAlive => _runner?.IsRealtimeAlive ?? true;
+
     public Task StartAsync(CancellationToken cancellationToken)
     {
         if (_runTask is { IsCompleted: false })

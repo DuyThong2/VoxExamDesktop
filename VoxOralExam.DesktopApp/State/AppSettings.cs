@@ -94,7 +94,10 @@ public class AppSettings
     // NOTE: Python's archival runs Azure STT continuous recognition, which scales with audio
     // length -- a 60-90s answer can take tens of seconds to land. Raise this (env
     // FINAL_ARCHIVE_DRAIN_TIMEOUT_SECONDS) if 'pending_archives_incomplete' shows up in the logs.
-    public int FinalArchiveDrainTimeoutSeconds { get; set; } = 20;
+    // Nâng 20 -> 45: Azure STT chạy theo độ dài audio, mà câu CUỐI thường là câu dài nhất trong
+    // đề. 20 giây đủ cho câu ngắn, hụt đúng vào lúc cần nhất. Chỉ ảnh hưởng thời gian nhìn màn
+    // hình "đang lưu" khi mạng chậm -- không bao giờ khiến chờ ÍT hơn trước.
+    public int FinalArchiveDrainTimeoutSeconds { get; set; } = 45;
 
     // Trần cho MỘT lời gọi POST /turns/archive.
     //
@@ -116,7 +119,22 @@ public class AppSettings
     // POST /turns/archive về (có khi ~90 giây) rồi mới publish; giờ turn_publisher publish pha
     // sơ bộ ngay khi quyết định follow-up xong, tức vài giây sau khi thí sinh dứt lời. 3 giây ở
     // đây giờ chỉ còn phải phủ chặng Kafka -> consumer, rộng rãi hơn nhiều so với lúc đặt ra.
-    public int PostArchiveSettleSeconds { get; set; } = 3;
+    //
+    // SỬA 2026-08-25 -- lập luận ngay trên CHỈ ĐÚNG VỚI TRANSCRIPT. Pha sơ bộ mang transcript đi
+    // ngay, nhưng `audio_url` đi ở PHA 2, và pha 2 phải chờ bản ghi âm lưu xong rồi mới publish.
+    // Đó là lý do triệu chứng luôn có hình dạng "câu cuối chấm được 3 tiêu chí, thiếu mỗi phát âm":
+    // 3 tiêu chí kia bám transcript (pha 1, kịp), phát âm bám audio (pha 2, không kịp).
+    //
+    // Ngân sách thật mà con số này phải phủ:
+    //   pha 2 tỉnh dậy sau khi audio vào checkpoint  (<= 2s, sau khi đã chặn trần nhịp dò)
+    // + Kafka giao tin + consumer upsert xong        (chưa đo được bằng cách đọc code)
+    //
+    // 3 giây phủ vế đầu là đã gần cạn, không còn chỗ cho vế sau. Nâng lên 8 vì cái giá chỉ là 5
+    // giây MỘT LẦN ở cuối bài, còn cái mất khi hụt là câu cuối vĩnh viễn không có điểm phát âm:
+    // Java chụp ảnh dữ liệu trong chính transaction PATCH (SubmitExamSessionUseCase) và KHÔNG có
+    // đường chấm bù khi audio về muộn -- DeferredExamSessionGradingJob chỉ nhặt thí sinh bị chặn,
+    // không nhặt ca này.
+    public int PostArchiveSettleSeconds { get; set; } = 8;
 
     // Floor for salvaging an aborted capture. TurnAudioRecorder always seeds a turn with
     // TurnAudioPreRollMilliseconds of pre-roll, so anything near that floor holds no speech --

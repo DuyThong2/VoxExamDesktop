@@ -43,6 +43,7 @@ public class ExamViewModel : BaseViewModel
     private readonly IExamRecordingService _recording;
     private readonly AppSettings _settings;
     private readonly IQuestionAssetCache _assetCache;
+    private readonly QuestionAssetAudioPlayer _assetAudioPlayer = new();
 
     private string _studentName = string.Empty;
     private string _studentId = string.Empty;
@@ -79,6 +80,7 @@ public class ExamViewModel : BaseViewModel
     private bool _isCleaningUp;
     private bool _examCompleted;
     private Task? _cleanupTask;
+    private bool _isRealtimeDisconnected;
     private bool _isAssetMediaPlaying;
     private bool _hasAssetMediaFinished;
     private bool _assetMediaRetryUsed;
@@ -143,6 +145,8 @@ public class ExamViewModel : BaseViewModel
         _assetPresentationCoordinator.OnAssetDisplayRequested += HandleAssetDisplayRequested;
         _assetPresentationCoordinator.MediaPlaybackStateChanged += HandleAssetMediaPlaybackChanged;
         _assetPresentationCoordinator.MediaStopRequested += HandleAssetMediaStopRequested;
+        _assetAudioPlayer.PlaybackEnded += HandleAssetAudioEnded;
+        _assetAudioPlayer.PlaybackFailed += HandleAssetAudioFailed;
         _avatarClient.OnVideoFrame += HandleAvatarVideoFrame;
         _recording.StatusChanged += HandleRecordingStatusChanged;
         _isMicMuted = _examFlow.IsMicMuted;
@@ -746,6 +750,9 @@ public class ExamViewModel : BaseViewModel
             _assetPresentationCoordinator.OnAssetDisplayRequested -= HandleAssetDisplayRequested;
             _assetPresentationCoordinator.MediaPlaybackStateChanged -= HandleAssetMediaPlaybackChanged;
             _assetPresentationCoordinator.MediaStopRequested -= HandleAssetMediaStopRequested;
+            _assetAudioPlayer.PlaybackEnded -= HandleAssetAudioEnded;
+            _assetAudioPlayer.PlaybackFailed -= HandleAssetAudioFailed;
+            _assetAudioPlayer.Dispose();
             _avatarClient.OnVideoFrame -= HandleAvatarVideoFrame;
             _camera.OnPreviewFrame -= HandlePreviewFrame;
             _proctoring.OnStatusChanged -= HandleProctoringStatusChanged;
@@ -968,7 +975,23 @@ public class ExamViewModel : BaseViewModel
             //
             // Trường hợp bị ngắt giữa lúc đang phát được xử lý bằng cách HOÀN LẠI số giây đã xem
             // lúc vào lại, không phải bằng cách dừng đồng hồ -- xem RestoreQuestionStartRemaining.
-            if (_remainingSecondsLocal > 0 && !IsAvatarSpeaking)
+            // Điều kiện thứ ba: MẤT KẾT NỐI thì ngừng trừ giây. Mất mạng nghĩa là AI không nghe
+            // được cũng không hỏi được gì -- trừ giờ của thí sinh trong khoảng đó là trừ oan, mà
+            // trước đây đồng hồ vẫn chạy đều vì nó chỉ nhìn IsAvatarSpeaking.
+            //
+            // NGỪNG TRỪ chứ không hoàn lại sau: checkpoint phía server chỉ cho phép giảm
+            // (UpdateExamSessionRemainingTimeUseCase), nên cộng ngược lên sẽ bị từ chối. Không tiêu
+            // thì không phải hoàn.
+            //
+            // Đây KHÔNG phải đường để câu giờ: ca thi vẫn đóng đúng hạn và
+            // ExamScheduleTimeoutGradingJob ép nộp ở biên ca, nên thời gian đóng băng nhiều nhất
+            // cũng chỉ tới đó.
+            // Đọc MỘT LẦN rồi dùng cho cả hai việc: quyết định có trừ giây không, và hiện chỉ báo.
+            // Hỏi hai lần thì có lúc đồng hồ đứng mà chỉ báo chưa hiện, người xem không hiểu vì sao.
+            var realtimeAlive = _examFlow.IsRealtimeAlive;
+            IsRealtimeDisconnected = !realtimeAlive;
+
+            if (_remainingSecondsLocal > 0 && !IsAvatarSpeaking && realtimeAlive)
             {
                 _remainingSecondsLocal--;
             }
@@ -1199,6 +1222,18 @@ public class ExamViewModel : BaseViewModel
     }
 
     /// <summary>
+    /// Tài nguyên AUDIO do <see cref="QuestionAssetAudioPlayer"/> phát, không phải MediaElement.
+    /// <c>ExamWindow</c> đọc cờ này để KHÔNG gọi <c>Play()</c> cho loại đó -- gọi cả hai là nghe
+    /// chồng hai lần, mà một trong hai lại ra sai thiết bị.
+    /// </summary>
+    public bool PlaysAssetAudioInternally =>
+        CurrentQuestionAsset?.Type == QuestionAssetType.Audio;
+
+    private void HandleAssetAudioEnded() => NotifyQuestionAssetMediaEnded();
+
+    private void HandleAssetAudioFailed(string reason) => NotifyQuestionAssetMediaFailed(reason);
+
+    /// <summary>
     /// Media không phát được. Cho phát lại ĐÚNG MỘT lần rồi mới bỏ qua.
     ///
     /// <para>Luật của bài thi là audio/video chỉ phát một lần, nhưng luật đó nói về việc thí sinh
@@ -1234,6 +1269,16 @@ public class ExamViewModel : BaseViewModel
 
         if (retrying)
         {
+            // AUDIO không đi qua MediaElement nên MediaRetryRequested (Close/Play trên element đó)
+            // sẽ không phát gì cả -- phát lại bằng chính bộ phát đã dùng lần đầu.
+            if (PlaysAssetAudioInternally && CurrentQuestionMediaSource is not null)
+            {
+                _assetAudioPlayer.Play(
+                    CurrentQuestionMediaSource,
+                    _sessionState.SelectedAudioOutputDeviceIndex);
+                return;
+            }
+
             MediaRetryRequested?.Invoke();
             return;
         }
@@ -1350,6 +1395,7 @@ public class ExamViewModel : BaseViewModel
 
     private void HandleAssetMediaStopRequested()
     {
+        _assetAudioPlayer.Stop();
         Application.Current.Dispatcher.Invoke(() => MediaStopRequested?.Invoke());
     }
 
@@ -1358,12 +1404,31 @@ public class ExamViewModel : BaseViewModel
     /// nghĩa với được phát. Vào lại giữa câu sau khi đã trả lời thì chỉ hiện lại khung của thứ đã
     /// nghe xong, xem <c>QuestionAssetPresentationCoordinator.ShowWithoutWaiting</c>.
     /// </summary>
+    /// <summary>
+    /// Đang mất kết nối tới server hay không, lấy đúng tín hiệu đã dùng để đóng băng đồng hồ.
+    ///
+    /// <para>Cần một chỉ báo RIÊNG chứ không dùng lại <c>AiStatus</c> vì hai lý do. Một:
+    /// <c>OnReconnecting</c> chỉ nổ SAU khi loạt thử nhanh (~30 giây) đã cạn, nên một lần đứt 10
+    /// giây không hiện gì cả -- thí sinh chỉ thấy đồng hồ tự dưng đứng, không hiểu vì sao. Hai:
+    /// <c>AiStatus</c> là dòng trạng thái dùng chung, luồng thi vẫn ghi đè lên nó ("Đang chờ học
+    /// sinh trả lời...") ngay cả trong lúc mất mạng.</para>
+    /// </summary>
+    public bool IsRealtimeDisconnected
+    {
+        get => _isRealtimeDisconnected;
+        private set => SetProperty(ref _isRealtimeDisconnected, value);
+    }
+
     public bool AutoPlayAssetMedia { get; private set; } = true;
 
     private void ApplyCurrentQuestionAsset(QuestionAsset? asset, bool autoPlay)
     {
         // Đặt TRƯỚC khi gán nguồn: gán nguồn là thứ kích hoạt TargetUpdated, mà handler đó đọc cờ này.
         AutoPlayAssetMedia = autoPlay;
+
+        // Dừng bản ghi của câu trước trước khi dựng câu mới: nếu không, sang câu khác mà tiếng cũ
+        // vẫn kêu chồng lên lời AI đọc đề.
+        _assetAudioPlayer.Stop();
 
         CurrentQuestionAsset = asset;
         CurrentQuestionAssetImage = null;
@@ -1406,7 +1471,17 @@ public class ExamViewModel : BaseViewModel
 
             if (asset.Type == QuestionAssetType.Video || asset.Type == QuestionAssetType.Audio)
             {
+                // Vẫn gán nguồn cho cả hai loại: HasMediaAsset và nhánh thử lại đọc thuộc tính này,
+                // và MediaElement để LoadedBehavior="Manual" nên gán nguồn KHÔNG tự phát.
                 CurrentQuestionMediaSource = source;
+
+                // AUDIO đi qua NAudio để ra ĐÚNG thiết bị học sinh đã chọn -- MediaElement không
+                // chọn được thiết bị, xem QuestionAssetAudioPlayer. VIDEO vẫn để MediaElement lo cả
+                // hình lẫn tiếng, tránh phải tự đồng bộ hình-tiếng.
+                if (asset.Type == QuestionAssetType.Audio && autoPlay)
+                {
+                    _assetAudioPlayer.Play(source, _sessionState.SelectedAudioOutputDeviceIndex);
+                }
             }
         }
         catch (Exception ex)

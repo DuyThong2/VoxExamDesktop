@@ -31,6 +31,18 @@ public interface IExamFlowService
 
     bool IsMicMuted { get; }
 
+    /// <summary>
+    /// Kênh realtime tới server còn sống hay không, đo bằng "lần cuối nghe thấy gì đó từ server"
+    /// chứ không phải trạng thái socket (socket còn báo Open một lúc lâu sau khi mạng đã chết).
+    ///
+    /// <para>Đồng hồ thi NGỪNG TRỪ GIÂY khi cờ này false: mất mạng thì AI không nghe cũng không
+    /// hỏi được gì, trừ giờ của thí sinh trong khoảng đó là trừ oan.</para>
+    ///
+    /// <para>Trả về <c>true</c> khi chưa có lượt thi nào chạy, để đồng hồ không bị chặn bởi một
+    /// kênh chưa tồn tại.</para>
+    /// </summary>
+    bool IsRealtimeAlive { get; }
+
     Task StartAsync(CancellationToken ct);
     Task StopAsync();
     Task SubmitNowAsync();

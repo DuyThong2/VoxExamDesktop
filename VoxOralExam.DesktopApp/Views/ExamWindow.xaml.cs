@@ -225,6 +225,14 @@ public partial class ExamWindow : Window
             return;
         }
 
+        // AUDIO do QuestionAssetAudioPlayer phát, để ra đúng thiết bị học sinh đã chọn ở màn kiểm
+        // tra thiết bị -- MediaElement không chọn được thiết bị. Gọi Play() ở đây nữa là nghe chồng
+        // hai lần, mà bản của MediaElement lại đi ra thiết bị mặc định của Windows.
+        if (DataContext is ExamViewModel { PlaysAssetAudioInternally: true })
+        {
+            return;
+        }
+
         mediaElement.Play();
     }
 

@@ -79,6 +79,8 @@ internal sealed class ExamAttemptRunner
 
     public bool IsMicMuted => _recorder?.IsMuted ?? _isMicMuted;
 
+    public bool IsRealtimeAlive => _sessionClient.IsServerAlive;
+
     public async Task RunAsync(CancellationToken cancellationToken)
     {
         EnsureSessionInitialized();
@@ -471,6 +473,25 @@ internal sealed class ExamAttemptRunner
     /// thân lượt nói đã sang Java từ pha sơ bộ ngay lúc học sinh dứt lời -- thứ còn chờ ở đây
     /// chỉ là bản ghi âm và bản phiên âm của Azure.</para>
     /// </summary>
+    /// <summary>
+    /// Trần chờ số đếm nhích lên ở giai đoạn 1. Ngắn có chủ đích -- xem chú thích trong hàm.
+    /// </summary>
+    private static readonly TimeSpan AppearanceWait = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Trần riêng cho giai đoạn 0, TÁCH khỏi ngân sách chờ chính.
+    ///
+    /// <para>Vì có những lượt vĩnh viễn không bao giờ báo "đã lưu": bộ đệm audio rỗng lúc turn_end
+    /// thì Python thoát sớm trước cả chỗ ghi vào trạng thái bền, nên hỏi bao lâu cũng vô ích. Chuyện
+    /// này không hiếm -- thí sinh không trả lời câu cuối là dính, và mất bộ đệm do đổi kết nối giữa
+    /// câu cũng dính.</para>
+    ///
+    /// <para>Dùng chung `deadline` thì mỗi ca như vậy giam thí sinh ở màn "đang lưu" trọn ngân sách
+    /// VÀ bỏ đói hai giai đoạn sau. Bản mới của Python có đánh dấu riêng cho ca này, nên trần ở đây
+    /// chỉ còn để chặn thiệt hại khi chạy với Python bản cũ.</para>
+    /// </summary>
+    private static readonly TimeSpan ArchiveProbeWait = TimeSpan.FromSeconds(8);
+
     private async Task<int> WaitForRemoteArchivesAsync(TimeSpan timeout)
     {
         if (_sessionState.ExamAttemptId == Guid.Empty)
@@ -479,6 +500,81 @@ internal sealed class ExamAttemptRunner
         }
 
         var deadline = DateTime.UtcNow + timeout;
+
+        // GIAI ĐOẠN 0 -- hỏi ĐÍCH DANH lượt cuối đã lưu trữ xong chưa.
+        //
+        // Điểm mù của cách chờ cũ: `pending = 0` vừa có nghĩa "đã lưu xong" vừa có nghĩa "Python
+        // còn chưa kịp nhận turn_end nên chưa spawn task nào". Hai chuyện ngược nhau, cùng một con
+        // số. Các câu giữa bài không lộ ra vì sau đó còn cả đoạn AI đọc câu kế tiếp -- thừa thời
+        // gian cho task nền chạy xong. Câu CUỐI thì không có khoảng đệm đó: gửi turn_end xong là
+        // hỏi ngay, thấy 0, tưởng sạch, nộp bài luôn -- mà Java chấm đồng bộ ngay tại lần PATCH ấy.
+        // Audio về sau cũng vô nghĩa, nên câu cuối mất đúng phần chấm phát âm của Azure.
+        //
+        // Đây mới là câu hỏi đúng. Hai giai đoạn dưới suy từ một con số đếm gộp, nên chỉ đúng gần
+        // đúng; còn ở đây client biết chính xác nó vừa gửi lượt nào và hỏi thẳng về lượt đó.
+        //
+        // Trần RIÊNG (ArchiveProbeWait) chứ không dùng `deadline`: có những lượt vĩnh viễn không
+        // bao giờ báo "đã lưu" -- xem chú thích của hằng đó.
+        var lastTurn = _sessionClient.LastCompletedTurn;
+        if (lastTurn is (Guid lastAnswerId, int lastTurnOrder))
+        {
+            var probeDeadline = DateTime.UtcNow + ArchiveProbeWait;
+            var probeResolved = false;
+            while (DateTime.UtcNow < probeDeadline && DateTime.UtcNow < deadline)
+            {
+                var (_, archived) = await _attemptProgress.GetArchiveStatusAsync(
+                    _sessionState.ExamAttemptId, lastAnswerId, lastTurnOrder, CancellationToken.None);
+
+                // null = KHÔNG BIẾT (server bản cũ, hoặc đọc lỗi). Bỏ giai đoạn này, rơi xuống
+                // cách đếm bên dưới -- tuyệt đối không coi "không biết" là "chưa lưu" rồi giữ thí
+                // sinh ở màn đang lưu cho tới hết giờ.
+                if (archived is null)
+                {
+                    LocalFileLogger.Info("exam_flow", "archive_probe_unsupported", new { lastTurnOrder });
+                    probeResolved = true;
+                    break;
+                }
+                if (archived.Value)
+                {
+                    LocalFileLogger.Info("exam_flow", "last_turn_archived", new { lastTurnOrder });
+                    probeResolved = true;
+                    break;
+                }
+                await Task.Delay(TimeSpan.FromMilliseconds(500));
+            }
+
+            // Hết trần mà vẫn chưa "đã lưu". Ghi lại, vì đây là dấu hiệu DUY NHẤT phân biệt được
+            // "audio về chậm thật" với "lượt này không bao giờ có audio" -- hai ca cần hai cách sửa
+            // khác hẳn nhau, và nhìn từ ngoài chúng giống hệt nhau.
+            if (!probeResolved)
+            {
+                LocalFileLogger.Info("exam_flow", "archive_probe_timeout", new
+                {
+                    lastTurnOrder,
+                    waitedSeconds = ArchiveProbeWait.TotalSeconds
+                });
+            }
+        }
+
+        // GIAI ĐOẠN 1 -- chờ số đếm NHÍCH LÊN trước khi chờ nó về 0.
+        //
+        // Giữ lại làm lối lui cho khi giai đoạn 0 không dùng được (Python chưa deploy bản mới):
+        // khi đó đây vẫn tốt hơn nguyên trạng, vì nó phân biệt được "chưa kịp bắt đầu" với "đã xong".
+        var appearDeadline = DateTime.UtcNow + AppearanceWait;
+        var everSawPending = false;
+        while (DateTime.UtcNow < appearDeadline && DateTime.UtcNow < deadline)
+        {
+            var probe = await _attemptProgress.GetPendingArchiveCountAsync(
+                _sessionState.ExamAttemptId, CancellationToken.None);
+            if (probe > 0)
+            {
+                everSawPending = true;
+                break;
+            }
+            await Task.Delay(TimeSpan.FromMilliseconds(250));
+        }
+
+        // GIAI ĐOẠN 2 -- như cũ: chờ về 0 hoặc hết giờ.
         int pending;
         while (true)
         {
@@ -494,6 +590,10 @@ internal sealed class ExamAttemptRunner
         LocalFileLogger.Info("exam_flow", "remote_archive_wait_complete", new
         {
             pending,
+            // false = chưa bao giờ thấy task nào chạy. Hoặc lượt cuối không có gì để lưu, hoặc
+            // Python không nhận được turn_end. Đối chiếu với turn_salvage_skipped trong cùng log
+            // để biết là cái nào.
+            everSawPending,
             timeoutSeconds = timeout.TotalSeconds
         });
         return Math.Max(0, pending);

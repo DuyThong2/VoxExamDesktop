@@ -82,7 +82,12 @@ internal sealed class QuestionFlowRunner
 
         using var budget = new QuestionSpeechBudget(
             question.MaxResponseSeconds,
-            resumeSpokenSeconds);
+            resumeSpokenSeconds,
+            // Mất mạng thì server không nghe được gì, nên không được tính vào hạn mức nói. Nếu
+            // không: StartSpeaking/StopSpeaking đều do sự kiện VAD TỪ SERVER kích hoạt, nên đứt
+            // giữa lúc đang nói là StopSpeaking không bao giờ tới, ngân sách cháy theo đồng hồ
+            // tường và đủ lâu thì tự đóng câu vì "hết thời gian nói".
+            () => _sessionClient.IsServerAlive);
         var lastCheckpointedSecond = (int)Math.Floor(resumeSpokenSeconds);
         void HandleBudgetProgress(TimeSpan elapsed, TimeSpan limit)
         {
