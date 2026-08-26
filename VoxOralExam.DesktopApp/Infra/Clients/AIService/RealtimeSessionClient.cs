@@ -678,7 +678,38 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         // Giữ lại nguyên văn để gửi lại được sau khi nối lại -- xem ResendTurnEndIfServerNeverGotItAsync.
         // Dựng lại từ trí nhớ ở chỗ khác là mở đường cho hai lần gửi mang tham số khác nhau.
         _pendingTurnEndPayload = payload;
-        await SendJsonAsync(payload, ct);
+
+        // Gửi HỎNG không có nghĩa là lượt hỏng -- vào chờ như thường.
+        //
+        // Toàn bộ bộ máy cứu lượt sau khi nối lại đã nằm sẵn ngay trên: payload vừa được cất, TCS
+        // vừa được gán, và ResendTurnEndIfServerNeverGotItAsync sẽ gửi lại đúng nó ngay khi
+        // ResumeAfterReconnectAsync chạy xong phần chép ngược audio. Nhưng cả bộ máy đó chỉ với tới
+        // được nếu luồng này đi tiếp xuống `await tcs.Task`. Ngoại lệ ở dòng gửi làm nó nhảy qua
+        // hết, và đường cứu chưa bao giờ có cơ hội chạy.
+        //
+        // Hậu quả không phải là mất một lượt, mà là mất CẢ CÂU: ngoại lệ bay lên
+        // QuestionFlowRunner, bị bắt bởi nhánh dựng quyết định thay thế "connection_lost_timeout"
+        // với ShouldContinue=false, và câu hỏi bị đánh dấu đã xong với 0 lượt. Bài đi tiếp câu sau.
+        //
+        // Đo thật 2026-08-26, ca 01a03d85: đứt mạng lúc đọc lời dẫn chuẩn bị của câu 2. 17:04:53
+        // ObjectDisposedException tại đúng dòng này -> câu 2 chết ngay giây đó; 16 giây sau máy đã
+        // sang câu 3; tới lúc nối lại được (17:05:09) thì không còn gì để cứu. DB: câu 2, 3, 4 đều
+        // no_recording. Nếu luồng vào được chỗ chờ thì nối lại ở giây thứ 30 vẫn còn thừa thời gian
+        // -- trần chờ dưới đây là 180 giây.
+        //
+        // KHÔNG nuốt OperationCanceledException: nộp bài/dừng bài đi qua đường đó và phải thoát ngay.
+        try
+        {
+            await SendJsonAsync(payload, ct);
+        }
+        catch (Exception ex) when (IsTransportDown(ex))
+        {
+            LocalFileLogger.Error(
+                "realtime_ws",
+                "turn_end_gui_that_bai_van_cho_noi_lai",
+                ex,
+                new { turnOrder });
+        }
 
         using var registration = ct.Register(() => tcs.TrySetCanceled());
 
@@ -749,6 +780,19 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
             LocalFileLogger.Error("realtime_ws", "send_audio_frame_failed", ex);
         }
     }
+
+    /// <summary>
+    /// Lỗi "đường truyền đã chết", phân biệt với lỗi giao thức hay lỗi lập trình.
+    ///
+    /// <para><c>ObjectDisposedException</c> kế thừa <c>InvalidOperationException</c> nên đã nằm
+    /// trong nhánh đầu -- liệt kê riêng chỉ để người đọc sau không tưởng là thiếu. Đó cũng là dạng
+    /// hay gặp nhất: vòng nối lại đã <c>Dispose</c> socket cũ trước khi luồng gửi kịp chạm vào nó.</para>
+    /// </summary>
+    private static bool IsTransportDown(Exception ex) =>
+        ex is InvalidOperationException
+            or ObjectDisposedException
+            or WebSocketException
+            or System.IO.IOException;
 
     private async Task SendJsonAsync(object payload, CancellationToken ct)
     {
@@ -833,10 +877,21 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                     var decision = ParseDecision(doc.RootElement.GetProperty("decision"));
                     _pendingDecisionTcs?.TrySetResult(decision);
                     break;
+                // TẠM THỜI, THÊM 2026-08-26 ĐỂ CHẨN ĐOÁN -- xoá khi xong.
+                //
+                // Lượt nói chỉ kết thúc khi vad_speech_end tới đây. Đo thật cùng ngày: sau khi nối
+                // lại giữa lúc thí sinh đang nói, cửa sổ thu tiếng KHÔNG BAO GIỜ tự đóng -- chạy
+                // 96 giây tới lúc thí sinh bấm nộp mới kết thúc qua đường salvage. Không biết được
+                // vad_speech_end có tới hay không vì hai sự kiện này chưa từng được ghi log, nên
+                // không phân biệt nổi "server không gửi" với "client nhận mà không xử lý".
+                //
+                // Ghi cả hai chiều để lần sau đối chiếu được với mốc turn_capture_began/completed.
                 case "vad_speech_start":
+                    LocalFileLogger.Info("realtime_ws", "vad_speech_start", null);
                     OnVadSpeechStart?.Invoke();
                     break;
                 case "vad_speech_end":
+                    LocalFileLogger.Info("realtime_ws", "vad_speech_end", null);
                     OnVadSpeechEnd?.Invoke();
                     break;
                 case "partial_transcript":

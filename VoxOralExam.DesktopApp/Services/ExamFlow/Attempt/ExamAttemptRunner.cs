@@ -164,6 +164,19 @@ internal sealed class ExamAttemptRunner
                 await questionRunner.RunAsync(prompt, runToken);
             }
 
+            // TẠM THỜI, THÊM 2026-08-26 ĐỂ CHẨN ĐOÁN -- xoá khi xong.
+            //
+            // Vòng lặp trên chạy hết là bài KẾT THÚC và được chấm, không có đường lùi. Nhưng nó
+            // chạy hết cả khi từng câu thoát sớm với 0 lượt (xem cau_hoi_bo_trang_avatar_khong_doc),
+            // và lúc đó không có gì phân biệt được "đã hỏi đủ" với "cháy hết câu".
+            //
+            // Đo thật ca 01a03d48: 4 câu, chỉ 3 lượt, hai câu Part 2 trắng hoàn toàn, bài vẫn
+            // chuyển GRADED. Ghi số lượt từng câu ngay tại đây để lần sau nhìn là biết.
+            LocalFileLogger.Info("exam_flow", "ket_thuc_vi_het_cau_hoi", new
+            {
+                questionIndex = _sessionState.QuestionIndex,
+                questionCount = _sessionState.Questions.Count
+            });
             StatusChanged?.Invoke("Đã hoàn thành bài vấn đáp.");
             await presentation.WaitForAvatarAfterAsync(
                 token => _sessionClient.SendExamEndAndWaitForAckAsync(token),
@@ -734,6 +747,10 @@ internal sealed class ExamAttemptRunner
         QuestionFlowRunner questionRunner)
     {
         speechTurns.StudentSpeakingChanged += HandleStudentSpeakingChanged;
+        // Cho tầng đọc biết thí sinh có đang nói không, để nó không chen lời -- xem
+        // QuestionPresentationService.HandleSpeakRequested. Nối ở đây vì đây là chỗ duy nhất giữ
+        // cả hai đối tượng; QuestionPresentationService không được tiêm SpeechTurnCoordinator.
+        speechTurns.StudentSpeakingChanged += presentation.SetStudentSpeaking;
         presentation.StatusChanged += HandleStatusChanged;
         presentation.AvatarSpeakingChanged += HandleAvatarSpeakingChanged;
         presentation.AvatarUtteranceStarted += HandleAvatarUtteranceStarted;
@@ -750,6 +767,7 @@ internal sealed class ExamAttemptRunner
         QuestionFlowRunner questionRunner)
     {
         speechTurns.StudentSpeakingChanged -= HandleStudentSpeakingChanged;
+        speechTurns.StudentSpeakingChanged -= presentation.SetStudentSpeaking;
         presentation.StatusChanged -= HandleStatusChanged;
         presentation.AvatarSpeakingChanged -= HandleAvatarSpeakingChanged;
         presentation.AvatarUtteranceStarted -= HandleAvatarUtteranceStarted;

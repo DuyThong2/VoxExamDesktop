@@ -138,6 +138,30 @@ internal sealed class QuestionFlowRunner
                 turnOrder = 1;
                 assessmentTurnCount = 0;
                 currentPrompt = prompt.QuestionText;
+
+                // Dời mốc nối lại sang câu MỚI ngay lúc này, trước khi AI kịp đọc đề.
+                //
+                // Trước bản này, SetResumeCheckpoint chỉ được gọi ở hai chỗ: nhánh vào-lại ngay
+                // trên, và sau khi một lượt nhận được quyết định (cuối vòng lặp bên dưới). Không
+                // chỗ nào gọi khi sang câu mới. Nên tồn tại một cửa sổ kéo dài từ lúc bắt đầu câu
+                // mới tới lúc trả lời xong lượt đầu tiên, mà trong suốt cửa sổ đó mốc vẫn trỏ CÂU
+                // TRƯỚC. Đứt mạng ở đấy thì bản tin `resume` khai sai câu, Python gắn phiên về câu
+                // cũ, và câu trả lời của câu mới bị lưu thành lượt follow-up của câu cũ -- hỏng cả
+                // hai câu, và hỏng im lặng.
+                //
+                // Đo thật 2026-08-26, ca 01a03cb8: bài tả bức ảnh (lượt ĐẦU của câu 2) nằm dưới
+                // cùng paper_item_id với câu giải trí, dạng FOLLOWUP lượt 2, còn câu 2 thì rỗng.
+                //
+                // Số 0 = "chưa lượt nào của câu này hoàn tất", đúng nghĩa mà LastCompletedTurn khai.
+                // Nó KHÔNG kéo lượt về 1: dòng ở cuối vòng lặp vẫn đẩy mốc lên sau mỗi lượt, và
+                // Python dựng số lượt từ trạng thái bền chứ không từ con số client gửi.
+                //
+                // Đặt TRƯỚC PresentInitialAsync chứ không sau, có đánh đổi: đặt sau thì cửa sổ hở
+                // kéo dài suốt lúc AI đọc đề, dài hơn hẳn. Đặt trước để lại một khe rất hẹp giữa
+                // lúc này và lúc `question_start` tới server -- trong khe đó Python chưa có ảnh
+                // chụp câu mới nên resume không dựng được phiên. Đổi một cửa sổ rộng lấy một khe hẹp.
+                _sessionClient.SetResumeCheckpoint(answerId, 0);
+
                 var initialPresentation = await _presentation.PresentInitialAsync(
                     question,
                     answerId,
@@ -159,6 +183,21 @@ internal sealed class QuestionFlowRunner
 
             if (!avatarSpoke)
             {
+                // TẠM THỜI, THÊM 2026-08-26 ĐỂ CHẨN ĐOÁN -- xoá khi xong.
+                //
+                // Đây là chỗ một câu hỏi CHẾT LẶNG: đóng cửa sổ trả lời xong thì vòng lặp ngay dưới
+                // thoát ở `if (!IsSpeechWindowOpen) break`, câu đó kết thúc với 0 lượt, và bài đi
+                // tiếp như thể đã hỏi xong. Trước bản này nó chỉ đổi một dòng chữ trên màn hình,
+                // không để lại vết nào trong log.
+                //
+                // Đo thật ca 01a03d48: hai câu Part 2 bị bỏ trắng đúng kiểu này, bài vẫn chuyển
+                // GRADED trên 3 lượt.
+                LocalFileLogger.Info("exam_flow", "cau_hoi_bo_trang_avatar_khong_doc", new
+                {
+                    questionNumber = prompt.QuestionNumber,
+                    answerId,
+                    isResumingFollowUp
+                });
                 _speechTurns.CloseSpeechWindow();
                 StatusChanged?.Invoke(
                     "AI chưa xác nhận đọc xong câu hỏi. Tạm thời chưa mở lượt trả lời.");
