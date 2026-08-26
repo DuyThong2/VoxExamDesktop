@@ -71,17 +71,45 @@ public class RealtimeAttemptProgressClient
     /// </summary>
     public async Task<int> GetPendingArchiveCountAsync(Guid examAttemptId, CancellationToken ct)
     {
+        var status = await GetArchiveStatusAsync(examAttemptId, null, null, ct);
+        return status.Pending;
+    }
+
+    /// <summary>
+    /// Như trên, nhưng hỏi thêm ĐÍCH DANH một lượt đã lưu tr��� xong chưa.
+    ///
+    /// <para>Vì sao cần hỏi đích danh: <c>pending</c> một mình không phân biệt được "đã lưu xong"
+    /// với "chưa kịp bắt đầu" -- cả hai đều bằng 0. Lượt CUỐI luôn rơi vào vế sau, vì gửi
+    /// <c>turn_end</c> xong là hỏi ngay, không có khoảng đệm như các câu giữa bài (ở đó còn cả
+    /// đoạn AI đọc câu kế tiếp). Client thấy 0, tưởng sạch, nộp bài -- Java chấm đồng bộ ngay tại
+    /// lần PATCH ấy, và câu cuối mất phần chấm phát âm vì <c>audio_url</c> còn rỗng.</para>
+    ///
+    /// <para><c>Archived</c> là <c>null</c> khi server không trả lời được hoặc là bản CŨ chưa hỗ
+    /// trợ -- người gọi phải hiểu đó là "không biết" và rơi về cách đếm cũ, tuyệt đối không coi là
+    /// "chưa lưu" rồi giữ thí sinh ở màn đang lưu.</para>
+    /// </summary>
+    public async Task<(int Pending, bool? Archived)> GetArchiveStatusAsync(
+        Guid examAttemptId,
+        Guid? answerId,
+        int? turnOrder,
+        CancellationToken ct)
+    {
         try
         {
             var client = _httpClientFactory.CreateClient();
             var url = $"{_settings.PythonBaseUrl.TrimEnd('/')}/realtime/attempts/{examAttemptId:D}/pending-archives";
+            if (answerId is Guid id && turnOrder is int order)
+            {
+                url += $"?answer_id={id:D}&turn_order={order}";
+            }
             var result = await client.GetFromJsonAsync<PendingArchivesResponse>(url, ct);
-            return result?.Pending ?? 0;
+            return (result?.Pending ?? 0, result?.Archived);
         }
         catch (Exception ex)
         {
             LocalFileLogger.Error("exam_flow", "get_pending_archives_failed", ex, new { examAttemptId });
-            return 0;
+            // 0 + "không biết": giữ đúng hành vi cũ là không chặn nộp bài khi không hỏi được.
+            return (0, null);
         }
     }
 
@@ -134,6 +162,10 @@ public class RealtimeAttemptProgressClient
     {
         [JsonPropertyName("pending")]
         public int Pending { get; set; }
+
+        /// <summary>Null = server không trả trường này (bản cũ, hoặc đọc lỗi) -- nghĩa là KHÔNG BIẾT.</summary>
+        [JsonPropertyName("archived")]
+        public bool? Archived { get; set; }
     }
 
     private sealed class ResumeStateResponse

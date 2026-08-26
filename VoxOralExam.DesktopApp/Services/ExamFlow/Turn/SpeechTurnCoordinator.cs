@@ -180,7 +180,11 @@ internal sealed class SpeechTurnCoordinator : IDisposable
 
         var elapsedAtStart = budget.ElapsedSeconds;
         var spoke = _recorder.IsTurnActive
-            || await WaitForSignalAsync(speechStartedTask, initialTimeout, cancellationToken);
+            || await WaitForSpeechStartAsync(
+                speechStartedTask,
+                initialTimeout,
+                overallTimeout,
+                cancellationToken);
         if (!spoke)
         {
             CloseSpeechWindow();
@@ -276,6 +280,86 @@ internal sealed class SpeechTurnCoordinator : IDisposable
         }
     }
 
+    /// <summary>
+    /// Chờ thí sinh cất tiếng, NGỪNG ĐẾM hạn im lặng trong lúc mất kết nối.
+    ///
+    /// <para>Vì sao: tín hiệu VAD do server bắn ra. Mất mạng thì không có tín hiệu nào tới, bất kể
+    /// thí sinh có đang nói hay không -- nên đếm ngược trong khoảng đó là kết luận "không trả lời"
+    /// từ một sự im lặng mà máy trạm không có cách nào quan sát được.</para>
+    ///
+    /// <para>Đo thật 2026-08-26, ca 01a03d85: đứt mạng lúc 17:04:39, thí sinh nói ngay sau đó,
+    /// 17:04:53 lượt đóng với <c>capturedBytes: 0, durationSeconds: 0</c> -- đúng 12 giây hạn im
+    /// lặng của lượt đầu, không một dòng <c>vad_speech_start</c> nào. Cả câu mất trắng.</para>
+    ///
+    /// <para>Cùng nguyên tắc với đồng hồ thi (<c>ExamViewModel</c> ngừng trừ giây khi
+    /// <c>IsRealtimeAlive</c> false), nhưng hậu quả nặng hơn nên đáng vá riêng: mất giờ thì còn thi
+    /// tiếp, mất lượt là mất câu.</para>
+    ///
+    /// <para>Hỏi CẢ <c>IsConnected</c> chứ không chỉ <c>IsServerAlive</c>: cái sau đo bằng "15 giây
+    /// không nghe thấy gì", chậm hơn cả hạn im lặng 12 giây -- riêng nó thì tới lúc biết là mất
+    /// mạng, lượt đã đóng xong rồi. <c>IsConnected</c> tắt ngay giây socket chết, còn luật im lặng
+    /// giữ lại để bắt kiểu đứt mà socket vẫn báo Open.</para>
+    ///
+    /// <para><paramref name="wallClockCeiling"/> là trần tuyệt đối: mất mạng vĩnh viễn thì không
+    /// được treo thí sinh vô hạn. Dùng chính hạn một lượt (<c>QuestionTurnTimeoutSeconds</c>), vì
+    /// một lượt vốn không được phép dài hơn thế.</para>
+    /// </summary>
+    private async Task<bool> WaitForSpeechStartAsync(
+        Task signal,
+        TimeSpan silenceBudget,
+        TimeSpan wallClockCeiling,
+        CancellationToken cancellationToken)
+    {
+        var tick = TimeSpan.FromMilliseconds(250);
+        var deadline = DateTime.UtcNow + wallClockCeiling;
+        var remaining = silenceBudget;
+        var paused = false;
+
+        while (remaining > TimeSpan.Zero)
+        {
+            if (DateTime.UtcNow >= deadline)
+            {
+                LocalFileLogger.Info("exam_flow", "han_im_lang_het_tran_cho", new
+                {
+                    wallClockCeilingSeconds = wallClockCeiling.TotalSeconds,
+                    remainingBudgetSeconds = Math.Round(remaining.TotalSeconds, 1)
+                });
+                return false;
+            }
+
+            var step = remaining < tick ? remaining : tick;
+            var completed = await Task.WhenAny(signal, Task.Delay(step, cancellationToken));
+            cancellationToken.ThrowIfCancellationRequested();
+            if (completed == signal)
+            {
+                return true;
+            }
+
+            if (_sessionClient.IsConnected && _sessionClient.IsServerAlive)
+            {
+                if (paused)
+                {
+                    paused = false;
+                    LocalFileLogger.Info("exam_flow", "han_im_lang_chay_tiep", new
+                    {
+                        remainingSeconds = Math.Round(remaining.TotalSeconds, 1)
+                    });
+                }
+                remaining -= step;
+            }
+            else if (!paused)
+            {
+                paused = true;
+                LocalFileLogger.Info("exam_flow", "han_im_lang_tam_dung_mat_ket_noi", new
+                {
+                    remainingSeconds = Math.Round(remaining.TotalSeconds, 1)
+                });
+            }
+        }
+
+        return false;
+    }
+
     private static async Task<bool> WaitForSignalAsync(
         Task signal,
         TimeSpan timeout,
@@ -294,11 +378,35 @@ internal sealed class SpeechTurnCoordinator : IDisposable
         {
             if (!_speechWindowOpen)
             {
+                // TẠM THỜI, THÊM 2026-08-26 ĐỂ CHẨN ĐOÁN -- xem chú thích ở HandleSpeechEnd.
+                LocalFileLogger.Info("exam_flow", "vad_start_ignored_window_closed", null);
                 return;
             }
 
             _isSpeaking = true;
-            _speechEnded = NewSignal();
+
+            // CHỈ thay tín hiệu kết thúc khi bản cũ ĐÃ được bắn.
+            //
+            // Trước bản này dòng dưới thay mới vô điều kiện, và nó bỏ rơi người đang chờ:
+            // WaitForSpeechEndWithGraceAsync CHỤP `_speechEnded.Task` rồi mới await. Thay đối
+            // tượng lúc nó đang đậu nghĩa là cái `end` sau đó bắn vào bản MỚI, còn người chờ vẫn
+            // ôm bản CŨ -- không bao giờ tỉnh, lượt chạy tới hết QuestionTurnTimeoutSeconds (180s).
+            //
+            // Bình thường không lộ ra vì VAD luôn xen kẽ start -> end -> start: sau mỗi `end`, vòng
+            // lặp quay lên đầu và đọc lại `_speechEnded`, nên luôn ôm bản mới nhất.
+            //
+            // NỐI LẠI GIỮA LÚC ĐANG NÓI thì phá đúng giả định đó: phiên Voice Live mới phát
+            // `vad_speech_start` từ đầu, trong khi client vẫn đang chờ `end` của đoạn nói TRƯỚC lúc
+            // đứt. Một `start` không có `end` đi trước là tình huống duy nhất gây lỗi này.
+            //
+            // Đo thật 2026-08-26, ca 01a03d3f: nối lại lúc 15:47:01, `vad_speech_start` 15:47:03,
+            // `vad_speech_end` 15:47:04 -- tín hiệu TỚI ĐỦ, không có dòng ignored nào, mà lượt vẫn
+            // chạy tiếp 57 giây tới lúc thí sinh bấm nộp.
+            if (_speechEnded.Task.IsCompleted)
+            {
+                _speechEnded = NewSignal();
+            }
+
             budget = _budget;
             _speechStarted.TrySetResult(true);
         }
@@ -318,6 +426,16 @@ internal sealed class SpeechTurnCoordinator : IDisposable
         {
             if (!_speechWindowOpen)
             {
+                // TẠM THỜI, THÊM 2026-08-26 ĐỂ CHẨN ĐOÁN -- xoá khi xong.
+                //
+                // Nhánh thoát im lặng này là ứng viên hàng đầu cho ca "nối lại xong thì đứng":
+                // vad_speech_end tới nhưng cửa sổ đã đóng nên bị bỏ, lượt không bao giờ kết thúc,
+                // chạy 96 giây tới lúc thí sinh bấm nộp. Ghi log để phân biệt với trường hợp
+                // vad_speech_end KHÔNG hề tới (xem log cùng tên ở RealtimeSessionClient).
+                LocalFileLogger.Info(
+                    "exam_flow",
+                    "vad_end_ignored_window_closed",
+                    new { isSpeaking = _isSpeaking });
                 return;
             }
 

@@ -82,6 +82,65 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
 
     private volatile bool _audioResyncInProgress;
 
+    /// <summary>
+    /// Coi là mất kết nối khi quá chừng này không nghe thấy gì từ server. Bằng ba nhịp tim
+    /// (HEARTBEAT_INTERVAL_SECONDS = 5 ở agents/src/realtime/attempt/connection.py) nên một gói
+    /// ping tới trễ không làm đồng hồ dừng oan.
+    /// </summary>
+    private static readonly TimeSpan ServerSilenceTimeout = TimeSpan.FromSeconds(15);
+
+    private long _lastServerMessageAtTicks;
+
+    /// <summary>
+    /// Server còn sống hay không, đo bằng "lần cuối nghe thấy gì đó từ server".
+    ///
+    /// <para>KHÔNG hỏi <c>WebSocketState</c>: trạng thái đó vẫn báo Open một lúc lâu sau khi mạng
+    /// đã chết. Cũng KHÔNG suy từ việc server im lặng đơn thuần -- giao thức này im lặng một cách
+    /// hợp lệ trong lúc thí sinh đang nghĩ, nên phía server có nhịp tim riêng để phân biệt hai kiểu
+    /// im lặng đó.</para>
+    ///
+    /// <para><c>ExamViewModel</c> đọc cờ này để NGỪNG TRỪ GIÂY khi mất kết nối. Ngừng trừ chứ không
+    /// hoàn lại sau: checkpoint phía server chỉ cho giảm, cộng ngược lên sẽ bị từ chối.</para>
+    /// </summary>
+    public bool IsServerAlive
+    {
+        get
+        {
+            // Chưa từng thấy nhịp tim nào thì KHÔNG áp luật im lặng.
+            //
+            // Bảo vệ trường hợp máy thi đã cập nhật mà backend thì chưa: server cũ chỉ nói khi có
+            // việc, nên 15 giây im lặng là chuyện bình thường -- áp luật ở đó sẽ đóng băng đồng hồ
+            // gần như vĩnh viễn, kể cả lúc thí sinh đang nói. Thấy được một nhịp tim mới chứng minh
+            // server bên kia là bản có hỗ trợ, từ đó mới bắt đầu tin vào sự im lặng.
+            if (!_serverHeartbeatSeen)
+            {
+                return true;
+            }
+
+            var ticks = Interlocked.Read(ref _lastServerMessageAtTicks);
+            if (ticks == 0)
+            {
+                return false;
+            }
+
+            return DateTime.UtcNow - new DateTime(ticks, DateTimeKind.Utc) < ServerSilenceTimeout;
+        }
+    }
+
+    private volatile bool _serverHeartbeatSeen;
+
+    /// <summary>Nguyên văn turn_end đang chờ hồi đáp, giữ để gửi lại sau khi nối lại.</summary>
+    private object? _pendingTurnEndPayload;
+
+    /// <summary>
+    /// Lượt mà resume_ack vừa báo là đã khôi phục được quyết định. Dùng để KHÔNG gửi lại turn_end
+    /// cho chính lượt đó.
+    /// </summary>
+    private int? _recoveredTurnOrder;
+
+    private void MarkServerAlive() =>
+        Interlocked.Exchange(ref _lastServerMessageAtTicks, DateTime.UtcNow.Ticks);
+
     private ClientWebSocket? _webSocket;
     private CancellationTokenSource? _receiveLoopCts;
     private Task? _receiveLoopTask;
@@ -131,6 +190,15 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         _resumeCheckpoint = (answerId, turnOrder);
     }
 
+    /// <summary>
+    /// Lượt gần nhất đã hoàn tất, hoặc null nếu chưa lượt nào xong.
+    ///
+    /// <para>Dùng chung đúng mốc mà reconnect vẫn dùng, thay vì dựng một biến đếm thứ hai: hai
+    /// nguồn sự thật cho cùng một con số là hai nguồn để lệch nhau. ExamAttemptRunner đọc nó để
+    /// hỏi Python xem ĐÚNG lượt cuối đã lưu trữ xong chưa trước khi nộp bài.</para>
+    /// </summary>
+    public (Guid AnswerId, int TurnOrder)? LastCompletedTurn => _resumeCheckpoint;
+
     public async Task ConnectAsync(Guid examAttemptId, CancellationToken ct)
     {
         _examAttemptId = examAttemptId;
@@ -147,7 +215,13 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         _webSocket = new ClientWebSocket();
         // Xem chú thích ở _cookies: không có dòng này thì sticky của ALB vô hiệu với máy thi.
         _webSocket.Options.Cookies = _cookies;
+        // Rút dây mạng KHÔNG làm ReceiveAsync lỗi ngay: TCP giữ socket "mở" cho tới khi hết thời
+        // gian truyền lại, có thể hàng phút, và suốt lúc đó vòng nối lại không hề khởi động. Đặt
+        // hai mốc này để socket tự hỏng sau ~13 giây im lặng, tức nối lại bắt đầu sớm hơn nhiều.
+        _webSocket.Options.KeepAliveInterval = TimeSpan.FromSeconds(8);
+        _webSocket.Options.KeepAliveTimeout = TimeSpan.FromSeconds(5);
         await _webSocket.ConnectAsync(uri, ct);
+        MarkServerAlive();
         LocalFileLogger.Info("realtime_ws", "connected", new { examAttemptId, uri = uri.ToString() });
 
         _receiveLoopCts = new CancellationTokenSource();
@@ -222,6 +296,57 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Gửi lại <c>turn_end</c> CHỈ KHI chắc chắn server chưa từng nhận được nó.
+    ///
+    /// <para>Vì sao cần: <c>ResumeAfterReconnectAsync</c> gửi lại <c>exam_end</c> nhưng cố ý không
+    /// gửi lại <c>turn_end</c>, vì <c>turn_end</c> mang nội dung -- gửi lại một lượt server ĐÃ xử lý
+    /// sẽ chốt và archive lượt đó lần thứ hai, lần này với đệm audio đã bị xả rỗng. Đường cứu sẵn có
+    /// (<c>recovered_turn_order</c> trong <c>resume_ack</c>) chỉ phủ trường hợp "turn_end tới nơi
+    /// rồi, chỉ mất gói trả lời". Trường hợp "turn_end chưa từng tới" thì không ai phủ, và kết cục
+    /// là chờ hết <c>QuestionTurnTimeoutSeconds</c> rồi mất trắng lượt đó.</para>
+    ///
+    /// <para>Phân biệt được hai trường hợp là nhờ trạng thái BỀN phía Python:
+    /// <c>persist_realtime_transcript</c> được await NGAY tại <c>turn_end</c>, trước lời gọi LLM
+    /// chậm -- đúng để việc khôi phục sau nối lại luôn nhìn thấy một <c>turn_end</c> đã tới server.
+    /// Nên hai điều kiện dưới đây không phải phỏng đoán, chúng đọc đúng dấu vết đó.</para>
+    ///
+    /// <para>Cả hai đều lấy từ lưu trữ bền chứ không phải RAM, nên vẫn đúng dù
+    /// <c>AttemptConnection</c> được dựng mới ở mỗi lần accept WebSocket.</para>
+    /// </summary>
+    private async Task ResendTurnEndIfServerNeverGotItAsync(int lastArchivedTurnOrder)
+    {
+        var payload = _pendingTurnEndPayload;
+        var pendingTurnOrder = _pendingDecisionTurnOrder;
+        var pending = _pendingDecisionTcs;
+
+        if (payload is null || pendingTurnOrder is not int turnOrder
+            || pending is null || pending.Task.IsCompleted)
+        {
+            return;
+        }
+
+        // Server đã xử lý lượt này -- quyết định vừa được khôi phục qua resume_ack.
+        if (_recoveredTurnOrder == turnOrder)
+        {
+            return;
+        }
+
+        // Server đã lưu xong lượt này (và có thể cả những lượt sau).
+        if (lastArchivedTurnOrder >= turnOrder)
+        {
+            return;
+        }
+
+        LocalFileLogger.Info("realtime_ws", "resending_turn_end_after_reconnect", new
+        {
+            _examAttemptId,
+            turnOrder,
+            lastArchivedTurnOrder
+        });
+        await SendJsonAsync(payload, CancellationToken.None);
+    }
+
     private async Task ResumeAfterReconnectAsync()
     {
         var checkpoint = _resumeCheckpoint;
@@ -244,6 +369,10 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         }
 
         await ResyncTurnAudioAsync();
+
+        // SAU ResyncTurnAudioAsync, không được trước: _handle_turn_end bên Python chốt và XẢ đệm
+        // audio ngay đầu hàm, nên gửi lệnh trước khi tiếng lên tới nơi là chốt một lượt rỗng.
+        await ResendTurnEndIfServerNeverGotItAsync(lastArchivedTurnOrder);
 
         LocalFileLogger.Info("realtime_ws", "reconnected", new { _examAttemptId, lastArchivedTurnOrder });
         OnReconnected?.Invoke(lastArchivedTurnOrder);
@@ -530,10 +659,14 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         var tcs = new TaskCompletionSource<RealtimeDecision>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingDecisionTcs = tcs;
         _pendingDecisionTurnOrder = turnOrder;
+        // Dọn dấu vết của lượt trước: nó chỉ có nghĩa cho đúng lượt đã sinh ra nó. Giữ lại thì
+        // điều kiện "đã khôi phục rồi" ở ResendTurnEndIfServerNeverGotItAsync phải dựa vào việc so
+        // sánh may mắn không trùng số, thay vì dựa vào một bất biến rõ ràng.
+        _recoveredTurnOrder = null;
 
         // Python applies the limit after it knows whether this decision is a clarification.
         // That prevents a clarification at the boundary from consuming an assessment turn.
-        await SendJsonAsync(new
+        var payload = new
         {
             type = "turn_end",
             is_last_allowed_turn = speechBudgetExceeded,
@@ -541,7 +674,42 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
             duration_seconds = durationSeconds,
             assessment_turn_count = assessmentTurnCount,
             max_assessment_turns = maxAssessmentTurns
-        }, ct);
+        };
+        // Giữ lại nguyên văn để gửi lại được sau khi nối lại -- xem ResendTurnEndIfServerNeverGotItAsync.
+        // Dựng lại từ trí nhớ ở chỗ khác là mở đường cho hai lần gửi mang tham số khác nhau.
+        _pendingTurnEndPayload = payload;
+
+        // Gửi HỎNG không có nghĩa là lượt hỏng -- vào chờ như thường.
+        //
+        // Toàn bộ bộ máy cứu lượt sau khi nối lại đã nằm sẵn ngay trên: payload vừa được cất, TCS
+        // vừa được gán, và ResendTurnEndIfServerNeverGotItAsync sẽ gửi lại đúng nó ngay khi
+        // ResumeAfterReconnectAsync chạy xong phần chép ngược audio. Nhưng cả bộ máy đó chỉ với tới
+        // được nếu luồng này đi tiếp xuống `await tcs.Task`. Ngoại lệ ở dòng gửi làm nó nhảy qua
+        // hết, và đường cứu chưa bao giờ có cơ hội chạy.
+        //
+        // Hậu quả không phải là mất một lượt, mà là mất CẢ CÂU: ngoại lệ bay lên
+        // QuestionFlowRunner, bị bắt bởi nhánh dựng quyết định thay thế "connection_lost_timeout"
+        // với ShouldContinue=false, và câu hỏi bị đánh dấu đã xong với 0 lượt. Bài đi tiếp câu sau.
+        //
+        // Đo thật 2026-08-26, ca 01a03d85: đứt mạng lúc đọc lời dẫn chuẩn bị của câu 2. 17:04:53
+        // ObjectDisposedException tại đúng dòng này -> câu 2 chết ngay giây đó; 16 giây sau máy đã
+        // sang câu 3; tới lúc nối lại được (17:05:09) thì không còn gì để cứu. DB: câu 2, 3, 4 đều
+        // no_recording. Nếu luồng vào được chỗ chờ thì nối lại ở giây thứ 30 vẫn còn thừa thời gian
+        // -- trần chờ dưới đây là 180 giây.
+        //
+        // KHÔNG nuốt OperationCanceledException: nộp bài/dừng bài đi qua đường đó và phải thoát ngay.
+        try
+        {
+            await SendJsonAsync(payload, ct);
+        }
+        catch (Exception ex) when (IsTransportDown(ex))
+        {
+            LocalFileLogger.Error(
+                "realtime_ws",
+                "turn_end_gui_that_bai_van_cho_noi_lai",
+                ex,
+                new { turnOrder });
+        }
 
         using var registration = ct.Register(() => tcs.TrySetCanceled());
 
@@ -564,6 +732,7 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         finally
         {
             _pendingDecisionTurnOrder = null;
+            _pendingTurnEndPayload = null;
         }
     }
 
@@ -612,6 +781,19 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// Lỗi "đường truyền đã chết", phân biệt với lỗi giao thức hay lỗi lập trình.
+    ///
+    /// <para><c>ObjectDisposedException</c> kế thừa <c>InvalidOperationException</c> nên đã nằm
+    /// trong nhánh đầu -- liệt kê riêng chỉ để người đọc sau không tưởng là thiếu. Đó cũng là dạng
+    /// hay gặp nhất: vòng nối lại đã <c>Dispose</c> socket cũ trước khi luồng gửi kịp chạm vào nó.</para>
+    /// </summary>
+    private static bool IsTransportDown(Exception ex) =>
+        ex is InvalidOperationException
+            or ObjectDisposedException
+            or WebSocketException
+            or System.IO.IOException;
+
     private async Task SendJsonAsync(object payload, CancellationToken ct)
     {
         var socket = _webSocket ?? throw new InvalidOperationException("RealtimeSessionClient is not connected.");
@@ -655,6 +837,7 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                     break;
                 }
 
+                MarkServerAlive();
                 var json = Encoding.UTF8.GetString(messageStream.ToArray());
                 HandleMessage(json);
             }
@@ -694,10 +877,21 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                     var decision = ParseDecision(doc.RootElement.GetProperty("decision"));
                     _pendingDecisionTcs?.TrySetResult(decision);
                     break;
+                // TẠM THỜI, THÊM 2026-08-26 ĐỂ CHẨN ĐOÁN -- xoá khi xong.
+                //
+                // Lượt nói chỉ kết thúc khi vad_speech_end tới đây. Đo thật cùng ngày: sau khi nối
+                // lại giữa lúc thí sinh đang nói, cửa sổ thu tiếng KHÔNG BAO GIỜ tự đóng -- chạy
+                // 96 giây tới lúc thí sinh bấm nộp mới kết thúc qua đường salvage. Không biết được
+                // vad_speech_end có tới hay không vì hai sự kiện này chưa từng được ghi log, nên
+                // không phân biệt nổi "server không gửi" với "client nhận mà không xử lý".
+                //
+                // Ghi cả hai chiều để lần sau đối chiếu được với mốc turn_capture_began/completed.
                 case "vad_speech_start":
+                    LocalFileLogger.Info("realtime_ws", "vad_speech_start", null);
                     OnVadSpeechStart?.Invoke();
                     break;
                 case "vad_speech_end":
+                    LocalFileLogger.Info("realtime_ws", "vad_speech_end", null);
                     OnVadSpeechEnd?.Invoke();
                     break;
                 case "partial_transcript":
@@ -729,6 +923,13 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                     // recovered_turn_order/decision being present and matching what we're still
                     // waiting on means exactly that. Resolve the pending TCS directly instead of
                     // leaving it to sit until SendTurnEndAndWaitAsync's own timeout gives up.
+                    if (doc.RootElement.TryGetProperty("recovered_turn_order", out var rtoSeen))
+                    {
+                        // Ghi nhận DÙ có khớp lượt đang chờ hay không: đây là bằng chứng server đã
+                        // xử lý lượt đó, tức tuyệt đối không được gửi lại turn_end cho nó.
+                        _recoveredTurnOrder = rtoSeen.GetInt32();
+                    }
+
                     if (doc.RootElement.TryGetProperty("recovered_turn_order", out var rto)
                         && doc.RootElement.TryGetProperty("decision", out var recoveredDecisionElement)
                         && _pendingDecisionTcs is not null
@@ -760,6 +961,15 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                 case "exam_end_ack":
                     LocalFileLogger.Info("realtime_ws", "ack_received", new { type, json });
                     _pendingExamEndAckTcs?.TrySetResult(true);
+                    break;
+                case "ping":
+                    // Nhịp tim từ server, 5 giây một lần. KHÔNG ghi log: giá trị của nó đã được
+                    // MarkServerAlive() ở vòng nhận thu nhận trước khi vào đây, còn ghi lại thì
+                    // một bài thi 25 phút sinh ra 300 dòng rác trong đúng cái log dùng để chẩn
+                    // đoán sự cố.
+                    //
+                    // Nhịp đầu tiên bật luật im lặng lên -- xem IsServerAlive.
+                    _serverHeartbeatSeen = true;
                     break;
                 default:
                     LocalFileLogger.Info("realtime_ws", "unhandled_message_type", new { type, json });

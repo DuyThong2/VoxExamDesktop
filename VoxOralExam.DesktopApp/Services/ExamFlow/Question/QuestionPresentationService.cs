@@ -81,6 +81,7 @@ internal sealed class QuestionPresentationService : IDisposable
         _lastAnnouncedSectionId = null;
         _sessionClient.OnSpeakRequested += HandleSpeakRequested;
         _sessionClient.OnAvatarUtteranceComplete += HandleAvatarCompletion;
+        _assets.MediaPlaybackStateChanged += HandleAssetMediaPlaybackChanged;
     }
 
     public async Task<(bool AvatarSpoke, bool Interrupted)> PresentInitialAsync(
@@ -153,7 +154,36 @@ internal sealed class QuestionPresentationService : IDisposable
 
         if (asset is not null && assetPlaysOverTime)
         {
-            await _assets.PresentAsync(asset, cancellationToken);
+            // TẠM THỜI, THÊM 2026-08-26 ĐỂ CHẨN ĐOÁN -- xoá khi xong.
+            //
+            // Nghi vấn số một cho ca "mất nửa bài thi": đo thật ca 01a03d48, hai câu Part 2 (một
+            // clip, một bản ghi âm) đều bị tạo response rồi bỏ TRẮNG 0 lượt, trong khi câu Part 1
+            // và câu ảnh -- không có media phát theo thời gian -- đều bình thường. Bài vẫn được
+            // chấm trên 3 lượt và chuyển GRADED.
+            //
+            // Log ba mốc: vào, ra, và ngoại lệ. Nếu "ket_thuc" không bao giờ xuất hiện thì lỗi nằm
+            // trong PresentAsync; nếu xuất hiện mà câu hỏi thật vẫn không được gửi thì lỗi nằm ở
+            // đoạn sau.
+            LocalFileLogger.Info("exam_flow", "asset_present_bat_dau", new
+            {
+                assetType = asset.Type.ToString()
+            });
+            try
+            {
+                await _assets.PresentAsync(asset, cancellationToken);
+                LocalFileLogger.Info("exam_flow", "asset_present_ket_thuc", new
+                {
+                    assetType = asset.Type.ToString()
+                });
+            }
+            catch (Exception ex)
+            {
+                LocalFileLogger.Error("exam_flow", "asset_present_loi", ex, new
+                {
+                    assetType = asset.Type.ToString()
+                });
+                throw;
+            }
         }
 
         openSpeechWindow();
@@ -272,15 +302,58 @@ internal sealed class QuestionPresentationService : IDisposable
 
     public void Clear() => _assets.Clear();
 
+    /// <summary>
+    /// Gửi bản tin lúc WebSocket đã chết KHÔNG được phép làm sập ứng dụng.
+    ///
+    /// <para>Đo thật 2026-08-26, ca 01a03d5f: mạng đứt đúng lúc luồng câu hỏi đang gửi lời dẫn
+    /// chuẩn bị. <c>SendJsonAsync</c> ném <c>InvalidOperationException("The WebSocket is not
+    /// connected.")</c>, ngoại lệ đó làm hỏng task chạy bài, và tới khi cửa sổ đóng thì
+    /// <c>StopAsync</c> await lại task hỏng đó -- ngoại lệ nổi lên dispatcher, không ai bắt,
+    /// <c>appdomain_unhandled_exception {IsTerminating: true}</c>, tiến trình chết. Từ phía thí
+    /// sinh là "tự thoát phần mềm".</para>
+    ///
+    /// <para>Vì sao lúc có lúc không: chỉ sập khi đứt mạng rơi ĐÚNG vào khoảnh khắc gửi. Đứt lúc
+    /// đang thu tiếng hoặc đang chờ thì không chạm tới đường này. Là một cuộc đua, nên ngẫu nhiên.</para>
+    ///
+    /// <para>Nuốt lỗi ở đây là đúng chỗ, không phải giấu lỗi: mọi đường gửi khác trong app đều đã
+    /// làm vậy (<c>send_audio_frame_failed</c>, <c>speech_budget_progress_failed</c>,
+    /// <c>force_end_poll_failed</c>) vì tầng dưới đã có tự nối lại. Riêng đường này bị bỏ sót.
+    /// Trả về <c>false</c> = "avatar chưa đọc xong", đúng nghĩa và luồng đã biết xử lý.</para>
+    /// </summary>
+    private static bool IsTransportDown(Exception ex) =>
+        ex is InvalidOperationException
+            or System.Net.WebSockets.WebSocketException
+            or System.IO.IOException;
+
     private async Task<bool> WaitForAvatarAfterCoreAsync(
         Func<CancellationToken, Task> action,
         CancellationToken cancellationToken)
     {
         var completion = WaitForAvatarCompletionAsync(cancellationToken);
-        await action(cancellationToken);
+        try
+        {
+            await action(cancellationToken);
+        }
+        catch (Exception ex) when (IsTransportDown(ex))
+        {
+            LocalFileLogger.Error("exam_flow", "gui_ban_tin_that_bai_mat_ket_noi", ex, null);
+            _avatarCompletion?.TrySetResult(false);
+            return false;
+        }
         return await completion;
     }
 
+    // CỐ Ý KHÔNG bắt lỗi truyền tải ở bản generic này -- khác hẳn bản không generic ngay trên.
+    //
+    // Bản này trả về một GIÁ TRỊ mà bên gọi dùng ngay (RealtimeDecision). Nuốt lỗi rồi trả
+    // `default` nghĩa là trả null, và QuestionFlowRunner dòng 382 đọc `decision.NextPromptText`
+    // ngay sau đó -> NullReferenceException, task chạy bài hỏng, app chết. Đã xảy ra thật
+    // 2026-08-26 ca 01a03d6d: tôi thêm catch ở đây và đổi một lỗi mạng thành một lỗi null.
+    //
+    // Bên gọi ĐÃ tự lo: `catch (Exception ex) when (ex is not OperationCanceledException)` bọc
+    // đúng lời gọi này và dựng sẵn một RealtimeDecision thay thế với reason
+    // "connection_lost_timeout". Chú thích ở đó ghi rõ nó được nới rộng chính vì
+    // InvalidOperationException/WebSocketException lúc socket đóng. Để ngoại lệ bay lên là đúng.
     private async Task<(T Result, bool AvatarSpoke)> WaitForAvatarAfterCoreAsync<T>(
         Func<CancellationToken, Task<T>> action,
         CancellationToken cancellationToken)
@@ -314,8 +387,85 @@ internal sealed class QuestionPresentationService : IDisposable
         }
     }
 
+    /// <summary>
+    /// Tài nguyên (audio/video) của câu hỏi có đang phát không. Cập nhật từ
+    /// <see cref="QuestionAssetPresentationCoordinator.MediaPlaybackStateChanged"/>.
+    /// </summary>
+    private volatile bool _assetMediaPlaying;
+
+    /// <summary>
+    /// Thí sinh có đang nói không. Do <see cref="Attempt.ExamAttemptRunner"/> nối từ
+    /// <c>SpeechTurnCoordinator.StudentSpeakingChanged</c> -- lớp này không được tiêm coordinator đó.
+    /// </summary>
+    private volatile bool _studentSpeaking;
+
+    private void HandleAssetMediaPlaybackChanged(bool isPlaying) => _assetMediaPlaying = isPlaying;
+
+    public void SetStudentSpeaking(bool isSpeaking) => _studentSpeaking = isSpeaking;
+
     private void HandleSpeakRequested(int sequence, string text, string? rate)
     {
+        // KHÔNG đọc đè lên audio/video của đề đang phát.
+        //
+        // Luồng thường không bao giờ rơi vào đây: PresentInitialAsync `await _assets.PresentAsync`
+        // cho media chạy hết rồi mới gửi đề đi đọc (đo thật 2026-08-26: câu có clip im 55 giây
+        // giữa "You will see the clip once only" và câu hỏi). Nguồn duy nhất bắn `speak` ngoài
+        // chuỗi await đó là `_handle_resume` phía Python -- nó tự phát lời nhắc khi client nối lại,
+        // và nó KHÔNG biết máy đang phát media.
+        //
+        // Vì sao không chỉ là khó chịu: lúc media chạy thì mic vẫn bật, mà mic không khử vọng --
+        // tiếng loa đi thẳng vào transcript. Câu hỏi do CHÍNH AI đọc bị ghi như lời thí sinh nói,
+        // rồi đem đi chấm. Hỏng điểm, không phải hỏng trải nghiệm.
+        //
+        // BỎ HẲN chứ không để dành đọc sau: luồng đang `await` media sẽ tự đọc đề ngay khi media
+        // xong. Giữ lại rồi phát tiếp là thí sinh nghe đề HAI lần -- đổi một lỗi lấy một lỗi khác.
+        //
+        // Ghi log kèm nguyên văn: nếu sau này có ca thí sinh không nghe thấy đề, đây là chỗ đầu
+        // tiên phải soi -- nghĩa là có một đường nào đó mà `speak` này là nguồn đọc DUY NHẤT, điều
+        // tôi chưa dò hết được.
+        if (_assetMediaPlaying && !string.IsNullOrWhiteSpace(text))
+        {
+            LocalFileLogger.Info(
+                "exam_flow",
+                "speak_skipped_media_playing",
+                new { sequence, text });
+            // PHẢI báo hoàn tất dù không phát.
+            //
+            // HandleAvatarCompletion nằm trong `finally` của PlayRequestedSpeechAsync, nên bỏ qua
+            // hàm đó là không ai bắn `_avatarCompletion`. Mọi chỗ đang await WaitForAvatarAfterAsync
+            // sẽ treo tới hết AvatarSpeechMaxWaitSeconds (25s) rồi trả về "avatar chưa đọc xong",
+            // và luồng câu hỏi coi đó là lý do đóng cửa sổ trả lời.
+            //
+            // Đo thật 2026-08-26: bỏ qua seq 5 xong, log KHÔNG có avatar_utterance_complete_signal
+            // cho seq 5 trong khi seq 6-10 đều có. Bỏ qua tiếng thì được, bỏ qua tín hiệu thì không.
+            HandleAvatarCompletion(sequence, text);
+            return;
+        }
+
+        // Không chen lời khi thí sinh ĐANG NÓI.
+        //
+        // Cùng một nguồn với nhánh trên, khác thời điểm: mạng đứt lâu rồi nối lại đúng lúc thí sinh
+        // đang trả lời dở. Bản tin `speak` của `_handle_resume` ập vào giữa câu nói, AI đọc chen
+        // ngang và thí sinh mất nhịp.
+        //
+        // Bỏ chứ không hoãn, cùng lý do: đây là lời nhắc PHÁT LẠI, không mang thông tin mới. Thí
+        // sinh nói xong thì `turn_end` chạy và follow-up thật sẽ tới theo đường bình thường.
+        //
+        // Nhất quán với thiết kế sẵn có: WasInterruptedAsync đã coi "thí sinh cất tiếng" là lý do
+        // để DỪNG avatar đang đọc. Ở đây chỉ là mặt còn lại của cùng nguyên tắc -- đang nói thì
+        // không bắt đầu đọc.
+        if (_studentSpeaking && !string.IsNullOrWhiteSpace(text))
+        {
+            LocalFileLogger.Info(
+                "exam_flow",
+                "speak_skipped_student_speaking",
+                new { sequence, text });
+            // Xem chú thích ở nhánh media ngay trên: bỏ tiếng thì được, bỏ tín hiệu hoàn tất thì
+            // treo cả luồng câu hỏi.
+            HandleAvatarCompletion(sequence, text);
+            return;
+        }
+
         _ = PlayRequestedSpeechAsync(sequence, text, rate);
     }
 
@@ -431,6 +581,9 @@ internal sealed class QuestionPresentationService : IDisposable
         _started = false;
         _sessionClient.OnSpeakRequested -= HandleSpeakRequested;
         _sessionClient.OnAvatarUtteranceComplete -= HandleAvatarCompletion;
+        _assets.MediaPlaybackStateChanged -= HandleAssetMediaPlaybackChanged;
+        _assetMediaPlaying = false;
+        _studentSpeaking = false;
         _avatarCompletion?.TrySetResult(false);
         _avatarCompletion = null;
         _assets.Clear();

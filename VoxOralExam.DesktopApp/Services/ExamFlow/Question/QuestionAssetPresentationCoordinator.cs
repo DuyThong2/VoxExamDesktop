@@ -54,16 +54,25 @@ public sealed class QuestionAssetPresentationCoordinator
 
     public async Task PresentAsync(QuestionAsset asset, CancellationToken ct)
     {
-        OnAssetDisplayRequested?.Invoke(asset, true);
-
+        // Ảnh và đoạn văn không có gì để chờ: hiện ra rồi trả về ngay.
         if (asset.Type == QuestionAssetType.Image || asset.Type == QuestionAssetType.TextPassage)
         {
+            OnAssetDisplayRequested?.Invoke(asset, true);
             return;
         }
 
+        // Chỗ chờ phải dựng TRƯỚC khi yêu cầu phát, không được sau.
+        //
+        // OnAssetDisplayRequested đi tới ExamViewModel.HandleAssetDisplayRequested, nơi dùng
+        // Dispatcher.Invoke -- ĐỒNG BỘ. Nên khi lời gọi đó trả về thì việc phát đã bắt đầu (và với
+        // tệp hỏng thì đã kết thúc). Dựng chỗ chờ sau đó nghĩa là CompleteMediaPlayback của lần
+        // hỏng ấy bắn vào một tcs chưa tồn tại, rơi vào hư không -- rồi hàm này chờ tiếp cho tới
+        // hết trần an toàn 300 giây. Một tệp audio không mở được sẽ làm bài thi đứng 5 phút.
         var tcs = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingMediaCompletionTcs = tcs;
         MediaPlaybackStateChanged?.Invoke(true);
+
+        OnAssetDisplayRequested?.Invoke(asset, true);
 
         try
         {
