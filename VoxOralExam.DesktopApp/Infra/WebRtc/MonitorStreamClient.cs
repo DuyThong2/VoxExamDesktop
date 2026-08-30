@@ -24,6 +24,42 @@ namespace VoxOralExam.DesktopApp.Infra.WebRtc;
 /// of HTTP POST + SSE, H.264 (via MediaFoundationH264Encoder) instead of VP8 (server only accepts
 /// H.264/Opus -- see vox-streaming/internal/transport/webrtc/api.go's registerCodecs), and an
 /// added Opus audio track.
+///
+/// <para>RECONNECT. The connection used to be one-shot: onconnectionstatechange raised an event
+/// nobody subscribed to, and ReceiveLoopAsync returned for good on the first error. A single blip
+/// on the exam machine's network therefore ended the proctor's live view of that student for the
+/// rest of the exam -- silently, while local recording carried on perfectly. This class now
+/// supervises its own transport and rebuilds it (see RunSupervisorAsync).</para>
+///
+/// <para>Recovery is TWO-TIER, and the order matters for what the proctor is told, not just for
+/// how fast the picture comes back.</para>
+///
+/// <para>First tier -- ICE restart on the existing peer, over the existing signaling socket (see
+/// TryIceRestartAsync). vox-streaming needs no change to accept it: runSignaling loops on every
+/// "offer" it receives and HandleOffer is a plain SetRemoteDescription/CreateAnswer, which pion
+/// treats as an ICE restart once the credentials differ. The peer survives, so the stream id, the
+/// recording and the HLS playlist all survive with it -- and, critically, peer.go's
+/// PeerConnectionStateConnected branch cancels its disconnect timer and publishes
+/// ParticipantReconnected. That is the signal the monitor UI already understands: it clears the
+/// StreamView.disconnectedAt that ParticipantDisconnected set moments earlier, and the tile goes
+/// back to live. This is the path a brief blip should take, and it costs the proctor one short
+/// "mất kết nối" and nothing else.</para>
+///
+/// <para>Second tier -- a full rebuild, used only when the signaling socket itself is gone, which
+/// is what a real outage does. ServeStream calls NewPeer on every WebSocket upgrade and NewPeer
+/// mints a fresh uuid, so this necessarily produces a NEW stream id; sessions.Replace then closes
+/// the peer the old connection owned, so there is never double ingest. The monitor UI copes --
+/// useMonitoringBoard's pickCurrentStreams keeps one live stream per type per candidate and lets
+/// it outrank the ended one, so the proctor keeps a single tile, while allStreams retains the old
+/// id so an alert raised before the drop still resolves to its own recording.</para>
+///
+/// <para>But note what the second tier COSTS in meaning: on the wire it is
+/// disconnected -> left -> joined(new id), which is indistinguishable from the student closing the
+/// app and re-entering. Today a new stream id for a participant already on the grid can only mean
+/// a genuine re-entry, and that is worth something to a proctor. Keeping tier one in front is what
+/// stops an ordinary network blip from spending that signal; a rebuild should be the rare case,
+/// and if the two ever need telling apart the honest fix is a continuity id on the connection
+/// rather than more inference at the far end.</para>
 /// </summary>
 public sealed class MonitorStreamClient : IAsyncDisposable
 {
@@ -41,6 +77,59 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
+    /// <summary>
+    /// Same shape as RealtimeSessionClient's, deliberately: the exam machine's network is the same
+    /// network, and having the two transports back off on different schedules would only make a
+    /// shared outage harder to read in the logs.
+    /// </summary>
+    private static readonly TimeSpan[] ReconnectBackoff =
+    [
+        TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4),
+        TimeSpan.FromSeconds(8), TimeSpan.FromSeconds(15)
+    ];
+
+    /// <summary>
+    /// Steady interval once the fast attempts above are spent. Longer than
+    /// RealtimeSessionClient's 20s because each attempt here that gets as far as a WebSocket
+    /// upgrade mints a stream id, a recording and a pending-assembly entry server-side, whereas
+    /// there a failed attempt costs nothing.
+    /// </summary>
+    private static readonly TimeSpan LongOutageRetryInterval = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// How long a session has to have been connected before its death is treated as a fresh
+    /// outage rather than a continuing one.
+    ///
+    /// <para>Without this the attempt counter resets on every reconnect, so a link that connects
+    /// and fails ICE a few seconds later settles into a ~4 second loop -- and because every
+    /// successful upgrade mints a stream, that loop fills the proctor's room and the assembly
+    /// queue with dozens of two-second recordings. Carrying the counter across unstable sessions
+    /// makes a flapping link decay to one attempt per LongOutageRetryInterval instead.</para>
+    /// </summary>
+    private static readonly TimeSpan StableConnectionThreshold = TimeSpan.FromSeconds(60);
+
+    /// <summary>
+    /// How long to let an issued ICE restart prove itself before falling back to a full rebuild.
+    ///
+    /// <para>Sized for the work it is waiting on: re-gathering host candidates is immediate, a STUN
+    /// reflexive candidate is well under a second, and a TURN allocation plus connectivity checks
+    /// is the slow end at a few seconds. Generous rather than tight, because what is at stake is
+    /// the difference between keeping this stream and minting a new one.</para>
+    /// </summary>
+    private static readonly TimeSpan IceRestartGrace = TimeSpan.FromSeconds(12);
+
+    /// <summary>
+    /// Grace given to a <c>disconnected</c> session that could NOT be offered an ICE restart,
+    /// because its signaling socket had already gone.
+    ///
+    /// <para>Short on purpose: with no signaling there is nothing left that could repair this
+    /// session, so the only thing the wait buys is the small chance that ICE heals on its own
+    /// before the rebuild starts. Waiting for <c>failed</c> instead would mean roughly thirty
+    /// seconds of black video -- that is when ICE consent expires -- for a session already known
+    /// to be beyond repair.</para>
+    /// </summary>
+    private static readonly TimeSpan DisconnectGrace = TimeSpan.FromSeconds(5);
+
     private readonly string _wsUrl;
     private readonly string _origin;
     private readonly int _videoFps;
@@ -49,7 +138,7 @@ public sealed class MonitorStreamClient : IAsyncDisposable
     private readonly string _turnUrl;
     private readonly string _turnUsername;
     private readonly string _turnCredential;
-    private readonly SemaphoreSlim _sendGate = new(1, 1);
+    private readonly RecordingStreamType _streamType;
 
     // Only used to seed the very first frame's RTP duration, before any real inter-frame gap is
     // known -- every subsequent frame's duration comes from PushVideoFrame's own captureTimestamp
@@ -57,33 +146,50 @@ public sealed class MonitorStreamClient : IAsyncDisposable
     // one nominal frame interval, which is harmless; it does not accumulate.
     private readonly uint _firstFrameVideoDuration;
 
-    private ClientWebSocket? _ws;
-    private RTCPeerConnection? _pc;
-    private MediaFoundationH264Encoder? _videoEncoder;
-    private OpusAudioEncoder? _audioEncoder;
-    private CancellationTokenSource? _cts;
-    private Task? _receiveLoopTask;
+    /// <summary>
+    /// Cancelled once for the life of the client, by DisposeAsync. Every session's own token is
+    /// linked to it, so disposal stops the supervisor, the in-flight reconnect delay and whichever
+    /// session is current, in one move.
+    /// </summary>
+    private readonly CancellationTokenSource _lifetimeCts = new();
 
-    // Capture callbacks can arrive from more than one thread for the same stream (e.g.
-    // ScreenCaptureSource's Windows Graphics Capture callback AND its separate keep-alive Timer,
-    // both independently invoking FrameArrived -- see its own comments). MediaFoundationH264Encoder
-    // and RTCPeerConnection.SendVideo are not safe to call concurrently, so every frame is queued here
-    // and drained by exactly one worker task instead of being encoded inline on whichever thread
-    // captured it. Bounded to 2 with DropOldest: if the single worker falls behind (a slow encode,
-    // a GC pause), the newest frame always wins over backlog -- catching up on stale frames is
-    // pointless for a live view and would only add latency.
-    private Channel<VideoFrameItem>? _videoQueue;
-    private Task? _videoWorkerTask;
+    /// <summary>
+    /// The transport as one replaceable unit. Everything in here is created together and dies
+    /// together, which is what makes a reconnect a single atomic swap: PushVideoFrame and
+    /// PushAudioPcm read this field ONCE into a local and then touch nothing else, so a swap
+    /// mid-push can never pair a new peer connection with an old encoder.
+    /// </summary>
+    private volatile Session? _session;
 
-    private volatile bool _isConnected;
-    private bool _isDisposed;
+    private Task? _supervisorTask;
+
+    /// <summary>
+    /// Carried across sessions on purpose -- see StableConnectionThreshold.
+    /// </summary>
+    private int _reconnectAttempt;
+
+    private volatile bool _isDisposed;
 
     private readonly record struct VideoFrameItem(
         byte[] PixelBytes, int Width, int Height, VideoPixelFormatsEnum PixelFormat, TimeSpan CaptureTimestamp);
 
     public event Action<RTCPeerConnectionState>? OnConnectionStateChanged;
 
-    public bool IsConnected => _isConnected;
+    /// <summary>Fired when an established session has died and the rebuild loop has started.</summary>
+    public event Action? OnReconnecting;
+
+    /// <summary>Fired when a rebuild succeeded. Carries the attempt count it took, for the log.</summary>
+    public event Action<int>? OnReconnected;
+
+    /// <summary>
+    /// Whether the CURRENT session is carrying media. Read off the session rather than a field on
+    /// this class on purpose: a rebuilt peer can reach <c>connected</c> before RebuildAsync has
+    /// finished assigning it, and a shared flag written by whichever peer happened to fire last
+    /// would then be left false with a perfectly healthy connection underneath it -- every frame
+    /// dropped for the rest of the exam, which is the exact failure this whole class is here to
+    /// remove. Keeping the flag on the object it describes makes that unrepresentable.
+    /// </summary>
+    public bool IsConnected => _session?.Connected == true;
 
     public MonitorStreamClient(
         string streamingBaseUrl, string scheduleId, RecordingStreamType streamType, string token, string origin,
@@ -100,6 +206,7 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         // compute theirs from actual captured timestamps instead.
         _firstFrameVideoDuration = (uint)(VideoClockRate / _videoFps);
         _origin = origin;
+        _streamType = streamType;
         _stunUrls = stunUrls ?? string.Empty;
         _turnUrl = turnUrl ?? string.Empty;
         _turnUsername = turnUsername ?? string.Empty;
@@ -152,74 +259,330 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         return new RTCConfiguration { iceServers = iceServers };
     }
 
+    /// <summary>
+    /// Opens the first session and arms the supervisor that keeps it alive.
+    ///
+    /// <para>This first attempt still throws on failure, unchanged: LiveMonitorStreamService
+    /// catches it and degrades that one stream type, which is the documented behaviour for a
+    /// machine that cannot stream at all. Only a session that once worked gets rebuilt -- see
+    /// RunSupervisorAsync.</para>
+    /// </summary>
     public async Task ConnectAsync(CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
-        _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        _videoEncoder = new MediaFoundationH264Encoder(_videoFps, _videoBitrate);
-        _audioEncoder = new OpusAudioEncoder();
-        _pc = new RTCPeerConnection(BuildRtcConfiguration());
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetimeCts.Token);
+        _session = await OpenSessionAsync(linked.Token);
+        _supervisorTask = Task.Run(RunSupervisorAsync);
+    }
 
-        _videoQueue = Channel.CreateBounded<VideoFrameItem>(new BoundedChannelOptions(2)
+    /// <summary>
+    /// Builds one complete transport -- WebSocket, peer connection, encoders, video worker -- and
+    /// sends the offer. Either returns a live session or throws having disposed everything it
+    /// managed to create; it never leaves half a session behind for the supervisor to trip over.
+    /// </summary>
+    private async Task<Session> OpenSessionAsync(CancellationToken ct)
+    {
+        var session = new Session(CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token));
+        try
         {
-            FullMode = BoundedChannelFullMode.DropOldest,
-            SingleReader = true,
-            SingleWriter = false,
-        });
-        _videoWorkerTask = Task.Run(() => VideoEncodeWorkerAsync(_cts.Token));
+            session.VideoEncoder = new MediaFoundationH264Encoder(_videoFps, _videoBitrate);
+            session.AudioEncoder = new OpusAudioEncoder();
+            session.Pc = new RTCPeerConnection(BuildRtcConfiguration());
 
-        _pc.onconnectionstatechange += state =>
+            session.VideoQueue = Channel.CreateBounded<VideoFrameItem>(new BoundedChannelOptions(2)
+            {
+                FullMode = BoundedChannelFullMode.DropOldest,
+                SingleReader = true,
+                SingleWriter = false,
+            });
+            session.VideoWorkerTask = Task.Run(() => VideoEncodeWorkerAsync(session, session.Cts.Token));
+
+            session.Pc.onconnectionstatechange += state => HandleConnectionStateChanged(session, state);
+
+            var videoFormat = new SDPAudioVideoMediaFormat(
+                SDPMediaTypesEnum.video,
+                102,
+                "H264/90000",
+                "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f");
+            var videoTrack = new MediaStreamTrack(
+                SDPMediaTypesEnum.video, false, [videoFormat], MediaStreamStatusEnum.SendOnly);
+            session.Pc.addTrack(videoTrack);
+
+            var audioFormat = new SDPAudioVideoMediaFormat(SDPMediaTypesEnum.audio, 111, "opus/48000/2");
+            var audioTrack = new MediaStreamTrack(
+                SDPMediaTypesEnum.audio, false, [audioFormat], MediaStreamStatusEnum.SendOnly);
+            session.Pc.addTrack(audioTrack);
+
+            session.Pc.onicecandidate += candidate =>
+            {
+                if (candidate is null)
+                {
+                    return;
+                }
+
+                _ = SendSignalAsync(session, new SignalMessage
+                {
+                    Type = "ice-candidate",
+                    Candidate = new IceCandidatePayload
+                    {
+                        Candidate = candidate.candidate,
+                        SdpMid = candidate.sdpMid,
+                        SdpMLineIndex = candidate.sdpMLineIndex,
+                        UsernameFragment = candidate.usernameFragment
+                    }
+                });
+            };
+
+            var ws = new ClientWebSocket();
+            session.Ws = ws;
+            // vox-streaming's /ws/stream upgrader 403s the handshake unless Origin matches its own
+            // ALLOWED_ORIGINS -- ClientWebSocket sends no Origin header on its own, unlike a browser.
+            ws.Options.SetRequestHeader("Origin", _origin);
+            // Same reasoning as RealtimeSessionClient's: pulling the cable does not fail
+            // ReceiveAsync, because TCP keeps the socket "open" until retransmission gives up,
+            // which can be minutes. Without these the receive loop below sits there long after the
+            // peer connection has already reported the truth, so the WebSocket is the one part of
+            // a dead session that never admits it is dead.
+            ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(8);
+            ws.Options.KeepAliveTimeout = TimeSpan.FromSeconds(5);
+            await ws.ConnectAsync(new Uri(_wsUrl), ct);
+
+            session.ReceiveLoopTask = ReceiveLoopAsync(session, session.Cts.Token);
+
+            var offer = session.Pc.createOffer();
+            await session.Pc.setLocalDescription(offer);
+            await SendSignalAsync(session, new SignalMessage { Type = "offer", Sdp = offer.sdp });
+
+            LocalFileLogger.Info("monitor_stream", "session_opened", new { streamType = _streamType.ToString() });
+            return session;
+        }
+        catch
         {
-            _isConnected = state == RTCPeerConnectionState.connected;
-            OnConnectionStateChanged?.Invoke(state);
-        };
+            await session.DisposeAsync();
+            throw;
+        }
+    }
 
-        var videoFormat = new SDPAudioVideoMediaFormat(
-            SDPMediaTypesEnum.video,
-            102,
-            "H264/90000",
-            "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f");
-        var videoTrack = new MediaStreamTrack(
-            SDPMediaTypesEnum.video, false, [videoFormat], MediaStreamStatusEnum.SendOnly);
-        _pc.addTrack(videoTrack);
-
-        var audioFormat = new SDPAudioVideoMediaFormat(SDPMediaTypesEnum.audio, 111, "opus/48000/2");
-        var audioTrack = new MediaStreamTrack(
-            SDPMediaTypesEnum.audio, false, [audioFormat], MediaStreamStatusEnum.SendOnly);
-        _pc.addTrack(audioTrack);
-
-        _pc.onicecandidate += candidate =>
+    /// <summary>
+    /// Rebuilds the transport whenever a session that was working stops working.
+    ///
+    /// <para>Runs for the life of the client. It only ever reacts to a session ENDING, so it does
+    /// nothing at all on a healthy exam; the loop below is idle on Session.Ended for the full
+    /// forty minutes in the normal case.</para>
+    /// </summary>
+    private async Task RunSupervisorAsync()
+    {
+        while (!_isDisposed && !_lifetimeCts.IsCancellationRequested)
         {
-            if (candidate is null)
+            var current = _session;
+            if (current is null)
             {
                 return;
             }
 
-            _ = SendSignalAsync(new SignalMessage
+            try
             {
-                Type = "ice-candidate",
-                Candidate = new IceCandidatePayload
+                await current.Ended.Task.WaitAsync(_lifetimeCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
+
+            if (_isDisposed || _lifetimeCts.IsCancellationRequested)
+            {
+                return;
+            }
+
+            // A session that held up for a while is evidence the network itself is fine and this
+            // was a discrete event, so the next outage starts from the fast attempts again. One
+            // that died young is evidence of the opposite, and keeps the counter it inherited.
+            if (current.WasStable(StableConnectionThreshold))
+            {
+                _reconnectAttempt = 0;
+            }
+
+            LocalFileLogger.Error(
+                "monitor_stream",
+                "session_lost_rebuilding",
+                new InvalidOperationException($"Live monitor session for {_streamType} ended; rebuilding."),
+                new
                 {
-                    Candidate = candidate.candidate,
-                    SdpMid = candidate.sdpMid,
-                    SdpMLineIndex = candidate.sdpMLineIndex,
-                    UsernameFragment = candidate.usernameFragment
+                    streamType = _streamType.ToString(),
+                    reason = current.EndReason,
+                    connectedSeconds = current.ConnectedSeconds()
+                });
+            OnReconnecting?.Invoke();
+
+            await current.DisposeAsync();
+            _session = null;
+
+            if (!await RebuildAsync())
+            {
+                return;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Retries OpenSessionAsync until it succeeds or the client is disposed. Returns false only
+    /// when it was told to stop -- there is no give-up: an exam runs for tens of minutes and a
+    /// proctor who has lost the live view wants it back at any point in that window, not only in
+    /// the first thirty seconds.
+    /// </summary>
+    private async Task<bool> RebuildAsync()
+    {
+        while (!_isDisposed && !_lifetimeCts.IsCancellationRequested)
+        {
+            var delay = _reconnectAttempt < ReconnectBackoff.Length
+                ? ReconnectBackoff[_reconnectAttempt]
+                : LongOutageRetryInterval;
+            _reconnectAttempt++;
+
+            try
+            {
+                await Task.Delay(delay, _lifetimeCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+
+            if (_isDisposed || _lifetimeCts.IsCancellationRequested)
+            {
+                return false;
+            }
+
+            try
+            {
+                var session = await OpenSessionAsync(_lifetimeCts.Token);
+                _session = session;
+                LocalFileLogger.Info("monitor_stream", "session_rebuilt", new
+                {
+                    streamType = _streamType.ToString(),
+                    attempt = _reconnectAttempt
+                });
+                OnReconnected?.Invoke(_reconnectAttempt);
+                return true;
+            }
+            catch (OperationCanceledException) when (_lifetimeCts.IsCancellationRequested)
+            {
+                return false;
+            }
+            catch (Exception ex)
+            {
+                LocalFileLogger.Error("monitor_stream", "session_rebuild_failed", ex, new
+                {
+                    streamType = _streamType.ToString(),
+                    attempt = _reconnectAttempt,
+                    delaySeconds = delay.TotalSeconds
+                });
+            }
+        }
+
+        return false;
+    }
+
+    private void HandleConnectionStateChanged(Session session, RTCPeerConnectionState state)
+    {
+        // Written to the session this callback belongs to, never to shared client state -- see
+        // IsConnected. A replaced peer reporting `closed` during teardown updates only its own
+        // dead session, where nothing reads it.
+        session.Connected = state == RTCPeerConnectionState.connected;
+
+        OnConnectionStateChanged?.Invoke(state);
+
+        switch (state)
+        {
+            case RTCPeerConnectionState.connected:
+                session.MarkConnected();
+                break;
+
+            case RTCPeerConnectionState.disconnected:
+                // Repair before replace. An ICE restart keeps the peer -- and with it the stream
+                // id, the recording, and the ParticipantReconnected the monitor UI is waiting for
+                // -- so it is always worth trying before falling back to a rebuild that mints a
+                // new stream and reads on the wire like the student left and came back.
+                //
+                // Both arms fire together: the timer is the deadline for whatever the restart
+                // manages to do, and it is the only thing that gets us out if the restart is
+                // impossible or simply does not take. A recovery cancels it (see MarkConnected),
+                // so a flapping connection cannot stack timers.
+                if (TryBeginIceRestart(session))
+                {
+                    session.ArmDisconnectTimer(IceRestartGrace);
                 }
-            });
-        };
+                else
+                {
+                    session.ArmDisconnectTimer(DisconnectGrace);
+                }
 
-        _ws = new ClientWebSocket();
-        // vox-streaming's /ws/stream upgrader 403s the handshake unless Origin matches its own
-        // ALLOWED_ORIGINS -- ClientWebSocket sends no Origin header on its own, unlike a browser.
-        _ws.Options.SetRequestHeader("Origin", _origin);
-        await _ws.ConnectAsync(new Uri(_wsUrl), _cts.Token);
+                break;
 
-        _receiveLoopTask = ReceiveLoopAsync(_cts.Token);
+            case RTCPeerConnectionState.failed:
+            case RTCPeerConnectionState.closed:
+                session.End(state.ToString());
+                break;
+        }
+    }
 
-        var offer = _pc.createOffer();
-        await _pc.setLocalDescription(offer);
-        await SendSignalAsync(new SignalMessage { Type = "offer", Sdp = offer.sdp });
+    /// <summary>
+    /// Asks ICE to re-gather and re-check on the peer we already have, and re-offers it down the
+    /// signaling socket we already have. Returns whether an attempt was actually started, which is
+    /// what decides how long the caller's deadline should be.
+    ///
+    /// <para>Fire-and-forget by design: the outcome is not reported back here but observed through
+    /// the ordinary connection state callback, because that is the same thing that has to work for
+    /// a recovery to count. If the restart succeeds the peer reaches <c>connected</c>, MarkConnected
+    /// cancels the deadline, and nothing else happens. If it fails -- or throws, or silently does
+    /// nothing -- the deadline expires and the rebuild takes over. There is no path where a failed
+    /// restart leaves the session stuck, which is why nothing here needs to be awaited.</para>
+    ///
+    /// <para>Requires a live signaling socket: the re-offer has nowhere to go without one, and the
+    /// answer has no way back. That is the whole reason the second tier exists.</para>
+    /// </summary>
+    private bool TryBeginIceRestart(Session session)
+    {
+        if (session.Ws is not { State: WebSocketState.Open } || session.Pc is null)
+        {
+            return false;
+        }
+
+        // One attempt per disconnected spell. Without this a peer that reports disconnected
+        // repeatedly without ever reaching connected would queue an offer per report, and the
+        // server would answer each one -- renegotiating a connection that is trying to renegotiate.
+        if (!session.BeginIceRestart())
+        {
+            return false;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                session.Pc.restartIce();
+                var offer = session.Pc.createOffer();
+                await session.Pc.setLocalDescription(offer);
+                await SendSignalAsync(session, new SignalMessage { Type = "offer", Sdp = offer.sdp });
+                LocalFileLogger.Info("monitor_stream", "ice_restart_offered", new
+                {
+                    streamType = _streamType.ToString()
+                });
+            }
+            catch (Exception ex)
+            {
+                // Logged, not escalated: the deadline armed by the caller is already the answer to
+                // this failing, and racing it with a second teardown path would only make the
+                // ordering harder to reason about.
+                LocalFileLogger.Error("monitor_stream", "ice_restart_failed", ex, new
+                {
+                    streamType = _streamType.ToString()
+                });
+            }
+        });
+
+        return true;
     }
 
     /// <summary>
@@ -235,19 +598,22 @@ public sealed class MonitorStreamClient : IAsyncDisposable
     public void PushVideoFrame(
         byte[] pixelBytes, int width, int height, VideoPixelFormatsEnum pixelFormat, TimeSpan captureTimestamp)
     {
-        if (_videoQueue is null || !_isConnected || _isDisposed)
+        // Read the session ONCE. Re-reading the field per use is how a frame ends up half-written
+        // into a session that is being torn down underneath it.
+        var session = _session;
+        if (session?.VideoQueue is null || !session.Connected || _isDisposed)
         {
             return;
         }
 
         // TryWrite never blocks/fails here: the channel is bounded with DropOldest, so a full
         // queue just silently evicts the stale frame in favor of this newer one.
-        _videoQueue.Writer.TryWrite(new VideoFrameItem(pixelBytes, width, height, pixelFormat, captureTimestamp));
+        session.VideoQueue.Writer.TryWrite(new VideoFrameItem(pixelBytes, width, height, pixelFormat, captureTimestamp));
     }
 
-    // The single consumer of _videoQueue -- see the field's own comment for why encode/send must
-    // never run concurrently from more than one caller.
-    private async Task VideoEncodeWorkerAsync(CancellationToken ct)
+    // The single consumer of a session's video queue -- see the field's own comment for why
+    // encode/send must never run concurrently from more than one caller.
+    private async Task VideoEncodeWorkerAsync(Session session, CancellationToken ct)
     {
         // Absolute position on the 90kHz RTP clock assigned to the previous frame. Each frame's
         // duration is the DIFFERENCE between two absolute positions, never an independently
@@ -268,12 +634,16 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         //
         // A genuinely long gap now produces a genuinely long RTP jump, which is the truth: that
         // time really did pass with no new picture, and a player simply holds the last frame.
+        //
+        // Deliberately per-session: a rebuilt session is a NEW stream server-side with its own
+        // recording, so its timeline starts fresh here rather than carrying the gap that the
+        // outage opened in the capture clock.
         long? prevRtpPosition = null;
         try
         {
-            await foreach (var item in _videoQueue!.Reader.ReadAllAsync(ct))
+            await foreach (var item in session.VideoQueue!.Reader.ReadAllAsync(ct))
             {
-                if (_videoEncoder is null || _pc is null)
+                if (session.VideoEncoder is null || session.Pc is null)
                 {
                     continue;
                 }
@@ -299,11 +669,11 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
                 try
                 {
-                    var encoded = _videoEncoder.Encode(
+                    var encoded = session.VideoEncoder.Encode(
                         item.PixelBytes, item.Width, item.Height, item.PixelFormat, item.CaptureTimestamp);
                     if (encoded is { Length: > 0 })
                     {
-                        _pc.SendVideo(durationRtpUnits, encoded);
+                        session.Pc.SendVideo(durationRtpUnits, encoded);
                     }
                 }
                 catch (ObjectDisposedException)
@@ -324,16 +694,18 @@ public sealed class MonitorStreamClient : IAsyncDisposable
     /// <summary>Feeds raw PCM16 mono audio for encode + RTP send. Silently dropped until connected.</summary>
     public void PushAudioPcm(byte[] pcm16Mono)
     {
-        if (_pc is null || _audioEncoder is null || !_isConnected || _isDisposed)
+        // One read, for the same reason as PushVideoFrame.
+        var session = _session;
+        if (session?.Pc is null || session.AudioEncoder is null || !session.Connected || _isDisposed)
         {
             return;
         }
 
         try
         {
-            foreach (var frame in _audioEncoder.Encode(pcm16Mono))
+            foreach (var frame in session.AudioEncoder.Encode(pcm16Mono))
             {
-                _pc.SendAudio(AudioDurationPerFrame, frame);
+                session.Pc.SendAudio(AudioDurationPerFrame, frame);
             }
         }
         catch (ObjectDisposedException)
@@ -345,9 +717,9 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         }
     }
 
-    private async Task SendSignalAsync(SignalMessage message)
+    private static async Task SendSignalAsync(Session session, SignalMessage message)
     {
-        var ws = _ws;
+        var ws = session.Ws;
         if (ws is null || ws.State != WebSocketState.Open)
         {
             return;
@@ -355,7 +727,7 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
         var bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(message, SignalJsonOptions));
 
-        await _sendGate.WaitAsync();
+        await session.SendGate.WaitAsync();
         try
         {
             if (ws.State == WebSocketState.Open)
@@ -369,18 +741,18 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         }
         finally
         {
-            _sendGate.Release();
+            session.SendGate.Release();
         }
     }
 
-    private async Task ReceiveLoopAsync(CancellationToken ct)
+    private async Task ReceiveLoopAsync(Session session, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
         using var messageStream = new MemoryStream();
 
         try
         {
-            while (_ws is { State: WebSocketState.Open } ws && !ct.IsCancellationRequested)
+            while (session.Ws is { State: WebSocketState.Open } ws && !ct.IsCancellationRequested)
             {
                 messageStream.SetLength(0);
                 WebSocketReceiveResult result;
@@ -408,7 +780,7 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
                 if (message is not null)
                 {
-                    HandleSignalMessage(message);
+                    HandleSignalMessage(session, message);
                 }
             }
         }
@@ -419,16 +791,24 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         {
             LocalFileLogger.Error("monitor_stream", "signal_receive_failed", ex);
         }
+        finally
+        {
+            // The signaling channel is the only way ICE candidates and renegotiation reach the
+            // server, so a session that has lost it is finished even if its peer connection has
+            // not noticed yet. Previously this method simply returned and the stream stayed
+            // half-alive until the media path timed out -- or forever.
+            session.End("signaling_closed");
+        }
     }
 
-    private void HandleSignalMessage(SignalMessage message)
+    private static void HandleSignalMessage(Session session, SignalMessage message)
     {
         switch (message.Type)
         {
             case "answer":
-                if (message.Sdp is not null && _pc is not null)
+                if (message.Sdp is not null && session.Pc is not null)
                 {
-                    _pc.setRemoteDescription(new RTCSessionDescriptionInit
+                    session.Pc.setRemoteDescription(new RTCSessionDescriptionInit
                     {
                         type = RTCSdpType.answer,
                         sdp = message.Sdp
@@ -438,9 +818,9 @@ public sealed class MonitorStreamClient : IAsyncDisposable
                 break;
 
             case "ice-candidate":
-                if (message.Candidate is not null && _pc is not null)
+                if (message.Candidate is not null && session.Pc is not null)
                 {
-                    _pc.addIceCandidate(new RTCIceCandidateInit
+                    session.Pc.addIceCandidate(new RTCIceCandidateInit
                     {
                         candidate = message.Candidate.Candidate,
                         sdpMid = message.Candidate.SdpMid,
@@ -483,62 +863,240 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         }
 
         _isDisposed = true;
-        _isConnected = false;
 
+        // Before awaiting the supervisor: it parks on Session.Ended and on Task.Delay, and this
+        // token is what releases both. Cancelling after the await would deadlock a client disposed
+        // while a reconnect is sitting out its backoff.
         try
         {
-            _cts?.Cancel();
+            _lifetimeCts.Cancel();
         }
         catch (ObjectDisposedException)
         {
         }
 
-        if (_ws is { State: WebSocketState.Open })
+        if (_supervisorTask is not null)
         {
             try
             {
-                await _ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "client stop", CancellationToken.None);
+                await _supervisorTask;
             }
             catch
             {
             }
         }
 
-        if (_receiveLoopTask is not null)
+        var session = _session;
+        _session = null;
+        if (session is not null)
         {
-            try
+            await session.DisposeAsync();
+        }
+
+        _lifetimeCts.Dispose();
+    }
+
+    /// <summary>
+    /// One transport generation: the WebSocket, the peer connection, the encoders and the worker
+    /// that feeds them. Created and destroyed as a unit so a reconnect is a single field swap
+    /// rather than eight separate ones that a capture thread can observe half-applied.
+    /// </summary>
+    private sealed class Session : IAsyncDisposable
+    {
+        private readonly object _endLock = new();
+        private Timer? _disconnectTimer;
+        private DateTime? _connectedAtUtc;
+        private bool _iceRestartInFlight;
+        private bool _ended;
+        private bool _disposed;
+
+        public Session(CancellationTokenSource cts)
+        {
+            Cts = cts;
+        }
+
+        /// <summary>
+        /// Whether THIS generation's peer is carrying media. Written by the connection state
+        /// callback, read by the push methods off the same snapshot they took of the session --
+        /// see MonitorStreamClient.IsConnected for why it does not live on the client.
+        /// </summary>
+        public volatile bool Connected;
+
+        public CancellationTokenSource Cts { get; }
+        public SemaphoreSlim SendGate { get; } = new(1, 1);
+
+        /// <summary>
+        /// Completes exactly once, when this generation is finished for any reason. The supervisor
+        /// waits on it; End is safe to call from the peer callback, the receive loop and the
+        /// disconnect timer at the same time.
+        /// </summary>
+        public TaskCompletionSource Ended { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public string EndReason { get; private set; } = "";
+
+        public ClientWebSocket? Ws { get; set; }
+        public RTCPeerConnection? Pc { get; set; }
+        public MediaFoundationH264Encoder? VideoEncoder { get; set; }
+        public OpusAudioEncoder? AudioEncoder { get; set; }
+        public Channel<VideoFrameItem>? VideoQueue { get; set; }
+        public Task? ReceiveLoopTask { get; set; }
+        public Task? VideoWorkerTask { get; set; }
+
+        public void MarkConnected()
+        {
+            lock (_endLock)
             {
-                await _receiveLoopTask;
-            }
-            catch
-            {
+                _connectedAtUtc ??= DateTime.UtcNow;
+                // Reached connected inside the deadline -- either ICE healed on its own or the
+                // restart took. Either way this session lives, and the server has just published
+                // ParticipantReconnected for it.
+                _disconnectTimer?.Dispose();
+                _disconnectTimer = null;
+                // Re-arm for a LATER spell. This is one restart per disconnection, not one per
+                // session: a second, unrelated blip twenty minutes on deserves its own attempt.
+                _iceRestartInFlight = false;
             }
         }
 
-        // Must finish (it exits on its own once _cts.Cancel() above cancels its ReadAllAsync)
-        // before _pc/_videoEncoder are torn down below -- it's the only thing that touches them.
-        if (_videoWorkerTask is not null)
+        /// <summary>
+        /// Claims the right to issue an ICE restart for the current disconnected spell. Returns
+        /// false if one has already been issued and has neither succeeded (MarkConnected) nor been
+        /// overtaken by the session ending.
+        /// </summary>
+        public bool BeginIceRestart()
         {
-            try
+            lock (_endLock)
             {
-                await _videoWorkerTask;
-            }
-            catch
-            {
+                if (_disposed || _ended || _iceRestartInFlight)
+                {
+                    return false;
+                }
+
+                _iceRestartInFlight = true;
+                return true;
             }
         }
 
-        _pc?.close();
-        _pc = null;
-        _videoEncoder?.Dispose();
-        _videoEncoder = null;
-        _audioEncoder?.Dispose();
-        _audioEncoder = null;
-        _ws?.Dispose();
-        _ws = null;
-        _cts?.Dispose();
-        _cts = null;
-        _sendGate.Dispose();
+        public void ArmDisconnectTimer(TimeSpan grace)
+        {
+            lock (_endLock)
+            {
+                if (_disposed || _ended || _disconnectTimer is not null)
+                {
+                    return;
+                }
+
+                _disconnectTimer = new Timer(
+                    _ => End("disconnected_grace_expired"),
+                    null,
+                    grace,
+                    Timeout.InfiniteTimeSpan);
+            }
+        }
+
+        public void End(string reason)
+        {
+            lock (_endLock)
+            {
+                // Guarded by a flag rather than by Ended.Task.IsCompleted: the completion happens
+                // outside the lock (below), so two callers racing -- the peer reporting `failed`
+                // and the receive loop noticing the socket is gone, which is the ordinary pairing
+                // -- would both pass an IsCompleted check and the second would overwrite the
+                // first's reason. The reason is the only account of why the stream was rebuilt,
+                // and it wants to name whichever signal actually arrived first.
+                if (_ended)
+                {
+                    return;
+                }
+
+                _ended = true;
+                EndReason = reason;
+            }
+
+            Ended.TrySetResult();
+        }
+
+        public bool WasStable(TimeSpan threshold) =>
+            _connectedAtUtc is { } connectedAt && DateTime.UtcNow - connectedAt >= threshold;
+
+        public double ConnectedSeconds() =>
+            _connectedAtUtc is { } connectedAt
+                ? Math.Round((DateTime.UtcNow - connectedAt).TotalSeconds, 1)
+                : 0;
+
+        public async ValueTask DisposeAsync()
+        {
+            lock (_endLock)
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                _disconnectTimer?.Dispose();
+                _disconnectTimer = null;
+            }
+
+            // Unblocks any supervisor still waiting on a session torn down from elsewhere (client
+            // disposal racing a drop), so nothing parks on a task that will never complete.
+            End("disposed");
+
+            try
+            {
+                Cts.Cancel();
+            }
+            catch (ObjectDisposedException)
+            {
+            }
+
+            if (Ws is { State: WebSocketState.Open })
+            {
+                try
+                {
+                    await Ws.CloseAsync(WebSocketCloseStatus.NormalClosure, "client stop", CancellationToken.None);
+                }
+                catch
+                {
+                }
+            }
+
+            if (ReceiveLoopTask is not null)
+            {
+                try
+                {
+                    await ReceiveLoopTask;
+                }
+                catch
+                {
+                }
+            }
+
+            // Must finish (it exits on its own once Cts.Cancel() above cancels its ReadAllAsync)
+            // before Pc/VideoEncoder are torn down below -- it's the only thing that touches them.
+            if (VideoWorkerTask is not null)
+            {
+                try
+                {
+                    await VideoWorkerTask;
+                }
+                catch
+                {
+                }
+            }
+
+            Pc?.close();
+            Pc = null;
+            VideoEncoder?.Dispose();
+            VideoEncoder = null;
+            AudioEncoder?.Dispose();
+            AudioEncoder = null;
+            Ws?.Dispose();
+            Ws = null;
+            Cts.Dispose();
+            SendGate.Dispose();
+        }
     }
 
     private sealed class SignalMessage

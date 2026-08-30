@@ -107,6 +107,7 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
             _settings.StreamingBaseUrl, context.ScheduleId, RecordingStreamType.Camera, context.StreamToken,
             _settings.MonitorStreamOrigin, _settings.CameraFps, _settings.MonitorStreamVideoBitrate,
             _settings.StunUrls, _settings.TurnUrl, _settings.TurnUsername, _settings.TurnCredential);
+        WireTransportLogging(client, RecordingStreamType.Camera);
         await client.ConnectAsync(ct);
         _cameraClient = client;
 
@@ -172,6 +173,7 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
             _settings.StreamingBaseUrl, context.ScheduleId, RecordingStreamType.Screen, context.StreamToken,
             _settings.MonitorStreamOrigin, _settings.ScreenRecordingFps, _settings.MonitorStreamVideoBitrate,
             _settings.StunUrls, _settings.TurnUrl, _settings.TurnUsername, _settings.TurnCredential);
+        WireTransportLogging(client, RecordingStreamType.Screen);
         await client.ConnectAsync(ct);
         _screenClient = client;
 
@@ -215,6 +217,34 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
         capture.Initialize();
         capture.Start();
         _screenCapture = capture;
+    }
+
+    /// <summary>
+    /// Puts this stream's transport lifecycle into the client log.
+    ///
+    /// <para>Nothing used to subscribe to OnConnectionStateChanged -- on any of the three WebRTC
+    /// clients -- so a live view that died mid-exam left no trace anywhere: the recording carried
+    /// on, the exam carried on, and the only evidence was a tile going grey on a screen nobody was
+    /// necessarily watching. These lines are what make "the proctor says they lost the picture at
+    /// 10:32" a checkable claim afterwards.</para>
+    /// </summary>
+    private static void WireTransportLogging(MonitorStreamClient client, RecordingStreamType streamType)
+    {
+        client.OnConnectionStateChanged += state => LocalFileLogger.Info(
+            "live_monitor_stream",
+            "peer_state_changed",
+            new { streamType = streamType.ToString(), state = state.ToString() });
+
+        client.OnReconnecting += () => LocalFileLogger.Error(
+            "live_monitor_stream",
+            "live_view_lost_rebuilding",
+            new InvalidOperationException($"Live monitor stream for {streamType} dropped; rebuilding."),
+            new { streamType = streamType.ToString() });
+
+        client.OnReconnected += attempts => LocalFileLogger.Info(
+            "live_monitor_stream",
+            "live_view_restored",
+            new { streamType = streamType.ToString(), attempts });
     }
 
     private void OnCameraFrame(CameraFrame frame) =>

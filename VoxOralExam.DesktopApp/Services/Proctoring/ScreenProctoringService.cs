@@ -39,6 +39,8 @@ public class ScreenProctoringService : IProctoringService, IDisposable
         }
 
         _webRtc.OnProctoringEvent += HandleSseEvent;
+        _webRtc.OnReconnecting += HandleReconnecting;
+        _webRtc.OnReconnected += HandleReconnected;
 
         OnStatusChanged?.Invoke("Đang kết nối WebRTC...");
         var examAttemptId = _sessionState.ExamAttemptId != Guid.Empty
@@ -68,6 +70,8 @@ public class ScreenProctoringService : IProctoringService, IDisposable
         try
         {
             _webRtc.OnProctoringEvent -= HandleSseEvent;
+            _webRtc.OnReconnecting -= HandleReconnecting;
+            _webRtc.OnReconnected -= HandleReconnected;
             _camera.OnRawFrame -= OnCameraRawFrame;
             _camera.Stop();
             await _webRtc.DisconnectAsync();
@@ -80,6 +84,26 @@ public class ScreenProctoringService : IProctoringService, IDisposable
             _isStopping = false;
         }
     }
+
+    /// <summary>
+    /// Reports the detector feed dropping and coming back.
+    ///
+    /// <para>Goes to OnStatusChanged, NOT to OnProctoringEvent: the latter is the violation feed,
+    /// and putting an infrastructure hiccup in there would have it read as something the student
+    /// did. This is the same separation ExamRecordingService already draws between a degraded
+    /// recording and a proctoring event.</para>
+    ///
+    /// <para>Both lines are deliberately vague about what is being monitored. ExamWindow can show
+    /// status text to the student, and telling them the exact second cheating detection went down
+    /// -- and came back -- would hand them the one piece of information the whole subsystem exists
+    /// to withhold. The precise account goes to desktopapp.jsonl, which is where a reviewer looks
+    /// and a candidate does not. Same reasoning as AppSettings.ShowDebugLogPanel.</para>
+    /// </summary>
+    private void HandleReconnecting() =>
+        OnStatusChanged?.Invoke("Đang kết nối lại giám sát...");
+
+    private void HandleReconnected(int attempts) =>
+        OnStatusChanged?.Invoke("Giám sát đang hoạt động");
 
     private void HandleSseEvent(string json)
     {
