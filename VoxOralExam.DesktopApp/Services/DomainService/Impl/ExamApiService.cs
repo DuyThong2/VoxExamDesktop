@@ -34,7 +34,11 @@ public class ExamApiService : IExamApiService
     {
         // Backend đã chuyển endpoint này sang PageResult. Màn chọn bài thi liệt kê một lần nên lấy
         // luôn một trang đủ lớn thay vì phân trang trên app.
-        using var request = BuildRequest(HttpMethod.Get, "/api/v1/exams?page=0&size=200");
+        //
+        // Trang đầu là 1, cùng quy ước với mọi client và mọi endpoint khác. `size=200` là trần mà
+        // backend cho phép (PageArguments.MAX_PAGE_SIZE) -- xin lớn hơn sẽ bị từ chối chứ không
+        // được cắt bớt trong im lặng.
+        using var request = BuildRequest(HttpMethod.Get, "/api/v1/exams?page=1&size=200");
         var page = await SendAsync<PageResponse<Exam>>(request, ct);
         return page?.Content ?? [];
     }
