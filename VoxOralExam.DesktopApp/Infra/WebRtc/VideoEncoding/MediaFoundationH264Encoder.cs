@@ -547,6 +547,30 @@ internal sealed class MediaFoundationH264Encoder : IDisposable
     // high word first -- same helper VideoSinkWriterFactory needs for the same reason.
     private static ulong Pack(int high, int low) => ((ulong)(uint)high << 32) | (uint)low;
 
+    /// <summary>
+    /// Makes the next encoded frame an IDR.
+    ///
+    /// <para>Needed because the H.264 reference chain outlives a network outage but the decoder's
+    /// copy of it does not. After MonitorStreamClient recovers a session by ICE restart the peer --
+    /// and therefore this encoder -- is deliberately kept, so encoding simply resumes with P-frames
+    /// that reference pictures the far side lost while it was unreachable. vox-streaming reports
+    /// exactly that as "dropping picture reassembled from lost/out-of-order RTP packets", and asks
+    /// for a keyframe over RTCP, but SIPSorcery has no PLI hook to deliver the request (see
+    /// GopSeconds) -- so without this the picture stays broken until the next scheduled IDR.</para>
+    ///
+    /// <para>Implemented by dropping the transform rather than by setting
+    /// CODECAPI_AVEncVideoForceKeyFrame, for the same reason the resolution-change path does it:
+    /// a fresh encoder restarts the GOP and therefore GUARANTEES an IDR, whereas the codec-API
+    /// attribute goes through TrySet, which swallows a rejection -- and an encoder that quietly
+    /// declines to produce the keyframe would leave exactly the corruption this is here to clear,
+    /// with nothing in the log to say so. Costs one MFT rebuild per reconnect, not per frame.</para>
+    ///
+    /// <para>NOT thread-safe, like the rest of this class: call it from the same single video
+    /// worker that calls Encode. MonitorStreamClient does that by having the connection callback
+    /// set a flag which the worker acts on, rather than reaching in here directly.</para>
+    /// </summary>
+    public void ForceKeyFrame() => DestroyTransform();
+
     private void DestroyTransform()
     {
         if (_transform is null)

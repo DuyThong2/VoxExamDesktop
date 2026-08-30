@@ -669,6 +669,18 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
                 try
                 {
+                    // Acted on HERE, on the single worker, because the encoder is not thread-safe
+                    // and the flag is set from the peer's connection callback thread.
+                    if (session.KeyFrameRequested)
+                    {
+                        session.KeyFrameRequested = false;
+                        session.VideoEncoder.ForceKeyFrame();
+                        LocalFileLogger.Info("monitor_stream", "keyframe_forced_after_recovery", new
+                        {
+                            streamType = _streamType.ToString()
+                        });
+                    }
+
                     var encoded = session.VideoEncoder.Encode(
                         item.PixelBytes, item.Width, item.Height, item.PixelFormat, item.CaptureTimestamp);
                     if (encoded is { Length: > 0 })
@@ -943,11 +955,30 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         public Task? ReceiveLoopTask { get; set; }
         public Task? VideoWorkerTask { get; set; }
 
+        /// <summary>
+        /// Set when this session has come back from a disconnect and the encoder therefore owes the
+        /// far side an IDR. Read and cleared by the video worker, never acted on here: the encoder
+        /// is not thread-safe and this is set from the peer's connection callback.
+        /// </summary>
+        public volatile bool KeyFrameRequested;
+
         public void MarkConnected()
         {
             lock (_endLock)
             {
-                _connectedAtUtc ??= DateTime.UtcNow;
+                if (_connectedAtUtc is null)
+                {
+                    _connectedAtUtc = DateTime.UtcNow;
+                }
+                else
+                {
+                    // Already been connected once, so this is a RECOVERY -- an ICE restart took, or
+                    // ICE healed on its own. Either way the peer and its encoder were kept while the
+                    // far side's decoder lost everything in between, so the next frame has to be an
+                    // IDR or the picture stays broken until the GOP happens to come round.
+                    KeyFrameRequested = true;
+                }
+
                 // Reached connected inside the deadline -- either ICE healed on its own or the
                 // restart took. Either way this session lives, and the server has just published
                 // ParticipantReconnected for it.
