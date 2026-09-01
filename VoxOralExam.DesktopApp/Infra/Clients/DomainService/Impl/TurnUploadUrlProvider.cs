@@ -4,6 +4,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using VoxOralExam.DesktopApp.Infra.Clients.DomainService;
 using VoxOralExam.DesktopApp.State;
+using VoxOralExam.DesktopApp.Services.Auth;
 
 namespace VoxOralExam.DesktopApp.Infra.Clients.DomainService.Impl;
 
@@ -19,13 +20,13 @@ public class TurnUploadUrlProvider : ITurnUploadUrlProvider
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly AppSettings _settings;
-    private readonly ExamSessionState _sessionState;
+    private readonly AuthSessionManager _authSession;
 
-    public TurnUploadUrlProvider(IHttpClientFactory httpClientFactory, AppSettings settings, ExamSessionState sessionState)
+    public TurnUploadUrlProvider(IHttpClientFactory httpClientFactory, AppSettings settings, AuthSessionManager authSession)
     {
         _httpClientFactory = httpClientFactory;
         _settings = settings;
-        _sessionState = sessionState;
+        _authSession = authSession;
     }
 
     public async Task<TurnUploadTarget> GetUploadTargetAsync(Guid attemptAnswerId, int turnOrder, CancellationToken ct)
@@ -34,7 +35,7 @@ public class TurnUploadUrlProvider : ITurnUploadUrlProvider
         var uri = $"{baseUrl}/api/v1/exam-turns/upload-url?attemptAnswerId={attemptAnswerId:D}&turnOrder={turnOrder}";
 
         using var request = new HttpRequestMessage(HttpMethod.Get, uri);
-        var accessToken = _sessionState.CurrentUser?.AccessToken;
+        var accessToken = await _authSession.GetAccessTokenAsync(ct);
         if (!string.IsNullOrWhiteSpace(accessToken))
         {
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);

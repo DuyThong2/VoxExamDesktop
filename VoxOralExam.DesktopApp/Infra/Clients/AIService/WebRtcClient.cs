@@ -64,6 +64,8 @@ public class WebRtcClient : IDisposable
     private int _reconnectAttempt;
     private volatile bool _isStopping;
     private bool _isDisposed;
+    /// <summary>0 until a Dispose call claims the teardown; see Dispose for why it is not _isDisposed.</summary>
+    private int _disposeStarted;
 
     private const int RTP_CLOCK_RATE = 90000;
     private const int FPS = 15;
@@ -118,12 +120,17 @@ public class WebRtcClient : IDisposable
     }
 
     /// <summary>
-    /// Opens the first session and arms the supervisor.
+    /// Starts the proctoring transport and arms the supervisor.
     ///
-    /// <para>Still throws on failure, unchanged: ScreenProctoringService lets it propagate and
-    /// ExamAttemptRunner.StartProctoringAsync catches it, logs proctoring_start_failed and shows the
-    /// student a status line while the exam carries on. Only a session that once worked is
-    /// rebuilt.</para>
+    /// <para>A failed first attempt is no longer terminal. It used to throw, and
+    /// ExamAttemptRunner.StartProctoringAsync would log proctoring_start_failed and then run the
+    /// ENTIRE exam with no AI detection at all -- while RebuildAsync, twenty lines below, was
+    /// already willing to retry a dropped feed for as long as the exam lasted. The student ended up
+    /// unobserved for the whole session because of one badly-timed first packet.</para>
+    ///
+    /// <para>The consequence is worse here than for the live monitor stream: a missing camera feed
+    /// is visible to a proctor watching the grid, whereas a detector that never started looks
+    /// exactly like a detector that found nothing.</para>
     /// </summary>
     public async Task ConnectAsync(string examAttemptId)
     {
@@ -144,7 +151,26 @@ public class WebRtcClient : IDisposable
             _lifetimeCts = new CancellationTokenSource();
         }
 
-        _session = await OpenSessionAsync(_lifetimeCts.Token);
+        try
+        {
+            _session = await OpenSessionAsync(_lifetimeCts.Token);
+        }
+        catch (OperationCanceledException) when (_lifetimeCts.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Error level, matching proctoring_feed_lost_rebuilding: for as long as this takes the
+            // student is unobserved, and that has to leave a trace someone reviewing the exam can
+            // find. Previously this path logged from the caller and then went quiet forever.
+            LocalFileLogger.Error("proctoring_webrtc", "first_connect_failed_retrying", ex, new
+            {
+                examAttemptId
+            });
+            OnReconnecting?.Invoke();
+        }
+
         _supervisorTask = Task.Run(RunSupervisorAsync);
     }
 
@@ -231,7 +257,14 @@ public class WebRtcClient : IDisposable
             var current = _session;
             if (current is null)
             {
-                return;
+                // Nothing to watch yet: either the first connect failed (see ConnectAsync) or a
+                // rebuild has just cleared the field. Both want the same thing, and RebuildAsync
+                // already retries for as long as the exam lasts.
+                if (!await RebuildAsync())
+                {
+                    return;
+                }
+                continue;
             }
 
             try
@@ -656,16 +689,72 @@ public class WebRtcClient : IDisposable
         }
     }
 
+    /// <summary>
+    /// How long Dispose waits for the transport to actually come down.
+    ///
+    /// <para>DisconnectAsync awaits the supervisor, which may be mid-attempt inside OpenSessionAsync
+    /// -- so this is sized to let an in-flight attempt finish rather than to be instant. If it is
+    /// not enough, disposal gives up and says so instead of blocking shutdown.</para>
+    /// </summary>
+    private static readonly TimeSpan DisposeTimeout = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Tears the transport down and releases the client.
+    ///
+    /// <para>The ORDER here is the whole fix. This used to set <c>_isDisposed = true</c> and then
+    /// call DisconnectAsync -- whose first statement returns early on exactly that flag. So disposal
+    /// disconnected nothing: the supervisor loop kept running, the RTCPeerConnection and its camera
+    /// feed were never closed, and the session stayed open for the rest of the process. It then
+    /// disposed _lifetimeCts out from under that still-running supervisor, whose next
+    /// <c>Task.Delay(..., _lifetimeCts.Token)</c> or <c>WaitAsync(_lifetimeCts.Token)</c> throws
+    /// ObjectDisposedException. The normal path hid all of it, because ScreenProctoringService
+    /// .StopAsync calls DisconnectAsync directly while the flag is still false; only
+    /// ScreenProctoringService.Dispose reaches this.</para>
+    ///
+    /// <para>Task.Run + Wait for the reason documented in App.EnsureExamFlowStopped: Dispose is
+    /// synchronous and may be called on the UI thread, so awaiting inline would capture the WPF
+    /// SynchronizationContext and then block the thread its continuations need.</para>
+    /// </summary>
     public void Dispose()
     {
-        if (_isDisposed)
+        // Claimed atomically, on a flag of its own.
+        //
+        // _isDisposed cannot do this job: DisconnectAsync bails on it, so setting it up front is the
+        // original bug this method exists to fix. But leaving the entry guarded by a plain read left
+        // a window where two concurrent Dispose calls both fall through and both run DisconnectAsync
+        // -- which then race over _supervisorTask and the session. One claimant, decided once.
+        if (Interlocked.CompareExchange(ref _disposeStarted, 1, 0) != 0)
         {
             return;
         }
 
+        var disconnected = false;
+        try
+        {
+            disconnected = Task.Run(DisconnectAsync).Wait(DisposeTimeout);
+            if (!disconnected)
+            {
+                LocalFileLogger.Error(
+                    "proctoring_webrtc",
+                    "dispose_disconnect_timed_out",
+                    new TimeoutException($"Proctoring transport did not stop within {DisposeTimeout}."));
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("proctoring_webrtc", "dispose_disconnect_failed", ex);
+        }
+
         _isDisposed = true;
-        _ = DisconnectAsync();
-        _lifetimeCts.Dispose();
+
+        // Only once the supervisor is provably finished. Disposing the source while it is still
+        // looping is what turned the old ordering from "did not disconnect" into "did not disconnect
+        // AND threw" -- and a leaked CancellationTokenSource on a process that is shutting down is
+        // the cheaper of the two outcomes by a wide margin.
+        if (disconnected)
+        {
+            _lifetimeCts.Dispose();
+        }
     }
 
     /// <summary>

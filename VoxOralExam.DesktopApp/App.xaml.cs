@@ -28,6 +28,7 @@ using VoxOralExam.DesktopApp.State;
 using VoxOralExam.DesktopApp.ViewModels;
 using VoxOralExam.DesktopApp.Workers;
 using VoxOralExam.Core.Models;
+using VoxOralExam.DesktopApp.Services.Auth;
 
 namespace VoxOralExam.DesktopApp;
 
@@ -148,12 +149,57 @@ public partial class App : Application
     {
         LocalFileLogger.Info("app", "exit_begin");
         EnsureExamFlowStopped(TimeSpan.FromSeconds(5));
+        // AFTER the exam flow has been given its window to stop, never before: the upload workers
+        // are still authenticating to Java with this token while they flush whatever segments are
+        // left on disk, and pulling it out from under them would strand exactly the evidence the
+        // refresh work above exists to protect.
+        SignOut(TimeSpan.FromSeconds(3));
         SessionEnding -= App_SessionEnding;
         DispatcherUnhandledException -= App_DispatcherUnhandledException;
         AppDomain.CurrentDomain.UnhandledException -= CurrentDomain_UnhandledException;
         TaskScheduler.UnobservedTaskException -= TaskScheduler_UnobservedTaskException;
         LocalFileLogger.Info("app", "exit_complete");
         base.OnExit(e);
+    }
+
+    /// <summary>
+    /// Revokes the session server-side and drops the student's credentials on the way out.
+    ///
+    /// <para>The server-side half is the part that matters. Clearing memory on a process that is
+    /// about to exit buys little on its own, but the refresh token stays valid at vox for its full
+    /// 72-hour TTL unless something revokes it -- and on a shared exam machine an abandoned session
+    /// living three days past the exam is the actual exposure. AuthSessionManager.SignOutAsync
+    /// clears locally whether or not the revoke succeeds.</para>
+    ///
+    /// <para>Bounded and best-effort: a slow or unreachable server must not hold up shutdown, and
+    /// nothing here should change how the app exits.</para>
+    /// </summary>
+    private void SignOut(TimeSpan timeout)
+    {
+        try
+        {
+            var auth = _services?.GetService<AuthSessionManager>();
+            if (auth is null)
+            {
+                return;
+            }
+
+            // Task.Run + Wait(timeout) for the reason spelled out in EnsureExamFlowStopped: OnExit
+            // runs on the UI thread, and awaiting inline would capture the WPF
+            // SynchronizationContext and then block the very thread the continuations need.
+            var completed = Task.Run(() => auth.SignOutAsync(CancellationToken.None)).Wait(timeout);
+            if (!completed)
+            {
+                LocalFileLogger.Error(
+                    "app",
+                    "sign_out_timed_out",
+                    new TimeoutException($"Sign-out did not finish within {timeout}."));
+            }
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("app", "sign_out_failed", ex);
+        }
     }
 
     private void App_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
@@ -252,7 +298,19 @@ public partial class App : Application
         {
             client.BaseAddress = new Uri(settings.JavaBaseUrl);
             client.Timeout = TimeSpan.FromSeconds(30);
-        });
+        })
+        // Cookies handled by hand in AuthApiService, not by a CookieContainer. The refresh and CSRF
+        // tokens both arrive as Set-Cookie and both have to be replayed on /auth/refresh, but
+        // IHttpClientFactory recycles its handlers on a timer -- so a container's contents are not
+        // something an exam lasting hours can depend on still holding.
+        .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseCookies = false });
+
+        // Singleton because the refresh gate inside it only serialises callers that share an
+        // instance, and vox revokes the whole device session if two refreshes race (see
+        // AuthSessionManager._refreshGate).
+        services.AddSingleton(sp => new AuthSessionManager(
+            sp.GetRequiredService<IAuthApiService>,
+            sp.GetRequiredService<ExamSessionState>()));
 
         services.AddSingleton<IProctoringService>(sp => sp.GetRequiredService<ScreenProctoringService>());
         services.AddHttpClient<StreamSessionClient>(client =>

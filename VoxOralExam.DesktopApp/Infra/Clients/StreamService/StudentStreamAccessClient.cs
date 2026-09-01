@@ -2,7 +2,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using VoxOralExam.DesktopApp.Dtos.Responses;
-using VoxOralExam.DesktopApp.State;
+using VoxOralExam.DesktopApp.Services.Auth;
 
 namespace VoxOralExam.DesktopApp.Infra.Clients.StreamService;
 
@@ -17,19 +17,23 @@ public sealed record StudentStreamAccess(
 public sealed class StudentStreamAccessClient
 {
     private readonly HttpClient _http;
-    private readonly ExamSessionState _state;
+    private readonly AuthSessionManager _authSession;
 
-    public StudentStreamAccessClient(HttpClient http, ExamSessionState state)
+    public StudentStreamAccessClient(HttpClient http, AuthSessionManager authSession)
     {
         _http = http;
-        _state = state;
+        _authSession = authSession;
     }
 
     public async Task<StudentStreamAccess> IssueAsync(Guid examSessionId, string? preferredStreamType, CancellationToken ct)
     {
         using var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/streams/student/token");
 
-        var accessToken = _state.CurrentUser?.AccessToken;
+        // Through the session manager rather than off ExamSessionState directly: this call is the
+        // first step of renewing an upload credential (UploadCredentialRefresher), so an access
+        // token that expired earlier in the exam used to end with vox-streaming answering 410 Gone
+        // and the segments already buffered on disk becoming permanently un-uploadable.
+        var accessToken = await _authSession.GetAccessTokenAsync(ct);
         if (string.IsNullOrWhiteSpace(accessToken))
         {
             throw new InvalidOperationException("A student access token is required before stream access can be issued.");

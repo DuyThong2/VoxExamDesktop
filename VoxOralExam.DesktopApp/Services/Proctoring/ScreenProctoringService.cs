@@ -42,6 +42,16 @@ public class ScreenProctoringService : IProctoringService, IDisposable
         _webRtc.OnReconnecting += HandleReconnecting;
         _webRtc.OnReconnected += HandleReconnected;
 
+        // Marked started HERE, not after the work below succeeds.
+        //
+        // StopAsync is gated on this flag, and from this line on there is already something that has
+        // to be undone: three event subscriptions, and -- once ConnectAsync returns -- a client that
+        // may be retrying in the background rather than connected. Setting it only on full success
+        // meant a throw anywhere below left both of those running with nothing able to stop them,
+        // and now that a failed first connect starts a retry loop instead of giving up, that leak
+        // would outlive the exam.
+        _isStarted = true;
+
         OnStatusChanged?.Invoke("Đang kết nối WebRTC...");
         var examAttemptId = _sessionState.ExamAttemptId != Guid.Empty
             ? _sessionState.ExamAttemptId.ToString("D")
@@ -54,7 +64,6 @@ public class ScreenProctoringService : IProctoringService, IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         await _camera.StartAsync();
 
-        _isStarted = true;
         OnStatusChanged?.Invoke("Proctoring đang hoạt động");
     }
 

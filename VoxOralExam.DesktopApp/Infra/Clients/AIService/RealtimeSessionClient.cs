@@ -309,12 +309,21 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     /// <para>Phân biệt được hai trường hợp là nhờ trạng thái BỀN phía Python:
     /// <c>persist_realtime_transcript</c> được await NGAY tại <c>turn_end</c>, trước lời gọi LLM
     /// chậm -- đúng để việc khôi phục sau nối lại luôn nhìn thấy một <c>turn_end</c> đã tới server.
-    /// Nên hai điều kiện dưới đây không phải phỏng đoán, chúng đọc đúng dấu vết đó.</para>
+    /// Nên các điều kiện dưới đây không phải phỏng đoán, chúng đọc đúng dấu vết đó.</para>
     ///
     /// <para>Cả hai đều lấy từ lưu trữ bền chứ không phải RAM, nên vẫn đúng dù
     /// <c>AttemptConnection</c> được dựng mới ở mỗi lần accept WebSocket.</para>
+    ///
+    /// <para>Có BA trạng thái, không phải hai, và trạng thái thứ ba là chỗ từng thủng:
+    /// "server đã xử lý" (không gửi), "server chắc chắn chưa nhận" (gửi), và "KHÔNG BIẾT" (không
+    /// gửi). <paramref name="lastArchivedTurnOrder"/> là <c>int?</c> chính vì thế -- trước đây
+    /// trạng thái thứ ba bị mã hoá thành số (-1 khi ack quá hạn hoặc thiếu trường, 0 khi chưa có
+    /// checkpoint), mà mọi con số đều thua phép so <c>>= turnOrder</c> nên "không biết" âm thầm bị
+    /// xử như "chắc chắn chưa nhận". Đường mạng chậm -- đúng thứ cơ chế này sinh ra để chịu -- do đó
+    /// lại là đường dẫn tới archive lượt hai lần với audio rỗng. Đừng nhét "không biết" vào một
+    /// con số lần nữa.</para>
     /// </summary>
-    private async Task ResendTurnEndIfServerNeverGotItAsync(int lastArchivedTurnOrder)
+    private async Task ResendTurnEndIfServerNeverGotItAsync(int? lastArchivedTurnOrder)
     {
         var payload = _pendingTurnEndPayload;
         var pendingTurnOrder = _pendingDecisionTurnOrder;
@@ -332,8 +341,26 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
             return;
         }
 
+        // KHÔNG BIẾT thì KHÔNG gửi. Hợp đồng của hàm này là "gửi lại CHỈ KHI chắc chắn server chưa
+        // từng nhận được" (xem doc ở trên), mà không biết thì không phải là chắc chắn.
+        //
+        // Vì sao im lặng lại đúng, dù nó làm mất lượt: hai kết cục không cân nhau. Không gửi mà lẽ
+        // ra nên gửi thì lượt hết hạn theo QuestionTurnTimeoutSeconds -- mất một lượt, nhưng mất
+        // lộ thiên, và bản ghi còn nguyên. Gửi mà lẽ ra không nên thì Python chốt và archive lượt
+        // đó LẦN THỨ HAI với đệm audio đã bị xả rỗng: bản ghi bị GHI ĐÈ bằng một lượt trống, âm
+        // thầm, ngay trong hồ sơ dùng để chấm và để phúc khảo. Sai kiểu thứ hai không sửa được sau.
+        if (lastArchivedTurnOrder is not int archivedTurnOrder)
+        {
+            LocalFileLogger.Info("realtime_ws", "turn_end_resend_skipped_unknown_archive_state", new
+            {
+                _examAttemptId,
+                turnOrder
+            });
+            return;
+        }
+
         // Server đã lưu xong lượt này (và có thể cả những lượt sau).
-        if (lastArchivedTurnOrder >= turnOrder)
+        if (archivedTurnOrder >= turnOrder)
         {
             return;
         }
@@ -350,7 +377,15 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
     private async Task ResumeAfterReconnectAsync()
     {
         var checkpoint = _resumeCheckpoint;
-        var lastArchivedTurnOrder = 0;
+        // null = KHÔNG BIẾT, và không có checkpoint thì đúng là không biết thật: chưa lượt nào hoàn
+        // tất nên không có gì để `resume` từ đó, ta không hỏi server câu nào, và ta không nhận được
+        // câu trả lời nào. Giá trị khởi tạo cũ là 0 -- một con số, nên nó THUA phép so
+        // `>= turnOrder` ở dưới y như -1 và mở cùng một lối gửi lại turn_end mù.
+        //
+        // Đây là đường dễ dính nhất trong ba đường, vì nó không cần mạng chậm hay server bản cũ:
+        // chỉ cần rớt mạng giữa LƯỢT ĐẦU TIÊN của bài thi. Server có thể đã nhận turn_end, đã
+        // persist transcript, và đang gọi LLM -- từ phía client thì lượt đó vẫn "chưa hoàn tất".
+        int? lastArchivedTurnOrder = null;
         if (checkpoint is not null)
         {
             lastArchivedTurnOrder = await SendResumeAndAwaitAckAsync(checkpoint.Value.AnswerId, checkpoint.Value.TurnOrder);
@@ -375,7 +410,10 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         await ResendTurnEndIfServerNeverGotItAsync(lastArchivedTurnOrder);
 
         LocalFileLogger.Info("realtime_ws", "reconnected", new { _examAttemptId, lastArchivedTurnOrder });
-        OnReconnected?.Invoke(lastArchivedTurnOrder);
+        // Sự kiện vẫn mang int để không đổi chữ ký công khai; -1 ở ĐÂY chỉ là "không biết" dùng cho
+        // log/hiển thị, và nó an toàn vì không còn nhánh quyết định nào đọc con số này nữa -- chốt
+        // gửi lại turn_end ở trên đã nhận int? trực tiếp.
+        OnReconnected?.Invoke(lastArchivedTurnOrder ?? -1);
     }
 
     /// <summary>
@@ -439,18 +477,39 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
         }
     }
 
-    private async Task<int> SendResumeAndAwaitAckAsync(Guid answerId, int turnOrder)
+    /// <summary>
+    /// Gửi <c>resume</c> và chờ <c>resume_ack</c>. Trả về <c>last_archived_turn_order</c> của server,
+    /// hoặc <c>null</c> nghĩa là KHÔNG BIẾT -- ack không về kịp trong 10 giây.
+    ///
+    /// <para>Null chứ không phải -1, và đây là điểm mấu chốt: giá trị này đi thẳng vào phép so
+    /// <c>lastArchivedTurnOrder >= turnOrder</c> ở <c>ResendTurnEndIfServerNeverGotItAsync</c>. Mọi
+    /// số nguyên đại diện cho "không biết" đều THUA phép so đó (-1 thua mọi lượt), tức là mở toang
+    /// đúng cái chốt được dựng lên để chặn -- và hậu quả là archive lượt lần thứ hai với đệm audio
+    /// đã rỗng. "Không biết" phải là một trạng thái riêng, không được là một con số.</para>
+    ///
+    /// <para>Ack chậm quá 10 giây KHÔNG hiếm: đây đúng là kịch bản đường truyền chậm mà toàn bộ cơ
+    /// chế nối lại này sinh ra để phục vụ.</para>
+    /// </summary>
+    private async Task<int?> SendResumeAndAwaitAckAsync(Guid answerId, int turnOrder)
     {
-        var tcs = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var tcs = new TaskCompletionSource<int?>(TaskCreationOptions.RunContinuationsAsynchronously);
         _pendingResumeAckTcs = tcs;
         await SendResumeAsync(answerId, turnOrder, CancellationToken.None);
 
         using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-        using var reg = cts.Token.Register(() => tcs.TrySetResult(-1));
+        using var reg = cts.Token.Register(() =>
+        {
+            if (tcs.TrySetResult(null))
+            {
+                LocalFileLogger.Info(
+                    "realtime_ws", "resume_ack_timeout",
+                    new { _examAttemptId, answerId, turnOrder });
+            }
+        });
         return await tcs.Task;
     }
 
-    private TaskCompletionSource<int>? _pendingResumeAckTcs;
+    private TaskCompletionSource<int?>? _pendingResumeAckTcs;
 
     public Task SendQuestionStartAsync(
         Guid answerId,
@@ -913,7 +972,14 @@ public sealed class RealtimeSessionClient : IAsyncDisposable
                     OnForceEnded?.Invoke(reason);
                     break;
                 case "resume_ack":
-                    var lastArchivedTurnOrder = doc.RootElement.TryGetProperty("last_archived_turn_order", out var lto) ? lto.GetInt32() : -1;
+                    // Thiếu trường -> null ("server không nói"), KHÔNG phải -1. Xem
+                    // SendResumeAndAwaitAckAsync: bất kỳ con số nào đại diện cho "không biết" cũng
+                    // lọt qua chốt chặn gửi lại turn_end. Đây là đường thứ hai sinh ra cùng một giá
+                    // trị -1 đó -- một server bản cũ, hoặc một ack thiếu trường, là đủ.
+                    int? lastArchivedTurnOrder = doc.RootElement.TryGetProperty("last_archived_turn_order", out var lto)
+                        && lto.ValueKind == JsonValueKind.Number
+                            ? lto.GetInt32()
+                            : null;
                     _pendingResumeAckTcs?.TrySetResult(lastArchivedTurnOrder);
                     LocalFileLogger.Info("realtime_ws", "resume_ack_received", new { lastArchivedTurnOrder });
 

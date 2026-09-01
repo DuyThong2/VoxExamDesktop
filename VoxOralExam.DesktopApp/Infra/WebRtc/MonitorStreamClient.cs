@@ -45,21 +45,30 @@ namespace VoxOralExam.DesktopApp.Infra.WebRtc;
 /// back to live. This is the path a brief blip should take, and it costs the proctor one short
 /// "mất kết nối" and nothing else.</para>
 ///
-/// <para>Second tier -- a full rebuild, used only when the signaling socket itself is gone, which
-/// is what a real outage does. ServeStream calls NewPeer on every WebSocket upgrade and NewPeer
-/// mints a fresh uuid, so this necessarily produces a NEW stream id; sessions.Replace then closes
-/// the peer the old connection owned, so there is never double ingest. The monitor UI copes --
-/// useMonitoringBoard's pickCurrentStreams keeps one live stream per type per candidate and lets
-/// it outrank the ended one, so the proctor keeps a single tile, while allStreams retains the old
-/// id so an alert raised before the drop still resolves to its own recording.</para>
+/// <para>Second tier -- a signaling resume, used when the socket itself is gone but the peer is
+/// not (see SignalingLoopAsync/TryResumeSignalingAsync). A new WebSocket is opened naming the
+/// stream we already own, vox-streaming re-attaches it to the same Peer instead of minting a new
+/// one, and an ICE restart then runs over the fresh socket. The RTCPeerConnection is untouched on
+/// both ends, so there is no DTLS re-handshake -- and the stream id, recording and HLS playlist
+/// survive exactly as they do in tier one. This is the tier that used not to exist, and its absence
+/// is why a dropped socket always cost a rebuild.</para>
 ///
-/// <para>But note what the second tier COSTS in meaning: on the wire it is
-/// disconnected -> left -> joined(new id), which is indistinguishable from the student closing the
-/// app and re-entering. Today a new stream id for a participant already on the grid can only mean
-/// a genuine re-entry, and that is worth something to a proctor. Keeping tier one in front is what
-/// stops an ordinary network blip from spending that signal; a rebuild should be the rare case,
-/// and if the two ever need telling apart the honest fix is a continuity id on the connection
-/// rather than more inference at the far end.</para>
+/// <para>Third tier -- a full rebuild, now the genuine last resort: the resume ladder was spent, or
+/// the server answered with a different stream id because ours had aged out of its grace. ServeStream
+/// calls NewPeer for a connection that names no resumable stream, so this necessarily produces a NEW
+/// stream id; sessions.Replace then closes the peer the old connection owned, so there is never
+/// double ingest. The monitor UI copes -- useMonitoringBoard's pickCurrentStreams keeps one live
+/// stream per type per candidate and lets it outrank the ended one, so the proctor keeps a single
+/// tile, while allStreams retains the old id so an alert raised before the drop still resolves to
+/// its own recording.</para>
+///
+/// <para>The tiers are ordered by what they COST in meaning, not just in time. A rebuild is
+/// disconnected -> left -> joined(new id) on the wire, which is indistinguishable from the student
+/// closing the app and re-entering -- and a new stream id for a participant already on the grid is
+/// worth keeping as a signal that means a genuine re-entry. Tiers one and two exist to stop an
+/// ordinary network blip from spending it; the continuity id they ride on (?resumeStreamId=, answered
+/// by stream-ready/stream-resumed) is what makes telling the two apart possible at all, instead of
+/// leaving the far end to infer it.</para>
 /// </summary>
 public sealed class MonitorStreamClient : IAsyncDisposable
 {
@@ -129,6 +138,32 @@ public sealed class MonitorStreamClient : IAsyncDisposable
     /// to be beyond repair.</para>
     /// </summary>
     private static readonly TimeSpan DisconnectGrace = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// Delays before each attempt to put a new signaling socket under an existing peer.
+    ///
+    /// <para>Short and few by design. This ladder runs INSIDE the peer's disconnect deadline
+    /// (SignalingResumeGrace below), so it is not a place to wait out a real outage -- that is the
+    /// rebuild's job, and it retries for as long as the exam lasts. All this has to cover is the
+    /// blip case: a socket that can be replaced within a few seconds, on a peer that is still
+    /// there.</para>
+    /// </summary>
+    private static readonly TimeSpan[] SignalingResumeAttempts =
+    [
+        TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4)
+    ];
+
+    /// <summary>
+    /// Deadline for a peer that went disconnected while its signaling socket was ALSO down -- the
+    /// ordinary blip, since one link usually carries both.
+    ///
+    /// <para>Longer than DisconnectGrace because there is now something worth waiting for: the
+    /// resume ladder above needs ~7s to spend itself, and the ICE restart it enables needs room to
+    /// take afterwards. At the old 5s the session would be torn down and rebuilt while the resume
+    /// that would have saved it was still in its first retry -- the recovery would exist and never
+    /// once get to finish.</para>
+    /// </summary>
+    private static readonly TimeSpan SignalingResumeGrace = TimeSpan.FromSeconds(20);
 
     private readonly string _wsUrl;
     private readonly string _origin;
@@ -260,19 +295,49 @@ public sealed class MonitorStreamClient : IAsyncDisposable
     }
 
     /// <summary>
-    /// Opens the first session and arms the supervisor that keeps it alive.
+    /// Starts the transport and arms the supervisor that keeps it alive.
     ///
-    /// <para>This first attempt still throws on failure, unchanged: LiveMonitorStreamService
-    /// catches it and degrades that one stream type, which is the documented behaviour for a
-    /// machine that cannot stream at all. Only a session that once worked gets rebuilt -- see
-    /// RunSupervisorAsync.</para>
+    /// <para>A failed first attempt is no longer terminal. It used to throw, and
+    /// LiveMonitorStreamService would degrade that stream type for the WHOLE exam -- no retry, ever,
+    /// even though the supervisor sitting right below this method already knows how to retry
+    /// indefinitely and does so for any session that manages to connect even once. The asymmetry was
+    /// the bug: it made the very first attempt the only one that had to succeed, on exactly the
+    /// networks where a first attempt is least likely to.</para>
+    ///
+    /// <para>So a failure here arms the supervisor with no session, and RunSupervisorAsync's
+    /// no-session branch takes it from there. The caller carries on: frames pushed before the
+    /// transport is up are dropped by PushVideoFrame's own connected check, exactly as they are
+    /// during a mid-exam reconnect.</para>
+    ///
+    /// <para>Cancellation still propagates. A caller that gave up during startup is not a network
+    /// failure and must not leave a retry loop running behind it.</para>
     /// </summary>
     public async Task ConnectAsync(CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_isDisposed, this);
 
+        // Only the FIRST attempt answers to the caller's token; the retries below are governed by
+        // this client's own lifetime, because by then nobody is waiting on them.
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _lifetimeCts.Token);
-        _session = await OpenSessionAsync(linked.Token);
+        try
+        {
+            _session = await OpenSessionAsync(linked.Token);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("monitor_stream", "first_connect_failed_retrying", ex, new
+            {
+                streamType = _streamType.ToString()
+            });
+            // Same signal a mid-exam drop raises: the picture is not there yet and something is
+            // still working on it.
+            OnReconnecting?.Invoke();
+        }
+
         _supervisorTask = Task.Run(RunSupervisorAsync);
     }
 
@@ -346,9 +411,9 @@ public sealed class MonitorStreamClient : IAsyncDisposable
             // a dead session that never admits it is dead.
             ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(8);
             ws.Options.KeepAliveTimeout = TimeSpan.FromSeconds(5);
-            await ws.ConnectAsync(new Uri(_wsUrl), ct);
+            await ws.ConnectAsync(new Uri(BuildWsUrl(null)), ct);
 
-            session.ReceiveLoopTask = ReceiveLoopAsync(session, session.Cts.Token);
+            session.ReceiveLoopTask = SignalingLoopAsync(session, session.Cts.Token);
 
             var offer = session.Pc.createOffer();
             await session.Pc.setLocalDescription(offer);
@@ -378,7 +443,14 @@ public sealed class MonitorStreamClient : IAsyncDisposable
             var current = _session;
             if (current is null)
             {
-                return;
+                // Nothing to watch yet: either the first connect failed (see ConnectAsync) or a
+                // rebuild has just cleared the field. Both want the same thing, and RebuildAsync
+                // already retries for as long as the exam lasts.
+                if (!await RebuildAsync())
+                {
+                    return;
+                }
+                continue;
             }
 
             try
@@ -512,6 +584,15 @@ public sealed class MonitorStreamClient : IAsyncDisposable
                 if (TryBeginIceRestart(session))
                 {
                     session.ArmDisconnectTimer(IceRestartGrace);
+                }
+                else if (session.StreamId is not null)
+                {
+                    // The restart was refused for want of a live socket, but this session knows its
+                    // stream id -- so SignalingLoopAsync is already trying to put a new socket under
+                    // this same peer, and the restart will be issued the moment one lands (see the
+                    // "stream-resumed" case). Give that sequence room to finish instead of tearing
+                    // the peer down underneath it.
+                    session.ArmDisconnectTimer(SignalingResumeGrace);
                 }
                 else
                 {
@@ -731,8 +812,7 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
     private static async Task SendSignalAsync(Session session, SignalMessage message)
     {
-        var ws = session.Ws;
-        if (ws is null || ws.State != WebSocketState.Open)
+        if (session.Ws is not { State: WebSocketState.Open })
         {
             return;
         }
@@ -742,7 +822,11 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         await session.SendGate.WaitAsync();
         try
         {
-            if (ws.State == WebSocketState.Open)
+            // Re-read the socket INSIDE the gate rather than trusting the snapshot above. A
+            // signaling resume swaps session.Ws under this same gate, so without this an ICE
+            // candidate gathered mid-resume would be written to the socket being replaced -- lost,
+            // and lost precisely during the reconnect that needs it.
+            if (session.Ws is { State: WebSocketState.Open } ws)
             {
                 await ws.SendAsync(bytes, WebSocketMessageType.Text, true, CancellationToken.None);
             }
@@ -757,7 +841,53 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         }
     }
 
-    private async Task ReceiveLoopAsync(Session session, CancellationToken ct)
+    /// <summary>
+    /// Owns the signaling socket for the whole life of a session: pumps messages, and when the
+    /// socket dies, tries to put a NEW one under the same peer before giving up on the session.
+    ///
+    /// <para>This is the middle recovery tier, and it exists because losing the control socket is
+    /// not the same event as losing the media path, however often they happen together. Before it,
+    /// PumpSignalingAsync's exit ended the session outright, so a dropped WebSocket always cost a
+    /// full rebuild -- a new peer, a new stream id, a new HLS playlist and a split recording -- even
+    /// when ICE, the tracks and the recording had never faltered. On the wire that reads as
+    /// disconnected -> left -> joined(new id), indistinguishable from the student closing the app
+    /// and coming back, which is a signal worth far more than an ordinary blip should be allowed to
+    /// spend.</para>
+    ///
+    /// <para>What makes the resume safe is that the peer connection is never touched: the same
+    /// RTCPeerConnection stays on this end and the same Peer stays on the server's, so there is no
+    /// DTLS re-handshake to negotiate -- only a new socket carrying the same conversation. That is
+    /// also why a rebuild remains the fallback rather than something to be avoided at all costs: a
+    /// new peer here genuinely cannot re-attach to the old stream.</para>
+    /// </summary>
+    private async Task SignalingLoopAsync(Session session, CancellationToken ct)
+    {
+        while (!ct.IsCancellationRequested)
+        {
+            await PumpSignalingAsync(session, ct);
+
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            if (!await TryResumeSignalingAsync(session, ct))
+            {
+                break;
+            }
+        }
+
+        // The signaling channel is the only way ICE candidates and renegotiation reach the server,
+        // so a session that has lost it for good is finished even if its peer connection has not
+        // noticed yet. Reached only once every resume attempt has been spent.
+        session.End("signaling_closed");
+    }
+
+    /// <summary>
+    /// Reads signaling messages until the current socket stops delivering them. Returns rather than
+    /// ending the session -- deciding whether the session survives is SignalingLoopAsync's job.
+    /// </summary>
+    private async Task PumpSignalingAsync(Session session, CancellationToken ct)
     {
         var buffer = new byte[16 * 1024];
         using var messageStream = new MemoryStream();
@@ -803,20 +933,154 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         {
             LocalFileLogger.Error("monitor_stream", "signal_receive_failed", ex);
         }
-        finally
-        {
-            // The signaling channel is the only way ICE candidates and renegotiation reach the
-            // server, so a session that has lost it is finished even if its peer connection has
-            // not noticed yet. Previously this method simply returned and the stream stayed
-            // half-alive until the media path timed out -- or forever.
-            session.End("signaling_closed");
-        }
     }
 
-    private static void HandleSignalMessage(Session session, SignalMessage message)
+    /// <summary>
+    /// Re-opens the signaling socket against the stream this session already owns, naming it so the
+    /// server re-attaches instead of minting a new one. Returns whether a socket is live again.
+    ///
+    /// <para>Bounded on purpose. The peer's own disconnect deadline is running in parallel (see
+    /// HandleConnectionStateChanged), and a resume that outlasts it would be racing the rebuild it
+    /// is trying to avoid. Spending the short ladder and then conceding to a rebuild is the honest
+    /// outcome for a link that is properly down rather than blipping.</para>
+    /// </summary>
+    private async Task<bool> TryResumeSignalingAsync(Session session, CancellationToken ct)
+    {
+        var streamId = session.StreamId;
+        if (streamId is null)
+        {
+            // Never got a stream-ready, so there is nothing to re-attach to: either the server
+            // predates continuity or this session died before its first exchange.
+            return false;
+        }
+
+        for (var attempt = 0; attempt < SignalingResumeAttempts.Length; attempt++)
+        {
+            try
+            {
+                await Task.Delay(SignalingResumeAttempts[attempt], ct);
+            }
+            catch (OperationCanceledException)
+            {
+                return false;
+            }
+
+            if (ct.IsCancellationRequested || session.Ended.Task.IsCompleted)
+            {
+                return false;
+            }
+
+            ClientWebSocket? ws = null;
+            try
+            {
+                ws = new ClientWebSocket();
+                ws.Options.SetRequestHeader("Origin", _origin);
+                ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(8);
+                ws.Options.KeepAliveTimeout = TimeSpan.FromSeconds(5);
+                await ws.ConnectAsync(new Uri(BuildWsUrl(streamId)), ct);
+
+                // Swapped in only once the new socket is actually up: a failed attempt must leave
+                // the session holding its old (dead) socket rather than a null, so that everything
+                // reading session.Ws keeps seeing a closed socket instead of crashing.
+                //
+                // Under the send gate so the swap cannot interleave with a send: SendSignalAsync
+                // re-reads session.Ws inside the same gate, which together mean every signal either
+                // went out on the old socket before the swap or goes out on the new one after it.
+                ClientWebSocket? old;
+                await session.SendGate.WaitAsync(ct);
+                try
+                {
+                    old = session.Ws;
+                    session.Ws = ws;
+                }
+                finally
+                {
+                    session.SendGate.Release();
+                }
+
+                old?.Dispose();
+
+                LocalFileLogger.Info("monitor_stream", "signaling_resume_connected", new
+                {
+                    streamType = _streamType.ToString(),
+                    streamId,
+                    attempt = attempt + 1
+                });
+                return true;
+            }
+            catch (OperationCanceledException)
+            {
+                ws?.Dispose();
+                return false;
+            }
+            catch (Exception ex)
+            {
+                ws?.Dispose();
+                LocalFileLogger.Error("monitor_stream", "signaling_resume_failed", ex, new
+                {
+                    streamType = _streamType.ToString(),
+                    streamId,
+                    attempt = attempt + 1
+                });
+            }
+        }
+
+        return false;
+    }
+
+    private void HandleSignalMessage(Session session, SignalMessage message)
     {
         switch (message.Type)
         {
+            // First connect on this session: remember which stream we are on so a later socket loss
+            // has something to name.
+            case "stream-ready":
+                if (session.StreamId is null)
+                {
+                    session.StreamId = message.StreamId;
+                    break;
+                }
+
+                // We asked to resume and were given a different stream instead, so the server no
+                // longer had ours -- it aged out of its grace, or ICE tore it down underneath us.
+                // Our peer is now talking to a server peer that never saw its offer, and re-offering
+                // an established DTLS transport at a fresh one is not a negotiation worth attempting.
+                // End instead and let the supervisor build a clean session.
+                if (session.StreamId != message.StreamId)
+                {
+                    LocalFileLogger.Info("monitor_stream", "signaling_resume_rejected", new
+                    {
+                        streamType = _streamType.ToString(),
+                        requested = session.StreamId,
+                        assigned = message.StreamId
+                    });
+                    session.End("stream_not_resumed");
+                }
+
+                break;
+
+            // The server kept our stream and re-attached this socket to it. The peer never moved, so
+            // the recording, the stream id and the HLS playlist are all intact.
+            case "stream-resumed":
+                LocalFileLogger.Info("monitor_stream", "signaling_resumed", new
+                {
+                    streamType = _streamType.ToString(),
+                    streamId = message.StreamId
+                });
+                // If ICE went down with the socket -- the ordinary case, since one link carries both
+                // -- the restart could not be attempted while there was nowhere to send the offer.
+                // Now there is. A peer that stayed connected throughout needs nothing here.
+                if (session.Pc is { connectionState: RTCPeerConnectionState.disconnected }
+                    && TryBeginIceRestart(session))
+                {
+                    // Same pairing as the tier-one path in HandleConnectionStateChanged: the timer
+                    // is the deadline for whatever the restart manages to do. Re-armed rather than
+                    // armed, because the SignalingResumeGrace deadline is still running and has
+                    // already had most of its budget spent on getting this socket back.
+                    session.RearmDisconnectTimer(IceRestartGrace);
+                }
+
+                break;
             case "answer":
                 if (message.Sdp is not null && session.Pc is not null)
                 {
@@ -852,6 +1116,55 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         }
     }
 
+    /// <summary>
+    /// The signaling URL, optionally asking vox-streaming to re-attach this connection to a stream
+    /// it already has rather than opening a new one. A server that does not know the parameter
+    /// ignores it and behaves exactly as before.
+    /// </summary>
+    /// <summary>
+    /// How long the goodbye is allowed to take. Short on purpose: it is a courtesy that saves the
+    /// server a grace period, not something worth delaying an exam's shutdown for, and the socket it
+    /// travels on may already be half-dead.
+    /// </summary>
+    private static readonly TimeSpan ByeTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Tells vox-streaming this stream is finished, as opposed to merely disconnected.
+    ///
+    /// <para>Best-effort and silent on failure: not being able to say goodbye costs one grace period
+    /// on the server, which is exactly where an unannounced client ends up anyway.</para>
+    /// </summary>
+    private async Task SendByeAsync()
+    {
+        var session = _session;
+        if (session?.Ws is not { State: WebSocketState.Open })
+        {
+            return;
+        }
+
+        try
+        {
+            await SendSignalAsync(session, new SignalMessage { Type = "bye" }).WaitAsync(ByeTimeout);
+            LocalFileLogger.Info("monitor_stream", "bye_sent", new
+            {
+                streamType = _streamType.ToString(),
+                streamId = session.StreamId
+            });
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("monitor_stream", "bye_failed", ex, new
+            {
+                streamType = _streamType.ToString()
+            });
+        }
+    }
+
+    private string BuildWsUrl(string? resumeStreamId) =>
+        resumeStreamId is null
+            ? _wsUrl
+            : $"{_wsUrl}&resumeStreamId={Uri.EscapeDataString(resumeStreamId)}";
+
     private static string ToWebSocketBase(string httpBaseUrl)
     {
         if (httpBaseUrl.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
@@ -875,6 +1188,20 @@ public sealed class MonitorStreamClient : IAsyncDisposable
         }
 
         _isDisposed = true;
+
+        // FIRST, before the cancel below, because the cancel is what makes it impossible.
+        //
+        // vox-streaming can no longer infer a deliberate stop from the socket closing -- a dropped
+        // socket is now a resumable event, so an unannounced end waits out the grace and is then
+        // closed as a FAILURE, which puts a false STREAM_DROPPED in the student's proctoring record
+        // and suppresses MarkComplete on their recording. "bye" is what says otherwise.
+        //
+        // It cannot be left to a close frame in Session.DisposeAsync: cancelling _lifetimeCts
+        // cancels the linked token the signaling pump is parked on inside ReceiveAsync, and
+        // cancelling a pending ClientWebSocket receive ABORTS the socket. By the time that
+        // CloseAsync runs, Ws.State is Aborted rather than Open, so the frame is never sent and the
+        // server sees an ordinary abnormal close.
+        await SendByeAsync();
 
         // Before awaiting the supervisor: it parks on Session.Ended and on Task.Delay, and this
         // token is what releases both. Cancelling after the await would deadlock a client disposed
@@ -949,6 +1276,13 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
         public ClientWebSocket? Ws { get; set; }
         public RTCPeerConnection? Pc { get; set; }
+
+        /// <summary>
+        /// The server-side stream this session is attached to, learned from "stream-ready" on the
+        /// first connect. Null until then, which is also the signal that no signaling resume is
+        /// possible yet -- there is nothing to name in ?resumeStreamId=.
+        /// </summary>
+        public string? StreamId { get; set; }
         public MediaFoundationH264Encoder? VideoEncoder { get; set; }
         public OpusAudioEncoder? AudioEncoder { get; set; }
         public Channel<VideoFrameItem>? VideoQueue { get; set; }
@@ -1018,12 +1352,41 @@ public sealed class MonitorStreamClient : IAsyncDisposable
                     return;
                 }
 
-                _disconnectTimer = new Timer(
-                    _ => End("disconnected_grace_expired"),
-                    null,
-                    grace,
-                    Timeout.InfiniteTimeSpan);
+                StartDisconnectTimerLocked(grace);
             }
+        }
+
+        /// <summary>
+        /// Replaces a running deadline with a fresh one, unlike ArmDisconnectTimer which leaves an
+        /// existing timer alone.
+        ///
+        /// <para>For the moment a signaling resume lands: the deadline still running is
+        /// SignalingResumeGrace, and most of it has already been spent getting the socket back. The
+        /// ICE restart that follows would inherit only whatever is left -- a sliver, if the resume
+        /// took several attempts -- and get torn down mid-negotiation for no reason. Restarting the
+        /// clock gives it the same full window it gets on the tier-one path.</para>
+        /// </summary>
+        public void RearmDisconnectTimer(TimeSpan grace)
+        {
+            lock (_endLock)
+            {
+                if (_disposed || _ended)
+                {
+                    return;
+                }
+
+                _disconnectTimer?.Dispose();
+                StartDisconnectTimerLocked(grace);
+            }
+        }
+
+        private void StartDisconnectTimerLocked(TimeSpan grace)
+        {
+            _disconnectTimer = new Timer(
+                _ => End("disconnected_grace_expired"),
+                null,
+                grace,
+                Timeout.InfiniteTimeSpan);
         }
 
         public void End(string reason)
@@ -1143,6 +1506,14 @@ public sealed class MonitorStreamClient : IAsyncDisposable
 
         [JsonPropertyName("message")]
         public string? Message { get; set; }
+
+        /// <summary>
+        /// Carried by the server's "stream-ready"/"stream-resumed" messages, naming the stream this
+        /// connection is attached to. Handed back as ?resumeStreamId= when the signaling socket has
+        /// to be re-opened -- see TryResumeSignalingAsync.
+        /// </summary>
+        [JsonPropertyName("streamId")]
+        public string? StreamId { get; set; }
     }
 
     private sealed class IceCandidatePayload

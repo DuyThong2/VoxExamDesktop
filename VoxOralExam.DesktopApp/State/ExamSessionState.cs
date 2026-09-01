@@ -54,9 +54,42 @@ public class ExamSessionState
         CurrentUser = userContext;
     }
 
+    /// <summary>
+    /// Ends the signed-in session and blanks its credentials.
+    ///
+    /// <para>Blanking rather than only dropping the reference, because the credentials outlived the
+    /// reference: the app now holds a REFRESH token, not just a short-lived access token, and
+    /// anything that captured the context object (a client mid-request, a queued upload) would go on
+    /// holding a working one. Null-ing the property alone leaves those copies usable.</para>
+    ///
+    /// <para>Deliberately NOT called when an exam is submitted. Evidence upload outlives the exam --
+    /// SegmentUploadWorker keeps draining buffered segments and UploadCredentialRefresher renews
+    /// their credentials from Java, both of which need this token. Clearing at submit would recreate
+    /// the stranded-evidence bug from the other direction.</para>
+    ///
+    /// <para>This is the LOCAL half only. Revoking the session server-side is a separate step, and
+    /// the one that actually matters: without it the refresh token stays valid at vox for its full
+    /// 72-hour TTL (AuthController.REFRESH_TOKEN_COOKIE_TTL_SECONDS) no matter what is cleared here.
+    /// AuthSessionManager.SignOutAsync pairs the two -- POST /api/v1/auth/logout, then this -- and
+    /// App.OnExit goes through it. Calling this directly is for the cases where there is nothing to
+    /// revoke, or nothing that can be.</para>
+    ///
+    /// <para>Even a successful revoke leaves the ACCESS token usable until its own expiry (~15 min):
+    /// JwtAuthenticationFilter carries no session claim and never re-checks revocation. That is why
+    /// signing out cannot strand an upload still draining, and equally why it is not instant.</para>
+    /// </summary>
     public void ClearAuthenticatedUser()
     {
+        var user = CurrentUser;
         CurrentUser = null;
+        if (user is null)
+        {
+            return;
+        }
+
+        user.AccessToken = string.Empty;
+        user.RefreshToken = string.Empty;
+        user.XsrfToken = string.Empty;
     }
 
     public void LoadExamPaper(ExamPaper examPaper, Guid? attemptId = null)

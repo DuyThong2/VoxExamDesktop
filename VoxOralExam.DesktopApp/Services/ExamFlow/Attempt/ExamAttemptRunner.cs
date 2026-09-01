@@ -437,10 +437,15 @@ internal sealed class ExamAttemptRunner
 
     private async Task StartProctoringAsync(CancellationToken cancellationToken)
     {
+        // Set BEFORE the attempt, because StopProctoringAsync is gated on it and a half-started
+        // proctoring session is exactly the case that most needs stopping: StartAsync wires event
+        // handlers and can leave the transport retrying in the background before it throws. Setting
+        // it only on success meant those survived the exam with nothing able to reach them.
+        _proctoringStarted = true;
+
         try
         {
             await _proctoring.StartAsync(cancellationToken);
-            _proctoringStarted = true;
         }
         catch (OperationCanceledException)
         {
@@ -448,6 +453,9 @@ internal sealed class ExamAttemptRunner
         }
         catch (Exception ex)
         {
+            // Reached only for a local failure now -- the camera, or the service being disposed. A
+            // proctoring server that cannot be reached no longer lands here at all: WebRtcClient
+            // keeps retrying and reports through OnReconnecting/OnReconnected instead.
             LocalFileLogger.Error("exam_flow", "proctoring_start_failed", ex);
             StatusChanged?.Invoke(
                 $"Không thể khởi động giám sát: {ex.Message}");

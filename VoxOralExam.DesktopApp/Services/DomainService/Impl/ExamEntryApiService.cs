@@ -4,6 +4,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Text.Json;
+using VoxOralExam.DesktopApp.Services.Auth;
 using VoxOralExam.DesktopApp.Services.DomainService;
 using VoxOralExam.DesktopApp.State;
 
@@ -17,12 +18,12 @@ public class ExamEntryApiService : IExamEntryApiService
     };
 
     private readonly HttpClient _http;
-    private readonly ExamSessionState _sessionState;
+    private readonly AuthSessionManager _authSession;
 
-    public ExamEntryApiService(HttpClient http, ExamSessionState sessionState)
+    public ExamEntryApiService(HttpClient http, AuthSessionManager authSession)
     {
         _http = http;
-        _sessionState = sessionState;
+        _authSession = authSession;
     }
 
     public async Task<ExamEntryTicket> VerifyOtpAsync(string examId, string otp, CancellationToken ct = default)
@@ -42,7 +43,7 @@ public class ExamEntryApiService : IExamEntryApiService
 
     private async Task<ExamEntryTicket> SendTicketRequestAsync(HttpRequestMessage request, CancellationToken ct)
     {
-        var accessToken = _sessionState.CurrentUser?.AccessToken;
+        var accessToken = await _authSession.GetAccessTokenAsync(ct);
         if (!string.IsNullOrWhiteSpace(accessToken))
         {
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);

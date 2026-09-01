@@ -72,6 +72,11 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
         // through StopCoreAsync, which disposed both clients -- so a screen-side problem also
         // dropped a perfectly healthy camera stream, and the server saw both peers close moments
         // after connecting.
+        //
+        // These catches no longer cover an unreachable server: MonitorStreamClient.ConnectAsync
+        // keeps retrying in the background instead of throwing, so what reaches here is a LOCAL
+        // failure -- no capture device, a mixer that would not start -- where disposing that stream
+        // type really is the answer, because no amount of retrying fixes it.
         if (context.StreamTypes.Contains(RecordingStreamType.Camera))
         {
             try
@@ -108,8 +113,12 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
             _settings.MonitorStreamOrigin, _settings.CameraFps, _settings.MonitorStreamVideoBitrate,
             _settings.StunUrls, _settings.TurnUrl, _settings.TurnUsername, _settings.TurnCredential);
         WireTransportLogging(client, RecordingStreamType.Camera);
-        await client.ConnectAsync(ct);
+        // Field takes ownership BEFORE the connect, for the same reason the mixer does below: the
+        // client owns a background retry loop from the moment it is constructed onwards, so a throw
+        // out of ConnectAsync with the field still null would leave one running that StopCameraAsync
+        // has no way to reach.
         _cameraClient = client;
+        await client.ConnectAsync(ct);
 
         // Camera audio is mic-only, but it still goes through an AudioMixer instead of being pushed
         // straight from the recorder. The mixer ticks on its own 20ms timer and its mic buffer is
@@ -174,8 +183,9 @@ public sealed class LiveMonitorStreamService : IAsyncDisposable
             _settings.MonitorStreamOrigin, _settings.ScreenRecordingFps, _settings.MonitorStreamVideoBitrate,
             _settings.StunUrls, _settings.TurnUrl, _settings.TurnUsername, _settings.TurnCredential);
         WireTransportLogging(client, RecordingStreamType.Screen);
-        await client.ConnectAsync(ct);
+        // Owned by the field before the connect -- see StartCameraAsync.
         _screenClient = client;
+        await client.ConnectAsync(ct);
 
         // Live policy: a teacher watching in real time is better served by skipping stale audio
         // than by hearing it late, the opposite of ExamRecordingService's choice.

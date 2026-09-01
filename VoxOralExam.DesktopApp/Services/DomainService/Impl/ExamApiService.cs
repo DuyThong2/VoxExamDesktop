@@ -8,6 +8,7 @@ using VoxOralExam.DesktopApp.Dtos;
 using VoxOralExam.DesktopApp.Dtos.Requests;
 using VoxOralExam.DesktopApp.Services.DomainService;
 using VoxOralExam.DesktopApp.State;
+using VoxOralExam.DesktopApp.Services.Auth;
 
 namespace VoxOralExam.DesktopApp.Services.DomainService.Impl;
 
@@ -21,13 +22,13 @@ public class ExamApiService : IExamApiService
 
     private readonly IHttpClientFactory _httpClientFactory;
     private readonly AppSettings _settings;
-    private readonly ExamSessionState _sessionState;
+    private readonly AuthSessionManager _authSession;
 
-    public ExamApiService(IHttpClientFactory httpClientFactory, AppSettings settings, ExamSessionState sessionState)
+    public ExamApiService(IHttpClientFactory httpClientFactory, AppSettings settings, AuthSessionManager authSession)
     {
         _httpClientFactory = httpClientFactory;
         _settings = settings;
-        _sessionState = sessionState;
+        _authSession = authSession;
     }
 
     public async Task<IReadOnlyList<Exam>> GetAvailableExamsAsync(CancellationToken ct = default)
@@ -38,7 +39,7 @@ public class ExamApiService : IExamApiService
         // Trang đầu là 1, cùng quy ước với mọi client và mọi endpoint khác. `size=200` là trần mà
         // backend cho phép (PageArguments.MAX_PAGE_SIZE) -- xin lớn hơn sẽ bị từ chối chứ không
         // được cắt bớt trong im lặng.
-        using var request = BuildRequest(HttpMethod.Get, "/api/v1/exams?page=1&size=200");
+        using var request = await BuildRequestAsync(HttpMethod.Get, "/api/v1/exams?page=1&size=200", ct);
         var page = await SendAsync<PageResponse<Exam>>(request, ct);
         return page?.Content ?? [];
     }
@@ -50,14 +51,14 @@ public class ExamApiService : IExamApiService
             throw new ArgumentException("sessionId is required to fetch a real exam paper.", nameof(sessionId));
         }
 
-        using var request = BuildRequest(HttpMethod.Get, $"/api/v1/exam-sessions/{Uri.EscapeDataString(sessionId)}/paper");
+        using var request = await BuildRequestAsync(HttpMethod.Get, $"/api/v1/exam-sessions/{Uri.EscapeDataString(sessionId)}/paper", ct);
         return await SendAsync<ExamPaper>(request, ct)
             ?? throw new InvalidOperationException($"Exam paper response for session {sessionId} was empty.");
     }
 
     public async Task UpdateSessionStatusAsync(Guid sessionId, string status, CancellationToken ct = default)
     {
-        using var request = BuildRequest(HttpMethod.Patch, $"/api/v1/exam-sessions/{sessionId:D}");
+        using var request = await BuildRequestAsync(HttpMethod.Patch, $"/api/v1/exam-sessions/{sessionId:D}", ct);
         request.Content = JsonContent.Create(new { status });
         await SendAsync<object>(request, ct);
     }
@@ -67,9 +68,10 @@ public class ExamApiService : IExamApiService
         int remainingSeconds,
         CancellationToken ct = default)
     {
-        using var request = BuildRequest(
+        using var request = await BuildRequestAsync(
             HttpMethod.Patch,
-            $"/api/v1/exam-sessions/{sessionId:D}/remaining-time");
+            $"/api/v1/exam-sessions/{sessionId:D}/remaining-time",
+            ct);
         request.Content = JsonContent.Create(new { remainingSeconds });
         await SendAsync<object>(request, ct);
     }
@@ -81,7 +83,7 @@ public class ExamApiService : IExamApiService
     /// </summary>
     public async Task<ExamSessionGuard?> GetSessionGuardAsync(Guid sessionId, CancellationToken ct = default)
     {
-        using var request = BuildRequest(HttpMethod.Post, "/graphql");
+        using var request = await BuildRequestAsync(HttpMethod.Post, "/graphql", ct);
         request.Content = JsonContent.Create(new
         {
             query = "query($id: ID!) { examSession(id: $id) { status flagged candidateBlocked } }",
@@ -103,16 +105,16 @@ public class ExamApiService : IExamApiService
 
     public async Task ReportAiUsageAsync(Guid sessionId, ReportAiUsageRequestDto request, CancellationToken ct = default)
     {
-        using var httpRequest = BuildRequest(HttpMethod.Post, $"/api/v1/exam-sessions/{sessionId:D}/ai-usage");
+        using var httpRequest = await BuildRequestAsync(HttpMethod.Post, $"/api/v1/exam-sessions/{sessionId:D}/ai-usage", ct);
         httpRequest.Content = JsonContent.Create(request);
         await SendAsync<object>(httpRequest, ct);
     }
 
-    private HttpRequestMessage BuildRequest(HttpMethod method, string path)
+    private async Task<HttpRequestMessage> BuildRequestAsync(HttpMethod method, string path, CancellationToken ct)
     {
         var uri = $"{_settings.JavaBaseUrl.TrimEnd('/')}{path}";
         var request = new HttpRequestMessage(method, uri);
-        var accessToken = _sessionState.CurrentUser?.AccessToken;
+        var accessToken = await _authSession.GetAccessTokenAsync(ct);
         if (!string.IsNullOrWhiteSpace(accessToken))
         {
             request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
