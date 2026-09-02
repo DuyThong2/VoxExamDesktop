@@ -5,6 +5,7 @@ using VoxOralExam.DesktopApp.Services.EntryFlow;
 using VoxOralExam.DesktopApp.State;
 
 using VoxOralExam.DesktopApp.Services;
+using VoxOralExam.DesktopApp.Services.ExamFlow;
 
 namespace VoxOralExam.DesktopApp.ViewModels;
 
@@ -18,6 +19,7 @@ public class LoginViewModel : BaseViewModel
     private readonly IDeviceContextProvider _deviceContextProvider;
     private readonly ExamSessionState _sessionState;
     private readonly IExamEntryNavigator _navigator;
+    private readonly PendingSubmissionStore _pendingSubmissions;
 
     private string _email = string.Empty;
     private string _password = string.Empty;
@@ -29,12 +31,14 @@ public class LoginViewModel : BaseViewModel
         IAuthApiService authApiService,
         IDeviceContextProvider deviceContextProvider,
         ExamSessionState sessionState,
-        IExamEntryNavigator navigator)
+        IExamEntryNavigator navigator,
+        PendingSubmissionStore pendingSubmissions)
     {
         _authApiService = authApiService;
         _deviceContextProvider = deviceContextProvider;
         _sessionState = sessionState;
         _navigator = navigator;
+        _pendingSubmissions = pendingSubmissions;
         // Email để trống: mỗi thí sinh đăng nhập bằng tài khoản của chính mình, điền sẵn một
         // địa chỉ demo chỉ khiến người dùng thật phải xoá đi trước khi gõ.
         //
@@ -91,6 +95,14 @@ public class LoginViewModel : BaseViewModel
             var userContext = await _authApiService.LoginAsync(Email.Trim(), Password, device);
 
             _sessionState.SetAuthenticatedUser(userContext);
+
+            // The first moment this app has a token, and therefore the first moment a status left
+            // owing by a previous run can actually be sent. Deliberately NOT in App's startup sweep
+            // alongside OrphanedUploadRecovery: nobody is signed in there, so the PATCH could only
+            // fail. Fire-and-forget -- a student waiting to sit an exam must never queue behind the
+            // bookkeeping of an earlier one.
+            _ = Task.Run(() => _pendingSubmissions.ReplayAsync(CancellationToken.None));
+
             LocalFileLogger.Info("login", "login_success", new
             {
                 userContext.UserId,

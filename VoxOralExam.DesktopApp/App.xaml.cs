@@ -202,9 +202,61 @@ public partial class App : Application
         }
     }
 
+    /// <summary>
+    /// How many dispatcher exceptions may be swallowed inside <see cref="DispatcherExceptionWindow"/>
+    /// before the app is allowed to die after all.
+    ///
+    /// <para>Without a ceiling, "keep running" turns into an unkillable zombie: a fault that recurs
+    /// on every layout pass would be caught forever, burning CPU and filling the log while the
+    /// student stares at a broken window. Past this rate the exception is clearly not incidental,
+    /// and dying is the more honest outcome.</para>
+    /// </summary>
+    private const int MaxHandledDispatcherExceptions = 20;
+
+    private static readonly TimeSpan DispatcherExceptionWindow = TimeSpan.FromMinutes(1);
+
+    /// <summary>UI thread only, so no synchronisation: the dispatcher raises this on one thread.</summary>
+    private readonly Queue<DateTime> _recentDispatcherExceptions = new();
+
+    /// <summary>
+    /// Keeps the app alive through an unexpected UI-thread exception instead of letting it terminate.
+    ///
+    /// <para>This handler used to log and return, which leaves <c>e.Handled</c> false and ends the
+    /// process. For an exam client that trade is backwards. Terminating costs the SUBMITTED PATCH,
+    /// any segment still draining, and the student's remaining questions -- certain, unrecoverable
+    /// losses. Continuing costs an app in a state nobody reasoned about, which is bad but bounded:
+    /// each answer is archived server-side as its turn ends, so the evidence does not live in this
+    /// process's memory.</para>
+    ///
+    /// <para>Not a substitute for handling faults where they happen. The device-loss crash that
+    /// motivated this was fixed at its source in TurnAudioRecorder; this only stops the NEXT unknown
+    /// one from being fatal, and every catch here is a bug that still wants finding -- which is why
+    /// it is logged at Error rather than quietly absorbed.</para>
+    /// </summary>
     private void App_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
     {
         LocalFileLogger.Error("app", "dispatcher_unhandled_exception", e.Exception);
+
+        var now = DateTime.UtcNow;
+        _recentDispatcherExceptions.Enqueue(now);
+        while (_recentDispatcherExceptions.Count > 0
+            && now - _recentDispatcherExceptions.Peek() > DispatcherExceptionWindow)
+        {
+            _recentDispatcherExceptions.Dequeue();
+        }
+
+        if (_recentDispatcherExceptions.Count > MaxHandledDispatcherExceptions)
+        {
+            LocalFileLogger.Error(
+                "app",
+                "dispatcher_exception_storm",
+                new InvalidOperationException(
+                    $"More than {MaxHandledDispatcherExceptions} dispatcher exceptions within "
+                    + $"{DispatcherExceptionWindow.TotalSeconds:F0}s; letting the process terminate."));
+            return;
+        }
+
+        e.Handled = true;
     }
 
     private void CurrentDomain_UnhandledException(object sender, UnhandledExceptionEventArgs e)
@@ -340,6 +392,7 @@ public partial class App : Application
         services.AddSingleton<RealtimeSessionClient>();
         services.AddSingleton<AvatarWebRtcClient>();
         services.AddSingleton<QuestionAssetPresentationCoordinator>();
+        services.AddSingleton<PendingSubmissionStore>();
         services.AddSingleton<ExamAttemptRunnerFactory>();
         services.AddSingleton<RealtimeExamFlowService>();
         services.AddSingleton<IExamFlowService>(sp => sp.GetRequiredService<RealtimeExamFlowService>());

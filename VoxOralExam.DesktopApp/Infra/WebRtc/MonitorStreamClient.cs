@@ -436,7 +436,27 @@ public sealed class MonitorStreamClient : IAsyncDisposable
     /// nothing at all on a healthy exam; the loop below is idle on Session.Ended for the full
     /// forty minutes in the normal case.</para>
     /// </summary>
+    /// <summary>
+    /// Wrapper whose only job is to make sure this loop can never die in silence. Same reasoning as
+    /// WebRtcClient's: a bare Task.Run with nothing awaiting it turns any escaping exception into a
+    /// stream that stops rebuilding forever and never says why.
+    /// </summary>
     private async Task RunSupervisorAsync()
+    {
+        try
+        {
+            await SuperviseAsync();
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("monitor_stream", "supervisor_faulted", ex, new
+            {
+                streamType = _streamType.ToString()
+            });
+        }
+    }
+
+    private async Task SuperviseAsync()
     {
         while (!_isDisposed && !_lifetimeCts.IsCancellationRequested)
         {
@@ -487,7 +507,22 @@ public sealed class MonitorStreamClient : IAsyncDisposable
                 });
             OnReconnecting?.Invoke();
 
-            await current.DisposeAsync();
+            // Guarded for the same reason as WebRtcClient's: this await is the last thing between a
+            // dead stream and the rebuild that replaces it, and it reaches into SIPSorcery and the
+            // encoders on a peer that has just failed. Tearing down the old generation is
+            // bookkeeping; getting to RebuildAsync is the point.
+            try
+            {
+                await current.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                LocalFileLogger.Error("monitor_stream", "session_dispose_failed", ex, new
+                {
+                    streamType = _streamType.ToString()
+                });
+            }
+
             _session = null;
 
             if (!await RebuildAsync())

@@ -250,7 +250,31 @@ public class WebRtcClient : IDisposable
     /// Rebuilds the proctoring connection whenever a working one stops working. Idle for the whole
     /// exam in the normal case -- it only ever reacts to a session ending.
     /// </summary>
+    /// <summary>
+    /// Wrapper whose only job is to make sure this loop can never die in silence.
+    ///
+    /// <para>It runs as a bare Task.Run with nothing awaiting it, so before this an exception
+    /// escaping the loop faulted the task and was observed by nobody -- AI proctoring simply stopped
+    /// forever, with no log line to say why. Seen live on 2026-09-02: the feed failed 16 seconds
+    /// into a 4-minute exam and the log contains neither proctoring_feed_restored nor
+    /// proctoring_rebuild_failed after it, just silence.</para>
+    /// </summary>
     private async Task RunSupervisorAsync()
+    {
+        try
+        {
+            await SuperviseAsync();
+        }
+        catch (Exception ex)
+        {
+            LocalFileLogger.Error("proctoring_webrtc", "supervisor_faulted", ex, new
+            {
+                _examAttemptId
+            });
+        }
+    }
+
+    private async Task SuperviseAsync()
     {
         while (!_isStopping && !_lifetimeCts.IsCancellationRequested)
         {
@@ -301,7 +325,24 @@ public class WebRtcClient : IDisposable
                 });
             OnReconnecting?.Invoke();
 
-            await current.DisposeAsync();
+            // Guarded, because a throw here used to end AI proctoring for the rest of the exam. This
+            // await is the last thing between a failed feed and the rebuild that would restore it,
+            // and Session.DisposeAsync reaches into SIPSorcery (PeerConnection.close) and an encoder
+            // on a peer that has just failed -- exactly where an exception is plausible. Tearing the
+            // old session down is bookkeeping; the rebuild is the point, so nothing here is allowed
+            // to stop us reaching it.
+            try
+            {
+                await current.DisposeAsync();
+            }
+            catch (Exception ex)
+            {
+                LocalFileLogger.Error("proctoring_webrtc", "session_dispose_failed", ex, new
+                {
+                    sessionId = current.SessionId
+                });
+            }
+
             _session = null;
 
             if (!await RebuildAsync())
@@ -699,6 +740,12 @@ public class WebRtcClient : IDisposable
     private static readonly TimeSpan DisposeTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>
+    /// How long a torn-down session waits for its SSE reader to notice. Short on purpose: this sits
+    /// directly between a failed proctoring feed and the rebuild that restores it.
+    /// </summary>
+    private static readonly TimeSpan SseDrainTimeout = TimeSpan.FromSeconds(2);
+
+    /// <summary>
     /// Tears the transport down and releases the client.
     ///
     /// <para>The ORDER here is the whole fix. This used to set <c>_isDisposed = true</c> and then
@@ -872,7 +919,24 @@ public class WebRtcClient : IDisposable
             {
                 try
                 {
-                    await SseTask;
+                    // Bounded, because Cts.Cancel() above does not reliably unblock it. The reader
+                    // parks in StreamReader.ReadLineAsync over an HTTP response stream, and on
+                    // 2026-09-02 it went on processing lines for 48 SECONDS after this cancel --
+                    // long enough to log server_ended_session for a session disposed 48s earlier.
+                    // Every one of those seconds was time the supervisor spent unable to rebuild.
+                    //
+                    // Abandoning the task is safe: it holds only its own response stream, observes
+                    // the same cancelled token, and ends on its own once the server closes the
+                    // stream. Waiting for it is a courtesy, not a requirement.
+                    await SseTask.WaitAsync(SseDrainTimeout);
+                }
+                catch (TimeoutException)
+                {
+                    LocalFileLogger.Error(
+                        "proctoring_webrtc",
+                        "sse_drain_timed_out",
+                        new TimeoutException($"Event stream did not stop within {SseDrainTimeout}."),
+                        new { SessionId });
                 }
                 catch
                 {

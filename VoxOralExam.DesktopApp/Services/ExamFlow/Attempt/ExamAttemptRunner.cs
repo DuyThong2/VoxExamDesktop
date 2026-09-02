@@ -23,6 +23,7 @@ internal sealed class ExamAttemptRunner
     private readonly QuestionAssetPresentationCoordinator _assets;
     private readonly IProctoringService _proctoring;
     private readonly RealtimeAttemptProgressClient _attemptProgress;
+    private readonly PendingSubmissionStore _pendingSubmissions;
     private CancellationTokenSource? _runCancellation;
     private TurnAudioRecorder? _recorder;
     private SpeechTurnCoordinator? _speechTurns;
@@ -31,6 +32,8 @@ internal sealed class ExamAttemptRunner
     private bool _forceEndRequested;
     private bool _submitRequested;
     private bool _proctoringStarted;
+    /// <summary>0 unless a microphone recovery loop is already running; see HandleMicCaptureFailed.</summary>
+    private int _micRecoveryRunning;
 
     public ExamAttemptRunner(
         TurnAudioUploader audioUploader,
@@ -44,8 +47,10 @@ internal sealed class ExamAttemptRunner
         QuestionAssetPresentationCoordinator assets,
         IProctoringService proctoring,
         RealtimeAttemptProgressClient attemptProgress,
+        PendingSubmissionStore pendingSubmissions,
         bool isMicMuted)
     {
+        _pendingSubmissions = pendingSubmissions;
         _audioUploader = audioUploader;
         _archiveClient = archiveClient;
         _sessionState = sessionState;
@@ -118,6 +123,7 @@ internal sealed class ExamAttemptRunner
 
         _recorder = recorder;
         _speechTurns = speechTurns;
+        recorder.CaptureFailed += HandleMicCaptureFailed;
         recorder.IsMuted = _isMicMuted;
         // Đứt mạng giữa lượt là bộ đệm audio phía Python mất sạch (nó nằm trong RAM của một
         // AttemptConnection, mỗi lần nối lại dựng đối tượng mới rỗng). Máy trạm là nơi duy nhất còn
@@ -264,6 +270,10 @@ internal sealed class ExamAttemptRunner
             StudentSpeakingChanged?.Invoke(false);
             AvatarSpeakingChanged?.Invoke(false);
             _speechTurns = null;
+            if (_recorder is not null)
+            {
+                _recorder.CaptureFailed -= HandleMicCaptureFailed;
+            }
             _recorder = null;
             // Recorder sắp bị Dispose; giữ delegate trỏ vào nó là chép ngược từ một đối tượng đã chết.
             _sessionClient.CurrentTurnAudioProvider = null;
@@ -296,6 +306,107 @@ internal sealed class ExamAttemptRunner
             // WS có thể đang reconnect đúng lúc thí sinh chuyển cửa sổ. Mất một cảnh báo chấp
             // nhận được; bằng chứng vẫn nằm trong log máy trạm do WindowFocusGuard ghi.
             LocalFileLogger.Error("exam_flow", "focus_lost_send_failed", ex);
+        }
+    }
+
+    /// <summary>
+    /// The microphone went away mid-exam. Tells the student, and nothing more.
+    ///
+    /// <para>Deliberately does not stop the attempt. Everything already archived is safe, the avatar
+    /// keeps going, and a student who plugs the headset back in can still be heard for the remaining
+    /// questions -- so ending the exam here would destroy more than the fault itself does. This runs
+    /// on the WPF dispatcher (NAudio raises the underlying event there), so it stays cheap and
+    /// throws nothing.</para>
+    ///
+    /// <para>Not yet reported to the proctor: unlike camera signal loss there is no message type for
+    /// it on the realtime protocol, so raising an alert needs a Python-side addition first. Until
+    /// then the client log is the only record.</para>
+    /// </summary>
+    private void HandleMicCaptureFailed(Exception exception)
+    {
+        // exception is unused on purpose: TurnAudioRecorder already logged it with the device number
+        // and whether a turn was in flight. Logging it again here would only duplicate that entry.
+        StatusChanged?.Invoke(
+            "Micro đã ngắt kết nối. Hãy cắm lại thiết bị — hệ thống đang thử mở lại.");
+
+        if (Interlocked.CompareExchange(ref _micRecoveryRunning, 1, 0) != 0)
+        {
+            return;
+        }
+
+        // The run token is read here, on the dispatcher thread while the run is still live: the
+        // field is disposed in RunAsync's finally, and touching it from the loop below could race
+        // that.
+        CancellationToken runToken;
+        try
+        {
+            runToken = _runCancellation?.Token ?? CancellationToken.None;
+        }
+        catch (ObjectDisposedException)
+        {
+            Interlocked.Exchange(ref _micRecoveryRunning, 0);
+            return;
+        }
+
+        _ = Task.Run(() => RecoverMicrophoneAsync(runToken));
+    }
+
+    /// <summary>Gap between attempts to re-open a capture device the student may be re-plugging.</summary>
+    private static readonly TimeSpan MicReopenInterval = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// Polls the dead microphone back to life for as long as the exam is running.
+    ///
+    /// <para>This is what makes the status line honest. Telling the student to plug their headset
+    /// back in is worthless on its own -- a dead NAudio WaveIn does not reattach, so without this
+    /// every remaining question would burn its silence budget and end with no answer while the exam
+    /// "continued". The recorder is opened exactly once per run otherwise.</para>
+    ///
+    /// <para>Bounded by the run token rather than an attempt count, because the student may take
+    /// minutes to notice and there is no moment before the exam ends where giving up helps them.</para>
+    /// </summary>
+    private async Task RecoverMicrophoneAsync(CancellationToken runToken)
+    {
+        var attempt = 0;
+        try
+        {
+            while (!runToken.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(MicReopenInterval, runToken);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+
+                var recorder = _recorder;
+                if (recorder is null)
+                {
+                    break;
+                }
+
+                attempt++;
+                if (await recorder.TryReopenAsync(runToken))
+                {
+                    LocalFileLogger.Info("turn_audio", "capture_device_recovered", new { attempt });
+                    StatusChanged?.Invoke("Đã kết nối lại micro. Bài thi tiếp tục.");
+                    return;
+                }
+            }
+
+            // Reached only when the exam ended with the device still gone -- worth a record, because
+            // every turn after the disconnect was silence and the grader needs to know why.
+            LocalFileLogger.Error(
+                "turn_audio",
+                "capture_device_never_recovered",
+                new InvalidOperationException(
+                    $"Microphone did not come back before the run ended ({attempt} attempts)."));
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _micRecoveryRunning, 0);
         }
     }
 
@@ -365,6 +476,12 @@ internal sealed class ExamAttemptRunner
             status,
             drainSeconds = drainTimeout.TotalSeconds
         });
+
+        // Written HERE, at the top of the tail rather than next to the PATCH, because everything
+        // between this line and SubmitSessionStatusAsync is time the client can die in: a drain
+        // bounded in tens of seconds, then a settle delay deliberately spent doing nothing. Java has
+        // no other way to learn this exam finished, so the marker is what lets a later run say it.
+        _pendingSubmissions.Mark(_sessionState.ExamAttemptId, status);
         var stillPending = await archiveQueue.DrainAsync(drainTimeout);
 
         // Chờ THẬT nằm ở đây: từ khi Python lưu audio, hàng đợi ngay trên luôn rỗng nên
@@ -620,26 +737,72 @@ internal sealed class ExamAttemptRunner
         return Math.Max(0, pending);
     }
 
+    /// <summary>
+    /// Delays before each retry of the final status PATCH.
+    ///
+    /// <para>Bounded deliberately at roughly 15 seconds total. The student is watching a "saving"
+    /// overlay for the whole of this, so it cannot become a real outage's retry loop -- that job
+    /// belongs to PendingSubmissionStore, which replays on a later launch with no one waiting. This
+    /// ladder is only here to ride out the ordinary case: one refused or dropped request.</para>
+    /// </summary>
+    private static readonly TimeSpan[] SubmitRetryBackoff =
+    [
+        TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(4), TimeSpan.FromSeconds(8)
+    ];
+
+    /// <summary>
+    /// Sends the attempt's final status, retrying, and clears the pending marker only once Java has
+    /// actually taken it.
+    ///
+    /// <para>This used to be one attempt whose failure was a log line and nothing else, which made
+    /// a single dropped request indistinguishable from an exam that never ended -- the session sat
+    /// at "Đang làm" with no way for anything to notice.</para>
+    /// </summary>
     private async Task SubmitSessionStatusAsync(string status)
     {
-        if (_sessionState.ExamAttemptId == Guid.Empty)
+        var attemptId = _sessionState.ExamAttemptId;
+        if (attemptId == Guid.Empty)
         {
             return;
         }
-        try
+
+        for (var attempt = 0; ; attempt++)
         {
-            await _examApi.UpdateSessionStatusAsync(
-                _sessionState.ExamAttemptId,
-                status,
-                CancellationToken.None);
-        }
-        catch (Exception ex)
-        {
-            LocalFileLogger.Error(
-                "exam_flow",
-                "session_status_submit_failed",
-                ex,
-                new { _sessionState.ExamAttemptId, status });
+            try
+            {
+                await _examApi.UpdateSessionStatusAsync(attemptId, status, CancellationToken.None);
+                // Only now: the marker is the one thing standing between a lost PATCH and a session
+                // stuck in progress, so it outlives every failure and dies on exactly one success.
+                _pendingSubmissions.Clear(attemptId);
+                return;
+            }
+            catch (Exception ex)
+            {
+                var lastAttempt = attempt >= SubmitRetryBackoff.Length;
+                LocalFileLogger.Error(
+                    "exam_flow",
+                    "session_status_submit_failed",
+                    ex,
+                    new { attemptId, status, attempt = attempt + 1, willRetry = !lastAttempt });
+
+                if (lastAttempt)
+                {
+                    // Left for PendingSubmissionStore.ReplayAsync on a later launch. Not fatal here:
+                    // the exam is over either way, and holding the student on the saving overlay any
+                    // longer buys nothing that the next launch cannot do for free.
+                    return;
+                }
+
+                try
+                {
+                    await Task.Delay(SubmitRetryBackoff[attempt]);
+                }
+                catch (Exception delayException)
+                {
+                    LocalFileLogger.Error("exam_flow", "session_status_retry_delay_failed", delayException);
+                    return;
+                }
+            }
         }
     }
 
