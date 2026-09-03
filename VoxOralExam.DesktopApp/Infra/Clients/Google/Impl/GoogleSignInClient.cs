@@ -6,7 +6,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Web;
-using Microsoft.Extensions.Logging;
+using VoxOralExam.DesktopApp.Services;
 using VoxOralExam.DesktopApp.State;
 
 namespace VoxOralExam.DesktopApp.Infra.Clients.Google.Impl;
@@ -21,10 +21,14 @@ namespace VoxOralExam.DesktopApp.Infra.Clients.Google.Impl;
 /// student can see the real accounts.google.com address bar and padlock, which is the entire basis
 /// on which they are being asked to type a password. RFC 8252 says the same thing at greater length.</para>
 ///
-/// <para><b>Why PKCE and no client secret.</b> A desktop app cannot keep a secret -- anything shipped
-/// in the .exe is readable by anyone holding it -- so Google issues Desktop clients without one.
-/// PKCE replaces it: the verifier is generated per attempt and never leaves this process, so an
-/// attacker who intercepts the authorization code still cannot redeem it.</para>
+/// <para><b>Why PKCE, and why a client secret as well.</b> A desktop app cannot keep a secret --
+/// anything shipped in the .exe is readable by anyone holding it -- so the secret proves nothing on
+/// its own. PKCE is what actually secures this: the verifier is generated per attempt and never
+/// leaves the process, so an attacker who intercepts the authorization code still cannot redeem it.
+/// Google nonetheless issues Desktop app clients a secret and its token endpoint rejects the
+/// exchange without one (the parameter is only truly optional for Android/iOS/Chrome client types),
+/// so <see cref="AppSettings.GoogleClientSecret"/> is sent too. Treat it as a required config value
+/// rather than as a credential.</para>
 ///
 /// <para><b>Loopback, not a custom URI scheme.</b> A custom scheme is a machine-wide registration any
 /// other program can claim; loopback needs no registration, cannot be hijacked by another user's
@@ -61,13 +65,11 @@ public sealed class GoogleSignInClient : IGoogleSignInClient
 
     private readonly AppSettings _settings;
     private readonly HttpClient _httpClient;
-    private readonly ILogger<GoogleSignInClient> _logger;
 
-    public GoogleSignInClient(AppSettings settings, HttpClient httpClient, ILogger<GoogleSignInClient> logger)
+    public GoogleSignInClient(AppSettings settings, HttpClient httpClient)
     {
         _settings = settings;
         _httpClient = httpClient;
-        _logger = logger;
     }
 
     public async Task<string?> AcquireIdTokenAsync(CancellationToken cancellationToken = default)
@@ -84,7 +86,7 @@ public sealed class GoogleSignInClient : IGoogleSignInClient
         var state = CreateRandomToken();
 
         using var listener = new HttpListener();
-        var redirectUri = StartListener(listener, _logger);
+        var redirectUri = StartListener(listener);
 
         var authorizationUrl = BuildAuthorizationUrl(clientId, redirectUri, codeVerifier, state);
         OpenInBrowser(authorizationUrl);
@@ -113,7 +115,7 @@ public sealed class GoogleSignInClient : IGoogleSignInClient
     /// exactly the locked-down school machines this app is built to run on, with an error message
     /// pointing at nothing.</para>
     /// </summary>
-    private static string StartListener(HttpListener listener, ILogger logger)
+    private static string StartListener(HttpListener listener)
     {
         // HttpListener has no "give me the port you got" API, so the port is claimed with a plain
         // socket first and then handed over. The socket is closed before the listener binds; the
@@ -133,8 +135,7 @@ public sealed class GoogleSignInClient : IGoogleSignInClient
             }
             catch (HttpListenerException e)
             {
-                logger.LogWarning(
-                    "Không mở được listener tại {Prefix} ({Message}), thử địa chỉ khác", candidate, e.Message);
+                LocalFileLogger.Error("login", "google_listener_bind_failed", e, new { prefix = candidate });
             }
         }
 
@@ -180,7 +181,7 @@ public sealed class GoogleSignInClient : IGoogleSignInClient
         }
         catch (Exception e)
         {
-            _logger.LogError(e, "Không mở được trình duyệt cho đăng nhập Google");
+            LocalFileLogger.Error("login", "google_browser_open_failed", e);
             throw new InvalidOperationException(
                 "Không mở được trình duyệt để đăng nhập Google. Hãy thử đăng nhập bằng mật khẩu.", e);
         }
@@ -213,7 +214,7 @@ public sealed class GoogleSignInClient : IGoogleSignInClient
             var completed = await Task.WhenAny(contextTask, Task.Delay(Timeout.Infinite, timeout.Token));
             if (completed != contextTask)
             {
-                _logger.LogInformation("Đăng nhập Google bị huỷ hoặc quá hạn chờ trình duyệt");
+                LocalFileLogger.Info("login", "google_browser_timeout");
                 return null;
             }
             context = await contextTask;
@@ -235,13 +236,13 @@ public sealed class GoogleSignInClient : IGoogleSignInClient
         if (error is not null)
         {
             // access_denied is the user pressing Cancel -- a decision, not a fault.
-            _logger.LogInformation("Người dùng không hoàn tất đăng nhập Google: {Error}", error);
+            LocalFileLogger.Info("login", "google_consent_declined", new { error });
             return null;
         }
 
         if (!FixedTimeEquals(state, expectedState))
         {
-            _logger.LogWarning("Tham số state của Google không khớp -- bỏ qua phản hồi này");
+            LocalFileLogger.Info("login", "google_state_mismatch");
             return null;
         }
 
@@ -272,32 +273,47 @@ public sealed class GoogleSignInClient : IGoogleSignInClient
         string redirectUri,
         CancellationToken cancellationToken)
     {
-        // No client_secret: Desktop clients are issued without one, and code_verifier is what proves
-        // this exchange comes from the same process that started the flow.
-        using var content = new FormUrlEncodedContent(new Dictionary<string, string>
+        var parameters = new Dictionary<string, string>
         {
             ["client_id"] = clientId,
             ["code"] = code,
             ["code_verifier"] = codeVerifier,
             ["grant_type"] = "authorization_code",
             ["redirect_uri"] = redirectUri
-        });
+        };
 
+        // Sent despite PKCE. Google's token endpoint treats client_secret as optional only for
+        // Android/iOS/Chrome client types -- a Desktop app client is issued one and is rejected
+        // without it. Omitting it fails at THIS step, after the browser has already succeeded, which
+        // makes it look like a bug in the exchange rather than a missing setting.
+        //
+        // Still conditional: a client type that genuinely has no secret must not send an empty one,
+        // because Google reads a present-but-blank client_secret as a wrong secret.
+        if (!string.IsNullOrWhiteSpace(_settings.GoogleClientSecret))
+        {
+            parameters["client_secret"] = _settings.GoogleClientSecret;
+        }
+
+        using var content = new FormUrlEncodedContent(parameters);
         using var response = await _httpClient.PostAsync(TokenEndpoint, content, cancellationToken);
         var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
         if (!response.IsSuccessStatusCode)
         {
-            _logger.LogError("Đổi mã Google thất bại ({Status}): {Body}", (int)response.StatusCode, body);
-            throw new InvalidOperationException("Google từ chối yêu cầu đăng nhập. Vui lòng thử lại.");
+            // Google's reason goes in the MESSAGE, not just a log line. Everything here fails after
+            // the browser succeeded, so "Google từ chối" on its own tells the person nothing and
+            // tells whoever reads the log even less -- every distinct misconfiguration produces that
+            // one identical sentence. invalid_client, redirect_uri_mismatch and invalid_grant each
+            // need a completely different fix, and Google already names which one it is.
+            throw new InvalidOperationException(DescribeTokenError(response.StatusCode, body));
         }
 
         var token = JsonSerializer.Deserialize<GoogleTokenResponse>(body, JsonOptions);
         if (string.IsNullOrWhiteSpace(token?.IdToken))
         {
             // Almost always a missing openid scope: Google answers 200 with an access token only.
-            _logger.LogError("Phản hồi token của Google không có id_token");
-            throw new InvalidOperationException("Google không trả về thông tin định danh. Vui lòng thử lại.");
+            throw new InvalidOperationException(
+                "Google không trả về id_token (thường do thiếu scope 'openid'). Vui lòng thử lại.");
         }
 
         return token.IdToken;
@@ -325,10 +341,57 @@ public sealed class GoogleSignInClient : IGoogleSignInClient
             Encoding.UTF8.GetBytes(left), Encoding.UTF8.GetBytes(right));
 
     /// <summary>
+    /// Turns Google's error payload into a sentence that names the actual fix.
+    ///
+    /// <para>The three that actually happen, and what each one means here:</para>
+    /// <list type="bullet">
+    /// <item><c>invalid_client</c> -- GOOGLE_CLIENT_SECRET missing or wrong for this client id;</item>
+    /// <item><c>redirect_uri_mismatch</c> -- the client is a Web application type, which requires
+    /// every loopback address to be pre-registered. Desktop app clients accept any 127.0.0.1 port;</item>
+    /// <item><c>invalid_grant</c> -- the code was already redeemed or expired; just sign in again.</item>
+    /// </list>
+    /// </summary>
+    private static string DescribeTokenError(System.Net.HttpStatusCode status, string body)
+    {
+        string? error = null;
+        string? description = null;
+        try
+        {
+            var payload = JsonSerializer.Deserialize<GoogleErrorResponse>(body, JsonOptions);
+            error = payload?.Error;
+            description = payload?.ErrorDescription;
+        }
+        catch (JsonException)
+        {
+            // Not JSON (a proxy error page, say). The raw body below is then the only clue there is.
+        }
+
+        var hint = error switch
+        {
+            "invalid_client" =>
+                " Kiểm tra GOOGLE_CLIENT_SECRET trong .env: client loại 'Desktop app' bắt buộc phải có.",
+            "redirect_uri_mismatch" =>
+                " Client này nhiều khả năng là loại 'Web application'. Hãy tạo client loại 'Desktop app'.",
+            "invalid_grant" => " Mã đăng nhập đã hết hạn hoặc đã dùng. Hãy thử đăng nhập lại.",
+            _ => string.Empty
+        };
+
+        var detail = error is null
+            ? (string.IsNullOrWhiteSpace(body) ? "(không có nội dung)" : body)
+            : $"{error}{(description is null ? "" : $" - {description}")}";
+
+        return $"Google từ chối yêu cầu đăng nhập ({(int)status}): {detail}.{hint}";
+    }
+
+    /// <summary>
     /// The attribute is required and PropertyNameCaseInsensitive does not cover it: that option
     /// ignores CASE, not the underscore, so "id_token" would never bind to IdToken and this would
     /// deserialize to null on a perfectly good response.
     /// </summary>
     private sealed record GoogleTokenResponse(
         [property: System.Text.Json.Serialization.JsonPropertyName("id_token")] string? IdToken);
+
+    private sealed record GoogleErrorResponse(
+        [property: System.Text.Json.Serialization.JsonPropertyName("error")] string? Error,
+        [property: System.Text.Json.Serialization.JsonPropertyName("error_description")] string? ErrorDescription);
 }

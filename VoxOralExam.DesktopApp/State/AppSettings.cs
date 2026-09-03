@@ -170,13 +170,26 @@ public class AppSettings
     /// backend uses for the browser redirect flow: Web clients require a client secret, which a
     /// shipped .exe cannot hold, and reject the loopback redirect this flow depends on.</para>
     ///
-    /// <para>Not a secret -- desktop clients are issued without one, and PKCE is what proves the
-    /// token exchange came from this process. It still has to be added to the backend's
-    /// GOOGLE_ALLOWED_AUDIENCES, or every exchange is rejected as "not for this application".</para>
+    /// <para>Has to be added to the backend's GOOGLE_ALLOWED_AUDIENCES too, or every exchange is
+    /// rejected as "not for this application".</para>
     ///
     /// <para>Empty disables the button rather than breaking it; password login is unaffected.</para>
     /// </summary>
     public string GoogleClientId { get; set; } = "";
+
+    /// <summary>
+    /// Client secret paired with <see cref="GoogleClientId"/>, sent on the code-for-token exchange.
+    ///
+    /// <para>Required despite PKCE. Google issues a secret for <b>Desktop app</b> clients and its
+    /// token endpoint expects it; the parameter is only genuinely optional for Android, iOS and
+    /// Chrome client types. Leaving it out produces a 400 from oauth2.googleapis.com <i>after</i> the
+    /// browser half has already succeeded, which reads like a code problem rather than a config one.</para>
+    ///
+    /// <para>Not a real secret in the usual sense -- it ships inside a .exe anyone can read, which is
+    /// exactly why PKCE, not this value, is what actually proves the exchange came from this process.
+    /// Treat it as a required config string, not as a credential worth protecting.</para>
+    /// </summary>
+    public string GoogleClientSecret { get; set; } = "";
 
     // Length of the OTP the proctor's screen shows and the student types.
     // Matches Java's GetExamScheduleOtpUseCase.OTP_LENGTH.
