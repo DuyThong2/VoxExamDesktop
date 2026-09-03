@@ -7,6 +7,12 @@ public interface IAuthApiService
     Task<AuthenticatedUserContext> LoginAsync(string login, string password, LoginDeviceContext deviceContext, CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Exchanges a Google ID token, obtained natively via IGoogleSignInClient, for a vox session.
+    /// Returns the same shape as <see cref="LoginAsync"/> -- nothing downstream distinguishes them.
+    /// </summary>
+    Task<AuthenticatedUserContext> LoginWithGoogleAsync(string idToken, LoginDeviceContext deviceContext, CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Exchanges the rotating refresh cookie for a new access token. Callers should go through
     /// AuthSessionManager rather than calling this directly -- refresh tokens are single-use and a
     /// second concurrent call revokes the device session.

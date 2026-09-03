@@ -7,6 +7,8 @@ using VoxOralExam.Core.Interfaces;
 using VoxOralExam.DesktopApp.Infra.Clients.AIService;
 using VoxOralExam.DesktopApp.Infra.Clients.DomainService;
 using VoxOralExam.DesktopApp.Infra.Clients.DomainService.Impl;
+using VoxOralExam.DesktopApp.Infra.Clients.Google;
+using VoxOralExam.DesktopApp.Infra.Clients.Google.Impl;
 using VoxOralExam.DesktopApp.Infra.Devices;
 using VoxOralExam.DesktopApp.Infra.Devices.Impl;
 using VoxOralExam.DesktopApp.Infra.Clients.StreamService;
@@ -356,6 +358,15 @@ public partial class App : Application
         // IHttpClientFactory recycles its handlers on a timer -- so a container's contents are not
         // something an exam lasting hours can depend on still holding.
         .ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler { UseCookies = false });
+
+        // Talks to accounts.google.com / oauth2.googleapis.com, NOT to vox -- hence no BaseAddress,
+        // and deliberately a separate client from IAuthApiService's: that one is configured with
+        // JavaBaseUrl and UseCookies=false for vox's refresh cookie handling, neither of which has
+        // anything to do with Google's token endpoint.
+        services.AddHttpClient<IGoogleSignInClient, GoogleSignInClient>(client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(30);
+        });
 
         // Singleton because the refresh gate inside it only serialises callers that share an
         // instance, and vox revokes the whole device session if two refreshes race (see

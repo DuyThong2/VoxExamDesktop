@@ -163,6 +163,21 @@ public class AppSettings
     public string TurnCredential { get; set; } = "";
     public string LoginPlatform { get; set; } = "DESKTOP";
 
+    /// <summary>
+    /// Google OAuth client id used by the "Đăng nhập bằng Google" button (GoogleSignInClient).
+    ///
+    /// <para>Must be a <b>Desktop app</b> client from the Google Cloud console, not the Web one the
+    /// backend uses for the browser redirect flow: Web clients require a client secret, which a
+    /// shipped .exe cannot hold, and reject the loopback redirect this flow depends on.</para>
+    ///
+    /// <para>Not a secret -- desktop clients are issued without one, and PKCE is what proves the
+    /// token exchange came from this process. It still has to be added to the backend's
+    /// GOOGLE_ALLOWED_AUDIENCES, or every exchange is rejected as "not for this application".</para>
+    ///
+    /// <para>Empty disables the button rather than breaking it; password login is unaffected.</para>
+    /// </summary>
+    public string GoogleClientId { get; set; } = "";
+
     // Length of the OTP the proctor's screen shows and the student types.
     // Matches Java's GetExamScheduleOtpUseCase.OTP_LENGTH.
     public int OtpLength { get; set; } = 8;

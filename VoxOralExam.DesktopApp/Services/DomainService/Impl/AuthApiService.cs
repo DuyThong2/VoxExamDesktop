@@ -66,6 +66,61 @@ public class AuthApiService : IAuthApiService
         };
 
         using var response = await _httpClient.PostAsJsonAsync("/api/v1/auth/login", request, cancellationToken);
+        return await BuildAuthenticatedUserAsync(response, login, deviceContext, cancellationToken);
+    }
+
+    /// <summary>
+    /// Exchanges a Google ID token, obtained natively by <c>GoogleSignInClient</c>, for a vox session.
+    ///
+    /// <para>A different endpoint from the browser flow the web client uses, and deliberately so:
+    /// that one ends in a redirect to a single configured web address, which a desktop app has
+    /// nowhere to receive. The server-side half is AuthController.googleTokenLogin.</para>
+    ///
+    /// <para>The response is shaped exactly like a password login's -- same cookies, same body -- so
+    /// everything downstream of here, AuthSessionManager included, cannot tell the two apart. That is
+    /// the point: sign-in method is not something the rest of the app should have an opinion about.</para>
+    /// </summary>
+    /// <param name="idToken">Raw ID token from Google. Verified server-side, never trusted here.</param>
+    public async Task<AuthenticatedUserContext> LoginWithGoogleAsync(
+        string idToken,
+        LoginDeviceContext deviceContext,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new GoogleTokenLoginRequestDto
+        {
+            IdToken = idToken,
+            Device = new LoginDeviceRequestDto
+            {
+                DeviceId = deviceContext.DeviceId,
+                DeviceName = deviceContext.DeviceName,
+                Platform = deviceContext.Platform
+            }
+        };
+
+        using var response = await _httpClient.PostAsJsonAsync(
+            "/api/v1/auth/oauth2/google/token", request, cancellationToken);
+        // No local login name to fall back on: with Google the email only exists in the token vox
+        // issues back, which is exactly what the JWT fallback below reads.
+        return await BuildAuthenticatedUserAsync(response, fallbackLogin: null, deviceContext, cancellationToken);
+    }
+
+    /// <summary>
+    /// Turns a successful auth response into the session the rest of the app runs on.
+    ///
+    /// <para>Shared by password and Google login rather than duplicated: the cookie reading below is
+    /// subtle enough that two copies would drift, and the copy that drifts is the one that silently
+    /// stops being able to refresh -- which does not surface until an exam outlasts an access token.</para>
+    /// </summary>
+    /// <param name="fallbackLogin">
+    /// What to call the user if the access token carries no email claim. The password flow has the
+    /// typed login name; the Google flow has nothing, and null is the honest answer there.
+    /// </param>
+    private async Task<AuthenticatedUserContext> BuildAuthenticatedUserAsync(
+        HttpResponseMessage response,
+        string? fallbackLogin,
+        LoginDeviceContext deviceContext,
+        CancellationToken cancellationToken)
+    {
         var responseJson = await response.Content.ReadAsStringAsync(cancellationToken);
         // Read BEFORE the status check bails: on a failed login there is nothing to keep, but on a
         // successful one these are the only place the refresh and CSRF tokens ever appear.
@@ -90,8 +145,11 @@ public class AuthApiService : IAuthApiService
         var userId = string.IsNullOrWhiteSpace(tokenPayload.UserId)
             ? tokenPayload.Subject
             : tokenPayload.UserId;
+        // vox always puts the email in the access token, so the fallback is only reached if that ever
+        // changes. Empty rather than null keeps the non-nullable contract of AuthenticatedUserContext
+        // -- a blank display name is survivable, a NullReferenceException at the exam entry screen is not.
         var email = string.IsNullOrWhiteSpace(tokenPayload.Email)
-            ? login
+            ? fallbackLogin ?? string.Empty
             : tokenPayload.Email;
         var roles = loginResponse.Data.Roles.Count > 0
             ? loginResponse.Data.Roles

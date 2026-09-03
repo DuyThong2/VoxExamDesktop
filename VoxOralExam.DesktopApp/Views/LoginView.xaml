@@ -102,6 +102,74 @@
                             </Style>
                         </Button.Style>
                     </Button>
+
+    <!-- Ẩn hẳn khi chưa cấu hình GOOGLE_CLIENT_ID, thay vì hiện một nút luôn hỏng. Bản dựng trỏ
+                         vào môi trường chưa bật Google vẫn đăng nhập bằng mật khẩu bình thường.
+                         Xem LoginViewModel.IsGoogleSignInAvailable. -->
+                    <Grid Margin="0,18,0,0"
+                          Visibility="{Binding IsGoogleSignInAvailable, Converter={StaticResource BoolToVisibility}}">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+
+                        <Grid Grid.Row="0">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Border Grid.Column="0" Height="1" Background="#E5E7EB" VerticalAlignment="Center" />
+                            <TextBlock Grid.Column="1"
+                                       Text="hoặc"
+                                       FontSize="12"
+                                       Foreground="#6B7280"
+                                       Margin="10,0" />
+                            <Border Grid.Column="2" Height="1" Background="#E5E7EB" VerticalAlignment="Center" />
+                        </Grid>
+
+                        <Button Grid.Row="1"
+                                Content="Đăng nhập bằng Google"
+                                Command="{Binding GoogleLoginCommand}"
+                                FontSize="14"
+                                FontWeight="SemiBold"
+                                Padding="0,10"
+                                Margin="0,14,0,0"
+                                Cursor="Hand">
+                            <Button.Style>
+                                <Style TargetType="Button">
+                                    <Setter Property="Background" Value="White" />
+                                    <Setter Property="Foreground" Value="#1F2937" />
+                                    <Setter Property="BorderThickness" Value="0" />
+                                    <Setter Property="Template">
+                                        <Setter.Value>
+                                            <ControlTemplate TargetType="Button">
+                                                <Border Background="{TemplateBinding Background}"
+                                                        BorderBrush="#D1D5DB"
+                                                        BorderThickness="1"
+                                                        CornerRadius="6"
+                                                        Padding="{TemplateBinding Padding}">
+                                                    <ContentPresenter HorizontalAlignment="Center"
+                                                                      VerticalAlignment="Center" />
+                                                </Border>
+                                                <ControlTemplate.Triggers>
+                                                    <Trigger Property="IsMouseOver" Value="True">
+                                                        <Setter Property="Background" Value="#F9FAFB" />
+                                                    </Trigger>
+                                                    <Trigger Property="IsPressed" Value="True">
+                                                        <Setter Property="Background" Value="#F3F4F6" />
+                                                    </Trigger>
+                                                    <Trigger Property="IsEnabled" Value="False">
+                                                        <Setter Property="Foreground" Value="#9CA3AF" />
+                                                    </Trigger>
+                                                </ControlTemplate.Triggers>
+                                            </ControlTemplate>
+                                        </Setter.Value>
+                                    </Setter>
+                                </Style>
+                            </Button.Style>
+                        </Button>
+                    </Grid>
                 </StackPanel>
             </ScrollViewer>
         </Border>
